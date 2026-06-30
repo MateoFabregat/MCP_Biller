@@ -43,8 +43,6 @@ export interface ResumenResultado {
 
 /** Estado que indica que el CFE fue aceptado por DGI (cuenta "en firme"). */
 const ESTADO_ACEPTADO = /aceptado/i;
-const ESTADO_RECHAZADO = /rechaz/i;
-const ESTADO_PENDIENTE = /pendiente/i;
 const ESTADO_SIN_DATO = "(sin estado)";
 
 export interface ResumenOptions {
@@ -131,13 +129,9 @@ export function resumirFacturacion(
   // Avisamos explícitamente cuántos NO están aceptados para que el usuario sepa
   // que el total puede no coincidir con lo realmente válido ante DGI.
   let noAceptados = 0;
-  let rechazados = 0;
-  let pendientes = 0;
   for (const [estado, n] of Object.entries(conteo_por_estado)) {
     if (estado === ESTADO_SIN_DATO || ESTADO_ACEPTADO.test(estado)) continue;
     noAceptados += n;
-    if (ESTADO_RECHAZADO.test(estado)) rechazados += n;
-    else if (ESTADO_PENDIENTE.test(estado)) pendientes += n;
   }
   if (noAceptados > 0) {
     const detalle = Object.entries(conteo_por_estado)

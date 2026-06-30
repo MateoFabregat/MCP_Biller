@@ -57,6 +57,9 @@ export function filterEmitidos(
 
   if (filters.emitidas_desde || filters.emitidas_hasta) {
     const antes = list.length;
+    // Comprobantes sin fecha_emision no se pueden ubicar en el período: se
+    // excluyen, pero lo avisamos explícitamente para no confundir al usuario.
+    const sinFechaEmision = list.filter((c) => !c.fecha_emision).length;
     list = list.filter((c) =>
       dentroDeFechaEmision(c.fecha_emision, filters.emitidas_desde, filters.emitidas_hasta),
     );
@@ -65,6 +68,12 @@ export function filterEmitidos(
         `de ${antes} comprobantes quedaron ${list.length}. Nota: 'desde'/'hasta' de la API filtran por fecha de CREACIÓN; ` +
         "este filtro adicional usa la fecha fiscal (fecha_emision) sobre lo ya recibido.",
     );
+    if (sinFechaEmision > 0) {
+      warnings.push(
+        `${sinFechaEmision} comprobante(s) se excluyeron del filtro por NO tener fecha_emision ` +
+          "(no se pueden ubicar en el período). Quitá el filtro emitidas_desde/emitidas_hasta para verlos.",
+      );
+    }
   }
 
   if (filters.cliente_rut) {
