@@ -8,6 +8,7 @@
 // =============================================================================
 
 import type { BillerConfig } from "../config.js";
+import { logger } from "../logger.js";
 import { BillerApiError, BillerIdempotencyError } from "../utils/errors.js";
 import type { RateLimitClass } from "../utils/rateLimit.js";
 import type { AuditEntry, AuditSink } from "./audit.js";
@@ -15,7 +16,7 @@ import { payloadHash } from "./confirm.js";
 import { evaluateWriteGate } from "./gate.js";
 import { BillerProductionBlockedError, BillerWriteDisabledError } from "../utils/errors.js";
 import type { IdempotencyStore } from "./idempotency.js";
-import type { BillerWriteClient } from "./writeClient.js";
+import type { PostResult, BillerWriteClient } from "./writeClient.js";
 
 export interface WriteExecContext {
   config: BillerConfig;
@@ -78,9 +79,10 @@ export async function executeWrite(
     throw new BillerIdempotencyError(input.idempotencyKey);
   }
 
-  // 3. POST
+  // 3. POST — solo el POST queda en el catch que relanza
+  let postResult: PostResult;
   try {
-    const result = await c.writeClient.post({
+    postResult = await c.writeClient.post({
       endpoint: input.endpoint,
       body: input.payload,
       query: input.query,
@@ -88,21 +90,6 @@ export async function executeWrite(
       allowProduction: input.allowProduction,
       rateLimitClass: input.rateLimitClass,
     });
-
-    c.idempotency.markUsed(input.idempotencyKey);
-
-    const audit = c.auditor.record({
-      tool: input.tool,
-      endpoint: input.endpoint,
-      environment,
-      phase: "executed",
-      payloadSha256,
-      idempotencyKey: input.idempotencyKey,
-      httpStatus: result.status,
-      outcome: "ok",
-    });
-
-    return { status: result.status, data: result.data, audit, idempotency_key: input.idempotencyKey };
   } catch (err) {
     c.auditor.record({
       tool: input.tool,
@@ -116,4 +103,39 @@ export async function executeWrite(
     });
     throw err;
   }
+
+  // POST exitoso — markUsed y audit no pueden hacer fallar la operación
+  c.idempotency.markUsed(input.idempotencyKey);
+
+  let audit: AuditEntry;
+  try {
+    audit = c.auditor.record({
+      tool: input.tool,
+      endpoint: input.endpoint,
+      environment,
+      phase: "executed",
+      payloadSha256,
+      idempotencyKey: input.idempotencyKey,
+      httpStatus: postResult.status,
+      outcome: "ok",
+    });
+  } catch (auditErr) {
+    logger.warn("No se pudo registrar el audit post-POST.", {
+      err: auditErr instanceof Error ? auditErr.message : String(auditErr),
+    });
+    audit = {
+      audit_id: "unknown",
+      ts: new Date().toISOString(),
+      tool: input.tool,
+      endpoint: input.endpoint,
+      environment,
+      phase: "executed",
+      payload_sha256: payloadSha256,
+      idempotency_key: input.idempotencyKey,
+      http_status: postResult.status,
+      outcome: "ok",
+    };
+  }
+
+  return { status: postResult.status, data: postResult.data, audit, idempotency_key: input.idempotencyKey };
 }

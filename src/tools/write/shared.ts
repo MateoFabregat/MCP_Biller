@@ -17,6 +17,20 @@ import { evaluateWriteGate } from "../../write/gate.js";
 import { generateIdempotencyKey } from "../../write/idempotency.js";
 import { errorToolResult, jsonResult, type ToolContext, type ToolResult } from "../shared.js";
 
+const PII_FIELDS = new Set([
+  "rut", "documento", "tipo_documento", "razon_social", "nombre_fantasia",
+  "email", "telefono", "direccion", "domicilio",
+]);
+
+function redactPayloadPreview(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(redactPayloadPreview);
+  const obj = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(obj).map(([k, v]) => [k, PII_FIELDS.has(k) ? "[REDACTED]" : redactPayloadPreview(v)]),
+  );
+}
+
 /** Campos de control comunes a todas las tools de escritura. */
 export const writeControlShape = {
   confirm: z
@@ -108,6 +122,11 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
           "⚠️ Ambiente PRODUCCIÓN: ejecutar este POST emite/anula un comprobante REAL ante DGI.",
         );
       }
+      if (p.idempotencyKey !== undefined) {
+        warnings.push(
+          "La protección de idempotencia es in-process y se resetea al reiniciar el servidor MCP.",
+        );
+      }
       return jsonResult({
         mode: "dry_run",
         tool,
@@ -120,13 +139,14 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
           reason: gate.reason ?? null,
           requires_allow_production: environment === "production",
         },
-        payload_preview: payload,
+        payload_preview: redactPayloadPreview(payload),
         query_preview: p.query ?? null,
         confirmation_token: token,
         idempotency_key: p.idempotencyKey ?? null,
         next_step:
           `Para EJECUTAR, volvé a llamar ${tool} con confirm=true y confirmation_token="${token}"` +
-          (environment === "production" ? " y allow_production=true." : "."),
+          (environment === "production" ? " y allow_production=true." : ".") +
+          " Los campos sensibles están redactados en este preview.",
         no_network_call: true,
         warnings,
       });

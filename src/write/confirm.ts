@@ -11,8 +11,12 @@
 
 import { createHash } from "node:crypto";
 
-/** Serialización estable (claves ordenadas) para un hash reproducible. */
+/** Serialización estable (claves ordenadas) para un hash reproducible.
+ * undefined y NaN producen "null" en JSON nativo, colisionando entre sí.
+ * Los normalizamos explícitamente para garantizar tokens distintos. */
 export function stableStringify(value: unknown): string {
+  if (value === undefined) return '"__undefined__"';
+  if (typeof value === "number" && Number.isNaN(value)) return '"__NaN__"';
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value) ?? "null";
   }

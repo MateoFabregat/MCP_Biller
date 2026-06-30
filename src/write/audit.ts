@@ -6,8 +6,9 @@
 // y, si se configura BILLER_AUDIT_LOG_PATH, también a un archivo append-only.
 // =============================================================================
 
-import { appendFileSync } from "node:fs";
+import { appendFile } from "node:fs";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { logger } from "../logger.js";
 
 export type AuditPhase = "dry_run" | "executed" | "blocked" | "error";
@@ -41,7 +42,23 @@ export interface AuditSink {
 }
 
 export class Auditor implements AuditSink {
-  constructor(private readonly filePath?: string) {}
+  private readonly filePath?: string;
+
+  constructor(rawFilePath?: string) {
+    if (rawFilePath) {
+      const resolved = path.resolve(rawFilePath);
+      const base = path.resolve(".");
+      if (resolved.startsWith(base + path.sep) || resolved === base) {
+        this.filePath = resolved;
+      } else {
+        logger.warn("BILLER_AUDIT_LOG_PATH está fuera del directorio base permitido; el audit de archivo queda deshabilitado.", {
+          path: rawFilePath,
+          resolved,
+          base,
+        });
+      }
+    }
+  }
 
   record(input: AuditInput): AuditEntry {
     const entry: AuditEntry = {
@@ -61,14 +78,14 @@ export class Auditor implements AuditSink {
     logger.info("biller.audit", { audit: entry });
 
     if (this.filePath) {
-      try {
-        appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, "utf8");
-      } catch (err) {
-        logger.warn("No se pudo escribir el audit log en archivo.", {
-          path: this.filePath,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+      appendFile(this.filePath, `${JSON.stringify(entry)}\n`, "utf8", (err) => {
+        if (err) {
+          logger.warn("No se pudo escribir el audit log en archivo.", {
+            path: this.filePath,
+            message: err.message,
+          });
+        }
+      });
     }
 
     return entry;

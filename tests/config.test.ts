@@ -5,7 +5,13 @@ import { BillerConfigError } from "../src/utils/errors.js";
 describe("config", () => {
   // Requisito #1
   it("loadConfig lanza si falta BILLER_API_BASE_URL", () => {
-    expect(() => loadConfig({ BILLER_API_TOKEN: "x" })).toThrow(BillerConfigError);
+    expect(() => loadConfig({ BILLER_API_TOKEN: "validtoken123" })).toThrow(BillerConfigError);
+  });
+
+  it("loadConfig lanza si BILLER_API_TOKEN tiene menos de 8 caracteres", () => {
+    expect(() =>
+      loadConfig({ BILLER_API_BASE_URL: "https://test.biller.uy", BILLER_API_TOKEN: "short" }),
+    ).toThrow(BillerConfigError);
   });
 
   it("loadConfig lanza si falta BILLER_API_TOKEN", () => {
@@ -17,17 +23,17 @@ describe("config", () => {
   it("loadConfig normaliza la base URL (sin barra final) y aplica defaults", () => {
     const c = loadConfig({
       BILLER_API_BASE_URL: "https://test.biller.uy/",
-      BILLER_API_TOKEN: "tok",
+      BILLER_API_TOKEN: "tok-12345",
     });
     expect(c.apiBaseUrl).toBe("https://test.biller.uy");
     expect(c.timeoutMs).toBe(30_000);
-    expect(c.apiToken).toBe("tok");
+    expect(c.apiToken).toBe("tok-12345");
   });
 
   it("loadConfig acepta opcionales y timeout custom (con clamp)", () => {
     const c = loadConfig({
       BILLER_API_BASE_URL: "https://biller.uy",
-      BILLER_API_TOKEN: "tok",
+      BILLER_API_TOKEN: "tok-12345",
       BILLER_DEFAULT_EMPRESA_RUT: "210475730011",
       BILLER_DEFAULT_SUCURSAL_ID: "7",
       BILLER_TIMEOUT_MS: "5000",
@@ -57,7 +63,7 @@ describe("config", () => {
   });
 
   describe("BILLER_CAPABILITY_MODE", () => {
-    const base = { BILLER_API_BASE_URL: "https://test.biller.uy", BILLER_API_TOKEN: "tok" };
+    const base = { BILLER_API_BASE_URL: "https://test.biller.uy", BILLER_API_TOKEN: "tok-12345" };
 
     it("default es read_only cuando la variable no está seteada", () => {
       const c = loadConfig(base);

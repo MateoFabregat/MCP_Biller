@@ -122,7 +122,11 @@ export function loadConfig(env: Env = process.env): BillerConfig {
   if (!baseUrlRaw) missing.push("BILLER_API_BASE_URL");
 
   const token = trimOrUndefined(env.BILLER_API_TOKEN);
-  if (!token) missing.push("BILLER_API_TOKEN");
+  if (!token) {
+    missing.push("BILLER_API_TOKEN");
+  } else if (token.length < 8) {
+    missing.push("BILLER_API_TOKEN debe tener al menos 8 caracteres");
+  }
 
   if (missing.length > 0) {
     throw new BillerConfigError(
