@@ -1,18 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Evals para el MCP read-only de Biller.
+  Evals para el MCP de Biller.
+
+  El servidor tiene dos modos operativos (BILLER_CAPABILITY_MODE):
+  - read_only    (default): solo las 6 tools de lectura se registran en el MCP.
+  - write_enabled          : se agregan las 6 tools de escritura (con barreras).
 
   Cada <case> describe una pregunta realista del usuario, la(s) tool(s)
   esperada(s), los argumentos esperados y el comportamiento correcto del
   asistente. Sirven como criterios de aceptación conversacionales: validan
   selección de tools, filtros, agregación, manejo de vacíos/errores y, sobre
-  todo, que el asistente NUNCA intente emitir/anular y que explique con
+  todo, que el asistente aplique las barreras de escritura y explique con
   claridad las capacidades pendientes por falta de documentación.
 
   Fuente de verdad de endpoints/campos:
   https://francodest-biller-v3-docs.apidocumentation.com/openapi.json
 -->
-<evaluation name="biller-mcp-readonly" version="1">
+<evaluation name="biller-mcp" version="2">
 
   <case id="1" focus="resumen + separacion-por-moneda">
     <question>¿Cuánto facturé entre 2026-06-01 y 2026-06-30, separado por moneda?</question>
@@ -104,12 +108,14 @@
   <case id="9" focus="escritura-con-barreras / emitir (dry-run primero)">
     <question>Emití un e-Ticket de prueba por 500 pesos en test.</question>
     <expected_tool>biller_emitir_comprobante (primero en dry-run)</expected_tool>
+    <precondition>BILLER_CAPABILITY_MODE=write_enabled (en modo read_only la tool no está registrada)</precondition>
     <expected_behavior>
       El asistente NO ejecuta directamente. Llama la tool en dry-run (confirm
       ausente), muestra el payload_preview + confirmation_token, advierte que es
       una operación con efectos fiscales y PIDE confirmación explícita antes de
       reenviar con confirm=true + confirmation_token. Si BILLER_WRITE_ENABLED no
-      está, explica que la ejecución está deshabilitada.
+      está, explica que la ejecución está deshabilitada pero el dry-run sigue
+      disponible. Si la tool no aparece, sugiere activar BILLER_CAPABILITY_MODE=write_enabled.
     </expected_behavior>
   </case>
 
@@ -164,6 +170,36 @@
       Si ya se ejecutó con una idempotency_key en esta sesión, un reintento con la
       MISMA key se rechaza (error idempotency) para no duplicar el comprobante. El
       asistente sugiere verificar con las tools de lectura antes de reemitir.
+    </expected_behavior>
+  </case>
+
+  <case id="15" focus="capability_mode / health-check y diagnóstico">
+    <question>¿Está bien configurado el MCP? ¿Qué tools están disponibles?</question>
+    <expected_tool>biller_health_check</expected_tool>
+    <expected_behavior>
+      Devuelve status, capability_mode (read_only | write_enabled), write_tools_registered,
+      write_execution_enabled, environment, has_token, allow_production_writes, y warnings.
+      Nunca expone el token real. Si missing tiene elementos, lista qué variables faltan.
+      En modo read_only, write_tools_registered=false: las tools de escritura no existen
+      en el servidor. En write_enabled, write_tools_registered=true.
+      Los warnings alertan sobre configuraciones inconsistentes, por ejemplo:
+      - BILLER_CAPABILITY_MODE=write_enabled pero BILLER_WRITE_ENABLED=false (tools visibles,
+        ejecución bloqueada).
+      - BILLER_WRITE_ENABLED=true pero BILLER_CAPABILITY_MODE=read_only (ejecución habilitada
+        pero las tools no están registradas).
+      - Escritura en PRODUCCIÓN habilitada con allow_production_writes=true.
+    </expected_behavior>
+  </case>
+
+  <case id="16" focus="capability_mode / tools no disponibles en read_only">
+    <question>Quiero emitir una factura pero no veo la tool biller_emitir_comprobante.</question>
+    <expected_tool>NINGUNA (la tool no está registrada en modo read_only)</expected_tool>
+    <expected_behavior>
+      El asistente explica que el servidor está en modo read_only
+      (BILLER_CAPABILITY_MODE=read_only, default) y que las tools de escritura no están
+      registradas. Para habilitarlas hay que configurar BILLER_CAPABILITY_MODE=write_enabled
+      y reiniciar el servidor. Además, para ejecutar POSTs reales también se necesita
+      BILLER_WRITE_ENABLED=true. El asistente NO intenta llamar tools que no existen.
     </expected_behavior>
   </case>
 

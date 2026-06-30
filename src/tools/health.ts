@@ -27,9 +27,9 @@ const inputShape = {
 
 const outputShape = {
   status: z.enum(["ok", "config_incompleta"]),
-  mode: z.enum(["read_only", "read_write"]),
-  read_only: z.boolean(),
-  write_enabled: z.boolean(),
+  capability_mode: z.enum(["read_only", "write_enabled"]),
+  write_tools_registered: z.boolean(),
+  write_execution_enabled: z.boolean(),
   environment: z.enum(["test", "production"]).nullable(),
   allow_production_writes: z.boolean(),
   server: z.object({ name: z.string(), version: z.string() }),
@@ -40,15 +40,54 @@ const outputShape = {
   audit_log_path: z.string().nullable(),
   timeout_ms: z.number(),
   log_level: z.string(),
+  warnings: z.array(z.string()),
   missing: z.array(z.string()),
 };
 
+function buildWarnings(c: ConfigInspection): string[] {
+  const warnings: string[] = [];
+  const writeToolsRegistered = c.capabilityMode === "write_enabled";
+
+  if (writeToolsRegistered && !c.writeEnabled) {
+    warnings.push(
+      "Las tools de escritura están registradas (BILLER_CAPABILITY_MODE=write_enabled) " +
+        "pero la ejecución de POST está bloqueada (BILLER_WRITE_ENABLED != true). " +
+        "El dry-run funciona; para ejecutar, activá BILLER_WRITE_ENABLED=true.",
+    );
+  }
+
+  if (!writeToolsRegistered && c.writeEnabled) {
+    warnings.push(
+      "BILLER_WRITE_ENABLED=true pero las tools de escritura NO están registradas " +
+        "(BILLER_CAPABILITY_MODE=read_only). Para exponerlas, configurá " +
+        "BILLER_CAPABILITY_MODE=write_enabled.",
+    );
+  }
+
+  if (writeToolsRegistered && c.writeEnabled && c.environment === "production" && !c.allowProductionWrites) {
+    warnings.push(
+      "Escritura habilitada apuntando a PRODUCCIÓN pero BILLER_ALLOW_PRODUCTION_WRITES=false. " +
+        "Las operaciones quedarán bloqueadas hasta activar ese flag.",
+    );
+  }
+
+  if (writeToolsRegistered && c.writeEnabled && c.allowProductionWrites && c.environment === "production") {
+    warnings.push(
+      "⚠️  ESCRITURA EN PRODUCCIÓN HABILITADA. Las operaciones tienen efectos fiscales " +
+        "reales e irreversibles ante DGI. Usá test.biller.uy para pruebas.",
+    );
+  }
+
+  return warnings;
+}
+
 export function buildHealthStructured(c: ConfigInspection): Record<string, unknown> {
+  const writeToolsRegistered = c.capabilityMode === "write_enabled";
   return {
     status: c.missing.length === 0 ? "ok" : "config_incompleta",
-    mode: c.writeEnabled ? "read_write" : "read_only",
-    read_only: !c.writeEnabled,
-    write_enabled: c.writeEnabled,
+    capability_mode: c.capabilityMode,
+    write_tools_registered: writeToolsRegistered,
+    write_execution_enabled: c.writeEnabled,
     environment: c.environment,
     allow_production_writes: c.allowProductionWrites,
     server: { name: SERVER_NAME, version: SERVER_VERSION },
@@ -59,6 +98,7 @@ export function buildHealthStructured(c: ConfigInspection): Record<string, unkno
     audit_log_path: c.auditLogPath,
     timeout_ms: c.timeoutMs,
     log_level: c.logLevel,
+    warnings: buildWarnings(c),
     missing: c.missing,
   };
 }
@@ -66,11 +106,14 @@ export function buildHealthStructured(c: ConfigInspection): Record<string, unkno
 function toMarkdown(s: Record<string, unknown>): string {
   const server = s.server as { name: string; version: string };
   const missing = s.missing as string[];
+  const warnings = s.warnings as string[];
   return [
     `# Biller MCP — health check`,
     ``,
     `- **status**: ${s.status}`,
-    `- **mode**: ${s.mode} (read_only=${s.read_only}, write_enabled=${s.write_enabled})`,
+    `- **capability_mode**: ${s.capability_mode}`,
+    `- **write_tools_registered**: ${s.write_tools_registered}`,
+    `- **write_execution_enabled**: ${s.write_execution_enabled}`,
     `- **environment**: ${s.environment ?? "(desconocido)"}`,
     `- **allow_production_writes**: ${s.allow_production_writes}`,
     `- **server**: ${server.name} v${server.version}`,
@@ -84,6 +127,9 @@ function toMarkdown(s: Record<string, unknown>): string {
     missing.length > 0
       ? `- **faltan variables**: ${missing.join(", ")}`
       : `- **config**: completa`,
+    ...(warnings.length > 0
+      ? [``, `## Warnings`, ...warnings.map((w) => `- ${w}`)]
+      : []),
   ].join("\n");
 }
 

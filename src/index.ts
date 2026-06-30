@@ -13,7 +13,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { inspectConfig } from "./config.js";
 import { SERVER_NAME, SERVER_VERSION } from "./constants.js";
 import { logger, setLogLevel, type LogLevel } from "./logger.js";
-import { createToolContext, registerAllTools, REGISTERED_TOOL_NAMES } from "./tools/register.js";
+import { createToolContext, getRegisteredToolNames, registerAllTools } from "./tools/register.js";
 
 function applyLogLevel(level: string): void {
   if (level === "error" || level === "warn" || level === "info" || level === "debug") {
@@ -35,14 +35,14 @@ async function main(): Promise<void> {
 
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
   const ctx = createToolContext();
-  registerAllTools(server, ctx);
+  registerAllTools(server, ctx, inspection.capabilityMode);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   logger.info("biller-mcp-server listo (stdio).", {
-    tools: REGISTERED_TOOL_NAMES,
-    read_only: true,
+    capability_mode: inspection.capabilityMode,
+    tools: getRegisteredToolNames(inspection.capabilityMode),
     api_base_url: inspection.apiBaseUrl,
     has_token: inspection.hasToken,
   });

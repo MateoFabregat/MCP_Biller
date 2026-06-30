@@ -55,4 +55,33 @@ describe("config", () => {
     expect(insp.hasToken).toBe(false);
     expect(insp.apiBaseUrl).toBeNull();
   });
+
+  describe("BILLER_CAPABILITY_MODE", () => {
+    const base = { BILLER_API_BASE_URL: "https://test.biller.uy", BILLER_API_TOKEN: "tok" };
+
+    it("default es read_only cuando la variable no está seteada", () => {
+      const c = loadConfig(base);
+      expect(c.capabilityMode).toBe("read_only");
+    });
+
+    it("acepta write_enabled", () => {
+      const c = loadConfig({ ...base, BILLER_CAPABILITY_MODE: "write_enabled" });
+      expect(c.capabilityMode).toBe("write_enabled");
+    });
+
+    it("cualquier valor desconocido cae en read_only", () => {
+      const c = loadConfig({ ...base, BILLER_CAPABILITY_MODE: "full_access" });
+      expect(c.capabilityMode).toBe("read_only");
+    });
+
+    it("inspectConfig también expone capabilityMode", () => {
+      const i = inspectConfig({ ...base, BILLER_CAPABILITY_MODE: "write_enabled" });
+      expect(i.capabilityMode).toBe("write_enabled");
+    });
+
+    it("inspectConfig sin la variable devuelve read_only", () => {
+      const i = inspectConfig(base);
+      expect(i.capabilityMode).toBe("read_only");
+    });
+  });
 });

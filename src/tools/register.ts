@@ -12,7 +12,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BillerClient } from "../biller/client.js";
-import { loadConfig, type BillerConfig } from "../config.js";
+import { loadConfig, type BillerCapabilityMode, type BillerConfig } from "../config.js";
 import { createDefaultRateLimiters } from "../utils/rateLimit.js";
 import { Auditor } from "../write/audit.js";
 import type { WriteExecContext } from "../write/execute.js";
@@ -32,6 +32,8 @@ import { registerCrearCliente } from "./write/crearCliente.js";
 import { registerCrearRecibo } from "./write/crearRecibo.js";
 import { registerEmitirComprobante } from "./write/emitirComprobante.js";
 
+export type { BillerCapabilityMode };
+
 export const READ_TOOL_NAMES = [
   "biller_health_check",
   "biller_buscar_cliente_por_rut",
@@ -50,11 +52,21 @@ export const WRITE_TOOL_NAMES = [
   "biller_cancelar_recibo",
 ] as const;
 
-/** Todas las tools registradas. */
+/** Todas las tools (lectura + escritura). Se registran solo en `write_enabled`. */
 export const REGISTERED_TOOL_NAMES = [...READ_TOOL_NAMES, ...WRITE_TOOL_NAMES] as const;
 
 /** Tools deliberadamente NO registradas (pendientes de validación). */
 export const PENDING_TOOLS = ["biller_listar_clientes"] as const;
+
+/**
+ * Devuelve las tools que se registrarán según el modo operativo.
+ * En `read_only` solo las 6 de lectura; en `write_enabled` las 12.
+ */
+export function getRegisteredToolNames(
+  capabilityMode: BillerCapabilityMode,
+): readonly string[] {
+  return capabilityMode === "write_enabled" ? REGISTERED_TOOL_NAMES : READ_TOOL_NAMES;
+}
 
 /**
  * Contexto con config/cliente/escritura memoizados. `getConfig`/`getClient`/
@@ -86,8 +98,12 @@ export function createToolContext(): ToolContext {
   return { getConfig, getClient, getWriteContext };
 }
 
-export function registerAllTools(server: McpServer, ctx: ToolContext): void {
-  // Lectura (read-only)
+export function registerAllTools(
+  server: McpServer,
+  ctx: ToolContext,
+  capabilityMode: BillerCapabilityMode = "read_only",
+): void {
+  // Las 6 tools de lectura se registran siempre.
   registerHealthCheck(server);
   registerBuscarClientePorRut(server, ctx);
   registerListarEmitidos(server, ctx);
@@ -95,13 +111,15 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerObtenerComprobante(server, ctx);
   registerResumenFacturacion(server, ctx);
 
-  // Escritura (con barreras)
-  registerEmitirComprobante(server, ctx);
-  registerAnularComprobante(server, ctx);
-  registerCrearCliente(server, ctx);
-  registerCargarProducto(server, ctx);
-  registerCrearRecibo(server, ctx);
-  registerCancelarRecibo(server, ctx);
+  // Las 6 tools de escritura solo en modo write_enabled.
+  if (capabilityMode === "write_enabled") {
+    registerEmitirComprobante(server, ctx);
+    registerAnularComprobante(server, ctx);
+    registerCrearCliente(server, ctx);
+    registerCargarProducto(server, ctx);
+    registerCrearRecibo(server, ctx);
+    registerCancelarRecibo(server, ctx);
+  }
 
   // biller_listar_clientes: NO registrado (sin endpoint GET documentado de listado).
 }

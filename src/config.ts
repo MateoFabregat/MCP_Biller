@@ -15,6 +15,20 @@ const MAX_TIMEOUT_MS = 120_000;
 
 export type BillerEnvironment = "test" | "production";
 
+/**
+ * Modo operativo central del servidor MCP.
+ * - `read_only`    : solo se registran las 6 tools de lectura (default seguro).
+ * - `write_enabled`: se registran también las 6 tools de escritura (con barreras).
+ *
+ * Controlado por la variable de entorno `BILLER_CAPABILITY_MODE`.
+ * Default: `read_only`.
+ */
+export type BillerCapabilityMode = "read_only" | "write_enabled";
+
+function parseCapabilityMode(raw: string | undefined): BillerCapabilityMode {
+  return (raw ?? "").trim().toLowerCase() === "write_enabled" ? "write_enabled" : "read_only";
+}
+
 export interface BillerConfig {
   /** Base URL normalizada (sin barra final), p.ej. https://test.biller.uy */
   apiBaseUrl: string;
@@ -34,6 +48,8 @@ export interface BillerConfig {
   allowProductionWrites: boolean;
   /** Ruta opcional de archivo para el audit log (además de stderr). */
   auditLogPath?: string;
+  /** Modo operativo: qué tools se registran en el servidor MCP. */
+  capabilityMode: BillerCapabilityMode;
 }
 
 /**
@@ -66,6 +82,8 @@ export interface ConfigInspection {
   writeEnabled: boolean;
   allowProductionWrites: boolean;
   auditLogPath: string | null;
+  /** Modo operativo: qué tools se registran en el servidor MCP. */
+  capabilityMode: BillerCapabilityMode;
   /** Nombres de variables requeridas que faltan. */
   missing: string[];
 }
@@ -126,6 +144,7 @@ export function loadConfig(env: Env = process.env): BillerConfig {
     writeEnabled: parseBool(env.BILLER_WRITE_ENABLED),
     allowProductionWrites: parseBool(env.BILLER_ALLOW_PRODUCTION_WRITES),
     auditLogPath: trimOrUndefined(env.BILLER_AUDIT_LOG_PATH),
+    capabilityMode: parseCapabilityMode(env.BILLER_CAPABILITY_MODE),
   };
 }
 
@@ -161,6 +180,7 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     writeEnabled: parseBool(env.BILLER_WRITE_ENABLED),
     allowProductionWrites: parseBool(env.BILLER_ALLOW_PRODUCTION_WRITES),
     auditLogPath: trimOrUndefined(env.BILLER_AUDIT_LOG_PATH) ?? null,
+    capabilityMode: parseCapabilityMode(env.BILLER_CAPABILITY_MODE),
     missing,
   };
 }
