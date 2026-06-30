@@ -26,11 +26,14 @@ Tiene **dos modos operativos** (controlados por `BILLER_CAPABILITY_MODE`):
 ## Qué hace
 
 **Lectura**
-- Lista **comprobantes emitidos** (`GET /v2/comprobantes/obtener`).
-- Obtiene **un comprobante** por `id`, `numero_interno` o terna `tipo+serie+numero`.
+- Lista **comprobantes emitidos** (`GET /v2/comprobantes/obtener`), con todos los
+  campos reales que devuelve Biller (ver [Campos del comprobante](#campos-del-comprobante-lectura)).
+- Obtiene **un comprobante** por `id`, `numero_interno` o terna `tipo+serie+numero`
+  (con `id` incluye el detalle de `items[]` tipado).
 - Lista **comprobantes recibidos** DGI (`GET /v2/comprobantes/recibidos/obtener`).
 - **Resumen de facturación por período** (totales por moneda y tipo; ventas suman,
-  NC restan, ND suman; **no convierte monedas**).
+  NC restan, ND suman; **no convierte monedas**). Incluye `conteo_por_estado` y
+  **avisa** si el total agrega comprobantes no aceptados por DGI.
 - **Datos DGI por RUT** (nombre, datos de entidad, actividad, certificado único).
 - **Health check** (no llama a Biller, nunca revela el token).
 
@@ -62,10 +65,10 @@ Tiene **dos modos operativos** (controlados por `BILLER_CAPABILITY_MODE`):
 |---|---|---|
 | `biller_health_check` | — | Diagnóstico. Reporta `mode`/`environment`. Nunca expone el token. |
 | `biller_buscar_cliente_por_rut` | `/v2/dgi/empresas/*` | Datos DGI. `es_cliente_biller_confirmado` siempre `null`. |
-| `biller_listar_comprobantes_emitidos` | `/v2/comprobantes/obtener` | Filtros `moneda`/`cliente_rut`/`limit` locales. |
+| `biller_listar_comprobantes_emitidos` | `/v2/comprobantes/obtener` | Filtros locales `moneda`/`cliente_rut`/`limit` y `emitidas_desde`/`emitidas_hasta` (por fecha de **emisión** fiscal). |
 | `biller_listar_comprobantes_recibidos` | `/v2/comprobantes/recibidos/obtener` | Solo montos totales (sin items). |
-| `biller_obtener_comprobante` | `/v2/comprobantes/obtener` | Por `id`, `numero_interno` o terna. |
-| `biller_resumen_facturacion_periodo` | `/v2/comprobantes/obtener` | Totales por moneda/tipo. No convierte. |
+| `biller_obtener_comprobante` | `/v2/comprobantes/obtener` | Por `id`, `numero_interno` o terna. Con `id` trae `items[]` tipado. |
+| `biller_resumen_facturacion_periodo` | `/v2/comprobantes/obtener` | Totales por moneda/tipo + `conteo_por_estado`. No convierte. Filtros locales por fecha de emisión. |
 
 **Escritura (`readOnlyHint:false`, `destructiveHint:true`)**
 
@@ -80,6 +83,40 @@ Tiene **dos modos operativos** (controlados por `BILLER_CAPABILITY_MODE`):
 
 `biller_listar_clientes` (listado GET de clientes) **no se registra**: no hay
 endpoint GET documentado (ver [Pendientes](#pendientes-de-validación-contra-biller)).
+
+---
+
+## Campos del comprobante (lectura)
+
+El OpenAPI público documenta ~18 campos, pero la **API real devuelve ~35**. El
+normalizador los expone todos con tipos estables (los números llegan como string,
+p.ej. `"38.397"`, y se convierten a número). Lo más útil:
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `estado` | string | Estado ante DGI: `"Aceptado DGI"`, `"Rechazado DGI"`, `"Sobre Rechazado DGI"`, `"Pendiente DGI"`, `"Envío no corresponde"`. **No** documentado en el OpenAPI. |
+| `tasa_cambio` | number | Cotización del día para moneda extranjera (ej. USD `38.397`). En UYU = `1`. |
+| `sucursal` | number | ID real de la sucursal emisora. |
+| `numero_interno` | string\|null | Identificador propio de la empresa. |
+| `moneda` / `total` | string→number | Moneda y total del comprobante. |
+| `montos_brutos` | number | Flag `0/1`: si los precios de los ítems incluyen IVA. |
+| `iva` | objeto | Subtotales por tasa (`tasa_minima`/`tasa_basica`/`tasa_otra`). |
+| `adenda`, `informacion_adicional`, `numero_orden`, `lugar_entrega` | string | Texto libre del comprobante. |
+| `razon_referencia`, `referencia_global`, `retenciones_percepciones` | varios | Referencias a otros CFE y retenciones. |
+| `cliente` | objeto crudo | Receptor (id, tipo_documento, documento/RUT, razon_social, sucursal). |
+| `items` | array | Solo al consultar con `id`. Cada ítem: `codigo`, `concepto`, `cantidad`, `precio`, `indicador_facturacion`, `impuesto_tasa`, descuentos/recargos y `retenciones_percepciones`. |
+| `campos_presentes` | string[] | Todas las claves crudas que vinieron en la respuesta. |
+| `campos_extra` | objeto | **Red de seguridad**: cualquier campo que la API devuelva y el normalizador aún no tipe aparece acá (no se pierde nada). |
+
+> **Estado y facturación.** El `resumen_facturacion_periodo` **suma todos los
+> estados** y agrega `conteo_por_estado` + un warning si el total incluye
+> `Rechazado DGI`/`Pendiente DGI`. **No existe un estado "Anulado"**: anular un CFE
+> genera una Nota de Crédito separada (que ya resta en el total).
+
+> **Fechas.** Los filtros `desde`/`hasta` de la API filtran por **fecha de
+> creación** (carga en Biller). Para acotar por **fecha de emisión** fiscal usá los
+> filtros locales `emitidas_desde`/`emitidas_hasta` (avisan si excluyen comprobantes
+> sin `fecha_emision`).
 
 ---
 
@@ -242,11 +279,14 @@ No documentado en el OpenAPI público (no se inventó):
    (Sí existe la escritura `biller_crear_cliente`.)
 2. **Paginación** de `/v2/comprobantes/obtener` → `limit` es recorte local;
    `pagination_supported: false`.
-3. **Campo de estado/anulación en emitidos** → no se pueden excluir anulados (warning).
-4. **Estructura real de `cliente` en emitidos** → ejemplo `[]`; filtro `cliente_rut`
-   solo si es extraíble.
+3. **Estado de anulación** → la API expone `estado` (Aceptado/Rechazado/Pendiente DGI),
+   pero **no** un estado "Anulado": anular genera una Nota de Crédito separada. El
+   resumen lo aclara y desglosa por estado en vez de intentar filtrar anulados.
+4. **Estructura real de `cliente` en emitidos** → se preserva cruda; el filtro
+   `cliente_rut` la recorre buscando el `documento`/RUT.
 5. **Filtros nativos de moneda/cliente** → se hacen locales.
-6. **Semántica de fechas** (`desde`/`hasta`) → documentadas como `fecha_creacion`.
+6. **Semántica de fechas** (`desde`/`hasta`) → filtran por `fecha_creacion`. Para la
+   fecha de **emisión** fiscal hay filtros locales `emitidas_desde`/`emitidas_hasta`.
 7. **Soporte del header `Idempotency-Key`** server-side → la idempotencia fuerte es
    in-process; el header es best-effort.
 8. **Esquemas de request de los POST** → el OpenAPI solo trae **ejemplos** (no schema
