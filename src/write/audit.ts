@@ -46,17 +46,13 @@ export class Auditor implements AuditSink {
 
   constructor(rawFilePath?: string) {
     if (rawFilePath) {
-      const resolved = path.resolve(rawFilePath);
-      const base = path.resolve(".");
-      if (resolved.startsWith(base + path.sep) || resolved === base) {
-        this.filePath = resolved;
-      } else {
-        logger.warn("BILLER_AUDIT_LOG_PATH está fuera del directorio base permitido; el audit de archivo queda deshabilitado.", {
-          path: rawFilePath,
-          resolved,
-          base,
-        });
-      }
+      // BILLER_AUDIT_LOG_PATH es configuración del operador, NO input no confiable:
+      // quien puede setear env vars ya tiene acceso al sistema, así que un guard
+      // contra "traversal" no aporta seguridad real y sí rompe rutas absolutas
+      // legítimas de producción (p.ej. /var/log/biller/audit.log), deshabilitando
+      // el audit a archivo en silencio. Se confía en el operador; la ruta debe ser
+      // escribible y cualquier fallo de escritura se loguea en record().
+      this.filePath = path.resolve(rawFilePath);
     }
   }
 
