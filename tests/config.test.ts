@@ -62,6 +62,19 @@ describe("config", () => {
     expect(insp.apiBaseUrl).toBeNull();
   });
 
+  it("inspectConfig marca un token demasiado corto en missing (igual que loadConfig)", () => {
+    // Antes: inspectConfig solo chequeaba presencia, así que un token de 7 chars
+    // daba missing: [] -> health "ok", pero toda llamada fallaba con BillerConfigError.
+    const insp = inspectConfig({
+      BILLER_API_BASE_URL: "https://test.biller.uy",
+      BILLER_API_TOKEN: "abc123", // 6 caracteres
+    });
+    expect(insp.missing).toContain("BILLER_API_TOKEN debe tener al menos 8 caracteres");
+    expect(() =>
+      loadConfig({ BILLER_API_BASE_URL: "https://test.biller.uy", BILLER_API_TOKEN: "abc123" }),
+    ).toThrow(BillerConfigError);
+  });
+
   describe("BILLER_CAPABILITY_MODE", () => {
     const base = { BILLER_API_BASE_URL: "https://test.biller.uy", BILLER_API_TOKEN: "tok-12345" };
 

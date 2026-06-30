@@ -6,7 +6,7 @@
 // y, si se configura BILLER_AUDIT_LOG_PATH, también a un archivo append-only.
 // =============================================================================
 
-import { appendFile } from "node:fs";
+import { appendFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { logger } from "../logger.js";
@@ -78,14 +78,17 @@ export class Auditor implements AuditSink {
     logger.info("biller.audit", { audit: entry });
 
     if (this.filePath) {
-      appendFile(this.filePath, `${JSON.stringify(entry)}\n`, "utf8", (err) => {
-        if (err) {
-          logger.warn("No se pudo escribir el audit log en archivo.", {
-            path: this.filePath,
-            message: err.message,
-          });
-        }
-      });
+      // Escritura síncrona: la entrada se persiste antes de que record() retorne.
+      // Con appendFile async (fire-and-forget) la línea podía perderse si el
+      // proceso moría justo después de un POST ya marcado como ejecutado.
+      try {
+        appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, "utf8");
+      } catch (err) {
+        logger.warn("No se pudo escribir el audit log en archivo.", {
+          path: this.filePath,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     return entry;

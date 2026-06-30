@@ -17,8 +17,10 @@ import { evaluateWriteGate } from "../../write/gate.js";
 import { generateIdempotencyKey } from "../../write/idempotency.js";
 import { errorToolResult, jsonResult, type ToolContext, type ToolResult } from "../shared.js";
 
+// tipo_documento es un código de categoría numérico (2=RUT, 3=CI): no es PII por
+// sí mismo, así que no se redacta (redactarlo dificulta verificar el preview).
 const PII_FIELDS = new Set([
-  "rut", "documento", "tipo_documento", "razon_social", "nombre_fantasia",
+  "rut", "documento", "razon_social", "nombre_fantasia",
   "email", "telefono", "direccion", "domicilio",
 ]);
 

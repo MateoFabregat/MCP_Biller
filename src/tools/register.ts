@@ -52,8 +52,10 @@ export const WRITE_TOOL_NAMES = [
   "biller_cancelar_recibo",
 ] as const;
 
-/** Todas las tools (lectura + escritura). Se registran solo en `write_enabled`. */
-export const REGISTERED_TOOL_NAMES = [...READ_TOOL_NAMES, ...WRITE_TOOL_NAMES] as const;
+/** Unión completa de tools (lectura + escritura). Solo se registran todas en `write_enabled`. */
+export const ALL_TOOL_NAMES = [...READ_TOOL_NAMES, ...WRITE_TOOL_NAMES] as const;
+/** @deprecated Usar ALL_TOOL_NAMES — el nombre "REGISTERED" es ambiguo en read_only. */
+export const REGISTERED_TOOL_NAMES = ALL_TOOL_NAMES;
 
 /** Tools deliberadamente NO registradas (pendientes de validación). */
 export const PENDING_TOOLS = ["biller_listar_clientes"] as const;
@@ -65,7 +67,7 @@ export const PENDING_TOOLS = ["biller_listar_clientes"] as const;
 export function getRegisteredToolNames(
   capabilityMode: BillerCapabilityMode,
 ): readonly string[] {
-  return capabilityMode === "write_enabled" ? REGISTERED_TOOL_NAMES : READ_TOOL_NAMES;
+  return capabilityMode === "write_enabled" ? ALL_TOOL_NAMES : READ_TOOL_NAMES;
 }
 
 /**
