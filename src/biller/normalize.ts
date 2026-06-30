@@ -15,6 +15,7 @@ import type {
   DgiCertificado,
   DgiDatosEntidad,
   DgiNombreEntidad,
+  ItemEmitido,
   RawComprobanteEmitido,
   RawComprobanteRecibido,
 } from "./types.js";
@@ -76,9 +77,107 @@ export function emptyToNull(value: unknown): unknown {
 
 // --- Comprobantes emitidos --------------------------------------------------
 
+/**
+ * Claves crudas que el normalizador consume y mapea a una clave tipada del
+ * modelo. Cualquier otra clave presente en la respuesta se preserva en
+ * `campos_extra` para no descartar datos que el OpenAPI no declara.
+ */
+const EMITIDO_MAPPED_KEYS = new Set<string>([
+  "id",
+  "tipo_comprobante",
+  "serie",
+  "numero",
+  "moneda",
+  "tasa_cambio",
+  "total",
+  "indicador_cobranza_propia",
+  "tot_iva_tasa_min",
+  "tot_iva_tasa_bas",
+  "tot_iva_tasa_otra",
+  "descuentosRecargos",
+  "cliente",
+  "esNotaAjuste",
+  "estado",
+  "sucursal",
+  "numero_interno",
+  "montos_brutos",
+  "adenda",
+  "informacion_adicional",
+  "numero_orden",
+  "lugar_entrega",
+  "clausula_venta",
+  "modalidad_venta",
+  "via_transporte",
+  "tipo_traslado",
+  "indicador_pagos_terceros",
+  "razon_referencia",
+  "referencia_global",
+  "retenciones_percepciones",
+  "fecha_creacion",
+  "fecha_emision",
+  "fecha_vencimiento",
+  "cae",
+  "items",
+]);
+
+/** Claves de un ítem que se mapean a clave tipada; el resto va a `campos_extra`. */
+const ITEM_MAPPED_KEYS = new Set<string>([
+  "id",
+  "codigo",
+  "codigo_ean",
+  "codigo_dun",
+  "cantidad",
+  "concepto",
+  "descripcion",
+  "precio",
+  "indicador_facturacion",
+  "impuesto_tasa",
+  "descuento_tipo",
+  "descuento_cantidad",
+  "recargo_tipo",
+  "recargo_cantidad",
+  "indicador_agente_responsable",
+  "retenciones_percepciones",
+]);
+
+export function normalizeItemEmitido(raw: unknown): ItemEmitido {
+  const rec = asRecord(raw);
+  const campos_extra: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(rec)) {
+    if (!ITEM_MAPPED_KEYS.has(key)) campos_extra[key] = value;
+  }
+  return {
+    id: toNumberOrNull(rec.id),
+    codigo: toStringOrNull(rec.codigo),
+    codigo_ean: toStringOrNull(rec.codigo_ean),
+    codigo_dun: toStringOrNull(rec.codigo_dun),
+    cantidad: toNumberOrNull(rec.cantidad),
+    concepto: toStringOrNull(rec.concepto),
+    descripcion: toStringOrNull(rec.descripcion),
+    precio: toNumberOrNull(rec.precio),
+    indicador_facturacion: toNumberOrNull(rec.indicador_facturacion),
+    impuesto_tasa: toNumberOrNull(rec.impuesto_tasa),
+    descuento_tipo: toStringOrNull(rec.descuento_tipo),
+    descuento_cantidad: toNumberOrNull(rec.descuento_cantidad),
+    recargo_tipo: toStringOrNull(rec.recargo_tipo),
+    recargo_cantidad: toNumberOrNull(rec.recargo_cantidad),
+    indicador_agente_responsable: emptyToNull(rec.indicador_agente_responsable),
+    retenciones_percepciones: emptyToNull(rec.retenciones_percepciones),
+    campos_extra,
+  };
+}
+
 export function normalizeComprobanteEmitido(raw: unknown): ComprobanteEmitido {
   const r = raw as RawComprobanteEmitido;
   const rec = asRecord(raw);
+
+  // Preserva cualquier campo crudo que no mapeamos explícitamente (campos
+  // nuevos o no documentados). Sin esto, esas claves aparecían en
+  // `campos_presentes` pero su valor se perdía.
+  const campos_extra: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(rec)) {
+    if (!EMITIDO_MAPPED_KEYS.has(key)) campos_extra[key] = value;
+  }
 
   const normalized: ComprobanteEmitido = {
     id: toNumberOrNull(r.id),
@@ -86,6 +185,7 @@ export function normalizeComprobanteEmitido(raw: unknown): ComprobanteEmitido {
     serie: toStringOrNull(r.serie),
     numero: toNumberOrNull(r.numero),
     moneda: toStringOrNull(r.moneda),
+    tasa_cambio: toNumberOrNull(r.tasa_cambio),
     total: toNumberOrNull(r.total),
     indicador_cobranza_propia: toNumberOrNull(r.indicador_cobranza_propia),
     iva: {
@@ -96,16 +196,35 @@ export function normalizeComprobanteEmitido(raw: unknown): ComprobanteEmitido {
     descuentos_recargos: emptyToNull(r.descuentosRecargos),
     cliente: emptyToNull(r.cliente),
     es_nota_ajuste: toBooleanOrNull(r.esNotaAjuste),
+    estado: toStringOrNull(r.estado),
+    sucursal: toNumberOrNull(r.sucursal),
+    numero_interno: toStringOrNull(r.numero_interno),
+    montos_brutos: toNumberOrNull(r.montos_brutos),
+    adenda: toStringOrNull(r.adenda),
+    informacion_adicional: toStringOrNull(r.informacion_adicional),
+    numero_orden: toStringOrNull(r.numero_orden),
+    lugar_entrega: toStringOrNull(r.lugar_entrega),
+    clausula_venta: toStringOrNull(r.clausula_venta),
+    modalidad_venta: toNumberOrNull(r.modalidad_venta),
+    via_transporte: toNumberOrNull(r.via_transporte),
+    tipo_traslado: toNumberOrNull(r.tipo_traslado),
+    indicador_pagos_terceros: toBooleanOrNull(r.indicador_pagos_terceros),
+    razon_referencia: toStringOrNull(r.razon_referencia),
+    referencia_global: emptyToNull(r.referencia_global),
+    retenciones_percepciones: emptyToNull(r.retenciones_percepciones),
     fecha_creacion: toStringOrNull(r.fecha_creacion),
     fecha_emision: toStringOrNull(r.fecha_emision),
     fecha_vencimiento: toStringOrNull(r.fecha_vencimiento),
     cae: emptyToNull(r.cae),
     campos_presentes: Object.keys(rec).sort(),
+    campos_extra,
   };
 
   // `items` solo se incluye si Biller lo devolvió (consulta con `id`).
   if ("items" in rec) {
-    normalized.items = emptyToNull(r.items);
+    normalized.items = Array.isArray(r.items)
+      ? r.items.map(normalizeItemEmitido)
+      : null;
   }
 
   return normalized;

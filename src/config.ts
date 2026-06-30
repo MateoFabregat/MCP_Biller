@@ -36,7 +36,11 @@ export interface BillerConfig {
   apiToken: string;
   /** Metadata local; NO se envía a la API (el token ya está atado a la empresa). */
   defaultEmpresaRut?: string;
-  /** Valor por defecto del parámetro `sucursal` en /v2/comprobantes/obtener. */
+  /**
+   * Valor por defecto del parámetro `sucursal` en /v2/comprobantes/obtener.
+   * Es el ID REAL que Biller asigna a la sucursal (Ajustes → Sucursales), no un
+   * número genérico. Opcional: el endpoint no exige sucursal.
+   */
   defaultSucursalId?: string;
   timeoutMs: number;
   logLevel: string;

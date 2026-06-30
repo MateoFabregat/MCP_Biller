@@ -55,6 +55,22 @@ const ESPECIALES: Record<number, string> = {
   124: "eRemito de exportación",
 };
 
+/**
+ * Familia e-Factura (factura, su NC y su ND, incluyendo exportación y venta por
+ * cuenta ajena). En estos tipos DGI exige receptor identificado con RUT. La
+ * familia e-Ticket (101/102/103 y similares) admite receptor opcional.
+ */
+const EFACTURA_FAMILIA = new Set<number>([
+  111, 112, 113, // e-Factura, NC, ND
+  121, 122, 123, // e-Factura de exportación, NC, ND
+  141, 142, 143, // e-Factura venta por cuenta ajena, NC, ND
+]);
+
+/** true si el tipo pertenece a la familia e-Factura (receptor obligatorio). */
+export function esEFactura(tipo: number | null | undefined): boolean {
+  return typeof tipo === "number" && EFACTURA_FAMILIA.has(tipo);
+}
+
 export function classifyCfe(tipo: number | null): CfeClassification {
   if (tipo === null || tipo === undefined || !Number.isFinite(tipo)) {
     return {

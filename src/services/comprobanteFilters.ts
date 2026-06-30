@@ -14,6 +14,22 @@ import { extractClienteRut } from "../biller/normalize.js";
 export interface EmitidoFilterInput {
   moneda?: string;
   cliente_rut?: string;
+  /** Filtro LOCAL por fecha de EMISIÓN fiscal (aaaa-mm-dd), inclusive. */
+  emitidas_desde?: string;
+  emitidas_hasta?: string;
+}
+
+/** Compara la parte fecha (aaaa-mm-dd) de fecha_emision contra un rango. */
+function dentroDeFechaEmision(
+  fechaEmision: string | null,
+  desde?: string,
+  hasta?: string,
+): boolean {
+  if (!fechaEmision) return false; // sin fecha de emisión no se puede ubicar en el período
+  const dia = fechaEmision.slice(0, 10); // "2026-06-30 ..." -> "2026-06-30"
+  if (desde && dia < desde) return false;
+  if (hasta && dia > hasta) return false;
+  return true;
 }
 
 export interface FilterOutput<T> {
@@ -37,6 +53,18 @@ export function filterEmitidos(
   if (filters.moneda) {
     const target = filters.moneda.trim().toUpperCase();
     list = list.filter((c) => (c.moneda ?? "").toUpperCase() === target);
+  }
+
+  if (filters.emitidas_desde || filters.emitidas_hasta) {
+    const antes = list.length;
+    list = list.filter((c) =>
+      dentroDeFechaEmision(c.fecha_emision, filters.emitidas_desde, filters.emitidas_hasta),
+    );
+    warnings.push(
+      `Filtro LOCAL por fecha de EMISIÓN aplicado (${filters.emitidas_desde ?? "…"} a ${filters.emitidas_hasta ?? "…"}): ` +
+        `de ${antes} comprobantes quedaron ${list.length}. Nota: 'desde'/'hasta' de la API filtran por fecha de CREACIÓN; ` +
+        "este filtro adicional usa la fecha fiscal (fecha_emision) sobre lo ya recibido.",
+    );
   }
 
   if (filters.cliente_rut) {

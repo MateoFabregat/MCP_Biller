@@ -14,6 +14,7 @@ import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,
   fechaHoraSchema,
+  fechaSchema,
   jsonResult,
   validationErrorResult,
   type ToolContext,
@@ -26,6 +27,8 @@ const inputShape = {
   sucursal: z.string().optional().describe("Sucursal emisora. Si se omite, usa BILLER_DEFAULT_SUCURSAL_ID si existe."),
   moneda: z.string().optional().describe("Filtro LOCAL por moneda antes de agregar."),
   cliente_rut: z.string().optional().describe("Filtro LOCAL por RUT de cliente (solo si es extraíble; si no, warning)."),
+  emitidas_desde: fechaSchema.optional().describe("Filtro LOCAL por fecha de EMISIÓN fiscal (aaaa-mm-dd). 'desde/hasta' filtran por creación; este por emisión."),
+  emitidas_hasta: fechaSchema.optional().describe("Filtro LOCAL por fecha de EMISIÓN fiscal (aaaa-mm-dd), inclusive."),
   incluir_anulados: z.boolean().optional().default(false).describe("Default false."),
 };
 
@@ -48,6 +51,7 @@ const outputShape = {
   totales_por_moneda: z.record(monedaTotalSchema),
   totales_por_tipo_comprobante: z.record(tipoTotalSchema),
   conteo_por_tipo_comprobante: z.record(z.number()),
+  conteo_por_estado: z.record(z.number()),
   conteo_total: z.number(),
   conteo_incluidos: z.number(),
   conteo_excluidos: z.number(),
@@ -70,7 +74,12 @@ export async function handleResumenFacturacion(
 
     const comprobantes = await fetchEmitidos(client, { desde: a.desde, hasta: a.hasta, sucursal });
 
-    const filtered = filterEmitidos(comprobantes, { moneda: a.moneda, cliente_rut: a.cliente_rut });
+    const filtered = filterEmitidos(comprobantes, {
+      moneda: a.moneda,
+      cliente_rut: a.cliente_rut,
+      emitidas_desde: a.emitidas_desde,
+      emitidas_hasta: a.emitidas_hasta,
+    });
     const resumen = resumirFacturacion(filtered.list, { incluir_anulados: a.incluir_anulados });
 
     const warnings = [...filtered.warnings, ...resumen.warnings];
@@ -82,11 +91,14 @@ export async function handleResumenFacturacion(
         sucursal: sucursal ?? null,
         moneda: a.moneda ?? null,
         cliente_rut: a.cliente_rut ?? null,
+        emitidas_desde: a.emitidas_desde ?? null,
+        emitidas_hasta: a.emitidas_hasta ?? null,
         incluir_anulados: a.incluir_anulados,
       },
       totales_por_moneda: resumen.totales_por_moneda,
       totales_por_tipo_comprobante: resumen.totales_por_tipo_comprobante,
       conteo_por_tipo_comprobante: resumen.conteo_por_tipo_comprobante,
+      conteo_por_estado: resumen.conteo_por_estado,
       conteo_total: resumen.conteo_total,
       conteo_incluidos: resumen.conteo_incluidos,
       conteo_excluidos: resumen.conteo_excluidos,
@@ -106,7 +118,9 @@ export function registerResumenFacturacion(server: McpServer, ctx: ToolContext):
       description:
         "Calcula totales de comprobantes emitidos en un período (GET /v2/comprobantes/obtener), separados por moneda y por tipo. " +
         "Ventas suman, Notas de Crédito restan, Notas de Débito suman. No convierte monedas. " +
-        "Reporta warnings si no puede clasificar un tipo, si faltan campos o si no puede excluir anulados.",
+        "El total incluye TODOS los estados DGI; 'conteo_por_estado' desglosa cuántos están Aceptados/Rechazados/Pendientes y " +
+        "se emite un warning si el total incluye comprobantes no aceptados. " +
+        "Reporta warnings si no puede clasificar un tipo o si faltan campos.",
       inputSchema: inputShape,
       outputSchema: outputShape,
       annotations: { ...READ_ONLY_ANNOTATIONS, title: "Resumen de facturación" },

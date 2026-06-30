@@ -15,6 +15,7 @@ import {
   applyLimit,
   errorToolResult,
   fechaHoraSchema,
+  fechaSchema,
   jsonResult,
   paginationProbeSchema,
   paginationWarnings,
@@ -35,6 +36,8 @@ const inputShape = {
   numero_interno: z.string().optional().describe("Identificador propio de la empresa para el comprobante."),
   moneda: z.string().optional().describe("Filtro LOCAL por moneda (Biller no documenta filtro nativo)."),
   cliente_rut: z.string().optional().describe("Filtro LOCAL por RUT de cliente (solo si es extraíble; si no, warning)."),
+  emitidas_desde: fechaSchema.optional().describe("Filtro LOCAL por fecha de EMISIÓN fiscal (aaaa-mm-dd). 'desde/hasta' filtran por creación; este por emisión."),
+  emitidas_hasta: fechaSchema.optional().describe("Filtro LOCAL por fecha de EMISIÓN fiscal (aaaa-mm-dd), inclusive."),
   incluir_anulados: z.boolean().optional().default(false).describe("Default false. Solo aplica si hubiera campo de anulación (no documentado)."),
   limit: z.number().int().positive().optional().describe("Límite LOCAL sobre la respuesta recibida."),
   ...paginationProbeSchema,
@@ -90,17 +93,22 @@ export async function handleListarEmitidos(
       );
     }
 
-    // Anulación: no hay campo documentado en emitidos.
-    const hayAnulacion = comprobantes.some((c) =>
-      c.campos_presentes.some((k) => ["estado", "anulado", "anulada", "cancelado"].includes(k.toLowerCase())),
-    );
-    if (!hayAnulacion && a.incluir_anulados === false) {
+    // Anulación: existe el campo `estado` (Aceptado/Rechazado/Pendiente DGI...),
+    // pero NO existe un estado "Anulado": anular un CFE genera una Nota de
+    // Crédito separada. Por eso 'incluir_anulados' no filtra por un flag.
+    if (a.incluir_anulados === false) {
       warnings.push(
-        "No hay campo documentado de estado/anulación en comprobantes emitidos: no se pudieron excluir anulados.",
+        "Sobre anulados: no hay estado \"Anulado\" (anular genera una Nota de Crédito separada). " +
+          "El campo 'estado' indica la aceptación ante DGI (ej. \"Aceptado DGI\", \"Rechazado DGI\"), no la anulación.",
       );
     }
 
-    const filtered = filterEmitidos(comprobantes, { moneda: a.moneda, cliente_rut: a.cliente_rut });
+    const filtered = filterEmitidos(comprobantes, {
+      moneda: a.moneda,
+      cliente_rut: a.cliente_rut,
+      emitidas_desde: a.emitidas_desde,
+      emitidas_hasta: a.emitidas_hasta,
+    });
     warnings.push(...filtered.warnings);
 
     const limited = applyLimit(filtered.list, a.limit);
@@ -123,6 +131,8 @@ export async function handleListarEmitidos(
         numero_interno: a.numero_interno ?? null,
         moneda: a.moneda ?? null,
         cliente_rut: a.cliente_rut ?? null,
+        emitidas_desde: a.emitidas_desde ?? null,
+        emitidas_hasta: a.emitidas_hasta ?? null,
         incluir_anulados: a.incluir_anulados,
         limit: a.limit ?? null,
       },

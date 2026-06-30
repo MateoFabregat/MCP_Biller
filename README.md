@@ -147,7 +147,7 @@ Copiá `.env.example` a `.env`. **Empezá siempre por TEST.** El `.env` está en
 | `BILLER_API_TOKEN` | ✅ | — | Bearer token de la empresa. Nunca se loguea ni se devuelve. |
 | `BILLER_CAPABILITY_MODE` | ❌ | `read_only` | `read_only` (solo lectura) \| `write_enabled` (+ tools de escritura). |
 | `BILLER_DEFAULT_EMPRESA_RUT` | ❌ | — | Metadata local; **no** se envía a la API. |
-| `BILLER_DEFAULT_SUCURSAL_ID` | ❌ | — | Default de `sucursal` (lectura y emisión). |
+| `BILLER_DEFAULT_SUCURSAL_ID` | ❌ | — | Default de `sucursal` (lectura y emisión). **ID real** de Biller (Ajustes → Sucursales), no un valor genérico. Opcional: `obtener` no lo exige. |
 | `BILLER_TIMEOUT_MS` | ❌ | `30000` | Timeout HTTP (ms). |
 | `LOG_LEVEL` | ❌ | `info` | `error`\|`warn`\|`info`\|`debug` (logs a **stderr**). |
 | `BILLER_WRITE_ENABLED` | ❌ | `false` | Gate de ejecución POST. Sin esto, solo dry-run (requiere `write_enabled`). |
@@ -178,13 +178,17 @@ npm run check:readonly # falla si hay POST/PUT/PATCH/DELETE FUERA de la capa wri
       "env": {
         "BILLER_API_BASE_URL": "https://test.biller.uy",
         "BILLER_API_TOKEN": "tu-token-de-TEST",
-        "BILLER_DEFAULT_SUCURSAL_ID": "1",
         "BILLER_WRITE_ENABLED": "false"
       }
     }
   }
 }
 ```
+
+`BILLER_DEFAULT_SUCURSAL_ID` es **opcional** y se omite arriba a propósito:
+`GET /v2/comprobantes/obtener` no requiere sucursal. Si querés fijar una por
+defecto, usá el **ID real** de tu sucursal (Ajustes → Sucursales en
+`{ambiente}.biller.uy`), **no** un valor genérico como `1`.
 
 Para **habilitar escritura en test**: agregá `"BILLER_CAPABILITY_MODE": "write_enabled"` y
 `"BILLER_WRITE_ENABLED": "true"`. Aun así, cada emisión/anulación requiere el flujo
@@ -197,8 +201,8 @@ npm run build
 claude mcp add biller \
   --env BILLER_API_BASE_URL=https://test.biller.uy \
   --env BILLER_API_TOKEN=tu-token-de-TEST \
-  --env BILLER_DEFAULT_SUCURSAL_ID=1 \
   -- node /ruta/ABSOLUTA/MCP_Biller/dist/index.js
+# Opcional: --env BILLER_DEFAULT_SUCURSAL_ID=<ID real de Ajustes → Sucursales>
 ```
 
 ## Probar con MCP Inspector

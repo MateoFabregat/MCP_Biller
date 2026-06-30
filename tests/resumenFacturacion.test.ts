@@ -3,6 +3,7 @@ import { normalizeComprobantesEmitidos } from "../src/biller/normalize.js";
 import { classifyCfe } from "../src/services/cfeTypes.js";
 import { resumirFacturacion } from "../src/services/resumenFacturacion.js";
 import { handleResumenFacturacion } from "../src/tools/resumenFacturacion.js";
+import { EMITIDOS_CON_ESTADO } from "./fixtures.js";
 import { makeCtx } from "./helpers.js";
 
 const VENTAS_Y_NOTAS = [
@@ -55,6 +56,30 @@ describe("resumirFacturacion (servicio)", () => {
     const list = normalizeComprobantesEmitidos(VENTAS_Y_NOTAS);
     const r = resumirFacturacion(list, { incluir_anulados: false });
     expect(r.warnings.some((w) => w.toLowerCase().includes("anulad"))).toBe(true);
+  });
+
+  it("desglosa por estado DGI y avisa si el total incluye no aceptados", () => {
+    const list = normalizeComprobantesEmitidos(EMITIDOS_CON_ESTADO);
+    const r = resumirFacturacion(list, { incluir_anulados: false });
+
+    // El total sigue sumando TODO (decisión: contar todos).
+    expect(r.totales_por_moneda.UYU!.total).toBe(1800); // 1000 + 500 + 300
+    // Desglose por estado.
+    expect(r.conteo_por_estado["Aceptado DGI"]).toBe(1);
+    expect(r.conteo_por_estado["Rechazado DGI"]).toBe(1);
+    expect(r.conteo_por_estado["Pendiente DGI"]).toBe(1);
+    // Warning explícito sobre no aceptados incluidos en el total.
+    expect(
+      r.warnings.some((w) => /no están en estado "Aceptado DGI"/i.test(w)),
+    ).toBe(true);
+  });
+
+  it("no avisa de no aceptados cuando todos están aceptados", () => {
+    const list = normalizeComprobantesEmitidos([
+      { tipo_comprobante: 111, moneda: "UYU", total: 100, estado: "Aceptado DGI" },
+    ]);
+    const r = resumirFacturacion(list, { incluir_anulados: false });
+    expect(r.warnings.some((w) => /Aceptado DGI/.test(w) && /INCLUYE/.test(w))).toBe(false);
   });
 
   it("excluye y advierte por falta de campos, especiales y no clasificables", () => {

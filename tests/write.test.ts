@@ -114,6 +114,49 @@ describe("emitir_comprobante — dry-run / confirm", () => {
   });
 });
 
+describe("emitir_comprobante — validaciones de negocio (A/B)", () => {
+  it("bloquea la EJECUCIÓN si falta sucursal y no hay default", async () => {
+    const fx = makeCtx();
+    const sinSucursal = { ...COMPROBANTE };
+    delete (sinSucursal as Record<string, unknown>).sucursal;
+    const dry = await handleEmitirComprobante({ comprobante: sinSucursal }, fx.ctx);
+    // dry-run avisa pero no rompe
+    expect(sc(dry).mode).toBe("dry_run");
+    expect((sc(dry).warnings as string[]).some((w) => /sucursal/i.test(w))).toBe(true);
+    const token = sc(dry).confirmation_token as string;
+    const exec = await handleEmitirComprobante(
+      { comprobante: sinSucursal, confirm: true, confirmation_token: token },
+      fx.ctx,
+    );
+    expect(exec.isError).toBe(true);
+    expect(errorOf(exec).kind).toBe("validation");
+    expect(fx.postMock).not.toHaveBeenCalled();
+  });
+
+  it("toma la sucursal del default y permite emitir", async () => {
+    const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: { writeEnabled: true, defaultSucursalId: "347" } });
+    const sinSucursal = { ...COMPROBANTE };
+    delete (sinSucursal as Record<string, unknown>).sucursal;
+    const { exec, dry } = await dryRunThenExecute(fx, { comprobante: sinSucursal });
+    expect((sc(dry).payload_preview as Record<string, unknown>).sucursal).toBe(347);
+    expect(sc(exec).mode).toBe("executed");
+  });
+
+  it("avisa si una nota de crédito va sin referencia", async () => {
+    const fx = makeCtx();
+    const nc = { ...COMPROBANTE, tipo_comprobante: 102, sucursal: 6 };
+    const dry = await handleEmitirComprobante({ comprobante: nc }, fx.ctx);
+    expect((sc(dry).warnings as string[]).some((w) => /referencia/i.test(w))).toBe(true);
+  });
+
+  it("avisa si una e-Factura va sin receptor", async () => {
+    const fx = makeCtx();
+    const eFactura = { ...COMPROBANTE, tipo_comprobante: 111, cliente: "-" };
+    const dry = await handleEmitirComprobante({ comprobante: eFactura }, fx.ctx);
+    expect((sc(dry).warnings as string[]).some((w) => /e-Factura|receptor/i.test(w))).toBe(true);
+  });
+});
+
 describe("gate de producción", () => {
   const prodCfg = { apiBaseUrl: "https://biller.uy", writeEnabled: true };
 

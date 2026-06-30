@@ -76,6 +76,24 @@ describe("biller_listar_comprobantes_emitidos", () => {
     expect(res.structuredContent!.count).toBe(0); // el ejemplo es UYU
   });
 
+  // Filtro local por fecha de EMISIÓN (D)
+  it("filtra localmente por fecha de emisión (no por creación)", async () => {
+    const data = [
+      { tipo_comprobante: 101, moneda: "UYU", total: 100, fecha_creacion: "2026-01-02 09:00:00", fecha_emision: "2025-12-31" },
+      { tipo_comprobante: 101, moneda: "UYU", total: 200, fecha_creacion: "2026-01-03 09:00:00", fecha_emision: "2026-01-03" },
+    ];
+    const { ctx } = makeCtx({ response: data });
+    const res = await handleListarEmitidos(
+      { desde: "2026-01-01 00:00:00", emitidas_desde: "2026-01-01", emitidas_hasta: "2026-01-31" },
+      ctx,
+    );
+    const sc = res.structuredContent!;
+    // El emitido el 2025-12-31 queda afuera aunque se cargó en enero.
+    expect(sc.count).toBe(1);
+    expect((sc.comprobantes as Array<Record<string, unknown>>)[0]!.total).toBe(200);
+    expect((sc.warnings as string[]).some((w) => /EMISIÓN/i.test(w))).toBe(true);
+  });
+
   // Aviso de paginación si el usuario pide page/cursor/offset
   it("avisa que la paginación no está soportada si se pide page/offset", async () => {
     const { ctx } = makeCtx({ response: EMITIDO_EXAMPLE });

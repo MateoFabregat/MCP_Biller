@@ -165,6 +165,22 @@ export function errorToolResult(err: unknown, ctx: ToolContext): ToolResult {
   };
 }
 
+/**
+ * Error de validación "manual" (sin ZodError), para reglas de negocio que no se
+ * pueden expresar en el schema. Redacta secretos del mensaje.
+ */
+export function simpleErrorResult(
+  message: string,
+  ctx: ToolContext,
+  kind: "validation" | "config" = "validation",
+): ToolResult {
+  const safe = { kind, message: redactSecrets(message, collectSecrets(ctx)) };
+  return {
+    content: [{ type: "text", text: JSON.stringify({ error: safe }) }],
+    isError: true,
+  };
+}
+
 /** Aplica un `limit` local no destructivo, devolviendo también un warning. */
 export function applyLimit<T>(
   list: T[],

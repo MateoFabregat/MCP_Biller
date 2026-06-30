@@ -115,7 +115,11 @@ export class BillerApiError extends BillerError {
           "Esperá unos segundos y reintentá."
         );
       case 500:
-        return "Biller respondió 500: error interno del servidor de Biller. Reintentá más tarde.";
+        return (
+          "Biller respondió 500 (error interno). Causa frecuente en consultas de comprobantes: " +
+          "un rango de fechas demasiado amplio (la API no pagina y falla con muchos resultados). " +
+          "Probá con un período más corto (p.ej. de a un mes) y reintentá."
+        );
       default:
         return `Biller respondió con el código de estado ${status}.`;
     }

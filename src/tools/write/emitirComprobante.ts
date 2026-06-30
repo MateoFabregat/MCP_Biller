@@ -7,9 +7,36 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { classifyCfe } from "../../services/cfeTypes.js";
-import { WRITE_ANNOTATIONS, validationErrorResult, type ToolContext, type ToolResult } from "../shared.js";
+import { classifyCfe, esEFactura } from "../../services/cfeTypes.js";
+import {
+  WRITE_ANNOTATIONS,
+  simpleErrorResult,
+  validationErrorResult,
+  type ToolContext,
+  type ToolResult,
+} from "../shared.js";
 import { runWriteOperation, writeControlShape, writeOutputShape } from "./shared.js";
+
+/** ¿El payload trae una referencia válida a otro CFE? (notas de crédito/débito) */
+function tieneReferencia(payload: Record<string, unknown>): boolean {
+  const refs = payload.referencias;
+  if (Array.isArray(refs) && refs.length > 0) return true;
+  const global = payload.referencia_global;
+  const globalActiva = global === true || global === 1 || global === "1";
+  const razon = payload.razon_referencia;
+  const razonPresente = typeof razon === "string" && razon.trim().length > 0;
+  return globalActiva && razonPresente;
+}
+
+/** ¿El payload trae un receptor/cliente identificado? ("-" o vacío = sin receptor) */
+function tieneReceptor(payload: Record<string, unknown>): boolean {
+  const c = payload.cliente;
+  if (c === undefined || c === null) return false;
+  if (typeof c === "string") return c.trim() !== "" && c.trim() !== "-";
+  if (Array.isArray(c)) return c.length > 0;
+  if (typeof c === "object") return Object.keys(c).length > 0;
+  return false;
+}
 
 const ENDPOINT = "/v2/comprobantes/crear";
 
@@ -55,6 +82,38 @@ export async function handleEmitirComprobante(
   if (sinItems && (clasif.categoria === "venta" || clasif.categoria === "nota_credito" || clasif.categoria === "nota_debito")) {
     warnings.push(
       `El comprobante tipo ${tipo} (${clasif.etiqueta}) no incluye 'items': confirmá que el cuerpo sea correcto antes de ejecutar.`,
+    );
+  }
+
+  // A) Sucursal: Biller la EXIGE para emitir (POST /v2/comprobantes/crear).
+  // En execute (confirm=true) bloqueamos con un mensaje claro en vez de dejar
+  // que la API devuelva un 422 confuso. En dry-run solo avisamos.
+  const faltaSucursal = payload.sucursal === undefined || payload.sucursal === null || payload.sucursal === "";
+  if (faltaSucursal) {
+    const msg =
+      "Falta 'sucursal': Biller la exige para emitir un comprobante. " +
+      "Pasá 'sucursal' en el cuerpo o configurá BILLER_DEFAULT_SUCURSAL_ID con el ID real de tu sucursal " +
+      "(Ajustes → Sucursales en biller.uy).";
+    if (a.confirm) return simpleErrorResult(msg, ctx);
+    warnings.push(`${msg} Si ejecutás así, la emisión fallará.`);
+  }
+
+  // B) Notas de crédito/débito: deben referenciar el CFE original.
+  if (
+    (clasif.categoria === "nota_credito" || clasif.categoria === "nota_debito") &&
+    !tieneReferencia(payload)
+  ) {
+    warnings.push(
+      `El comprobante tipo ${tipo} (${clasif.etiqueta}) es una nota de ajuste pero no incluye referencia ` +
+        "al CFE original ('referencias' o 'referencia_global'+'razon_referencia'). DGI suele rechazarla sin referencia.",
+    );
+  }
+
+  // B') e-Factura: receptor obligatorio (a diferencia del e-Ticket).
+  if (esEFactura(tipo) && !tieneReceptor(payload)) {
+    warnings.push(
+      `El comprobante tipo ${tipo} (${clasif.etiqueta}) es de la familia e-Factura: DGI exige receptor ` +
+        "identificado con RUT. Falta 'cliente' (o vino vacío/'-').",
     );
   }
 

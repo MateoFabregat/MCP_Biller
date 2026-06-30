@@ -32,6 +32,8 @@ export interface ResumenResultado {
   totales_por_moneda: Record<string, MonedaTotal>;
   totales_por_tipo_comprobante: Record<string, TipoTotal>;
   conteo_por_tipo_comprobante: Record<string, number>;
+  /** Conteo de comprobantes por estado DGI (ej. "Aceptado DGI", "Rechazado DGI"). */
+  conteo_por_estado: Record<string, number>;
   conteo_total: number;
   conteo_incluidos: number;
   conteo_excluidos: number;
@@ -39,11 +41,15 @@ export interface ResumenResultado {
   no_convertir_moneda: true;
 }
 
+/** Estado que indica que el CFE fue aceptado por DGI (cuenta "en firme"). */
+const ESTADO_ACEPTADO = /aceptado/i;
+const ESTADO_RECHAZADO = /rechaz/i;
+const ESTADO_PENDIENTE = /pendiente/i;
+const ESTADO_SIN_DATO = "(sin estado)";
+
 export interface ResumenOptions {
   incluir_anulados: boolean;
 }
-
-const ANULACION_FIELDS = ["estado", "anulado", "anulada", "anulacion", "cancelado", "activo"];
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -56,6 +62,7 @@ export function resumirFacturacion(
   const totales_por_moneda: Record<string, MonedaTotal> = {};
   const totales_por_tipo_comprobante: Record<string, TipoTotal> = {};
   const conteo_por_tipo_comprobante: Record<string, number> = {};
+  const conteo_por_estado: Record<string, number> = {};
   const warningsSet = new Set<string>();
 
   let conteo_incluidos = 0;
@@ -112,17 +119,46 @@ export function resumirFacturacion(
     tipoBucket.conteo += 1;
 
     conteo_por_tipo_comprobante[tipoKey] = (conteo_por_tipo_comprobante[tipoKey] ?? 0) + 1;
+
+    // Desglose por estado DGI de los comprobantes que SÍ entran al total.
+    const estadoKey = c.estado ?? ESTADO_SIN_DATO;
+    conteo_por_estado[estadoKey] = (conteo_por_estado[estadoKey] ?? 0) + 1;
+
     conteo_incluidos += 1;
   }
 
-  // Anulación: ¿hay algún campo de estado/anulación en los datos crudos?
-  const hayCampoAnulacion = comprobantes.some((c) =>
-    c.campos_presentes.some((k) => ANULACION_FIELDS.includes(k.toLowerCase())),
-  );
-  if (!hayCampoAnulacion && !options.incluir_anulados) {
+  // Estado DGI: el total incluye TODOS los estados (configurado: "contar todos").
+  // Avisamos explícitamente cuántos NO están aceptados para que el usuario sepa
+  // que el total puede no coincidir con lo realmente válido ante DGI.
+  let noAceptados = 0;
+  let rechazados = 0;
+  let pendientes = 0;
+  for (const [estado, n] of Object.entries(conteo_por_estado)) {
+    if (estado === ESTADO_SIN_DATO || ESTADO_ACEPTADO.test(estado)) continue;
+    noAceptados += n;
+    if (ESTADO_RECHAZADO.test(estado)) rechazados += n;
+    else if (ESTADO_PENDIENTE.test(estado)) pendientes += n;
+  }
+  if (noAceptados > 0) {
+    const detalle = Object.entries(conteo_por_estado)
+      .filter(([e]) => e !== ESTADO_SIN_DATO && !ESTADO_ACEPTADO.test(e))
+      .map(([e, n]) => `${e}: ${n}`)
+      .join(", ");
     warningsSet.add(
-      "No hay un campo documentado de estado/anulación en los comprobantes emitidos: " +
-        "no fue posible excluir anulados. El total podría incluir comprobantes anulados.",
+      `El total INCLUYE ${noAceptados} comprobante(s) que NO están en estado "Aceptado DGI" ` +
+        `(${detalle}). El monto declarado puede no coincidir con lo aceptado por DGI. ` +
+        "Revisá 'conteo_por_estado' para el desglose.",
+    );
+  }
+
+  // Anulación: NO existe un estado "Anulado". Anular un CFE genera una Nota de
+  // Crédito separada (documentado). Por eso este resumen no puede "excluir
+  // anulados" por un flag; lo aclaramos para no dar falsa sensación de filtrado.
+  if (!options.incluir_anulados) {
+    warningsSet.add(
+      "Nota sobre anulados: anular un CFE genera una Nota de Crédito separada (no hay estado " +
+        '"Anulado"). Este resumen no detecta anulaciones por estado; si una venta fue anulada, ' +
+        "su Nota de Crédito ya resta en el total.",
     );
   }
 
@@ -130,6 +166,7 @@ export function resumirFacturacion(
     totales_por_moneda,
     totales_por_tipo_comprobante,
     conteo_por_tipo_comprobante,
+    conteo_por_estado,
     conteo_total: comprobantes.length,
     conteo_incluidos,
     conteo_excluidos,
