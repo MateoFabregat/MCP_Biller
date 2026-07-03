@@ -1,0 +1,18 @@
+node_modules/
+dist/
+coverage/
+
+# Never commit real secrets / local environment
+.env
+.env.local
+.env.*.local
+
+# Audit logs de escritura (pueden contener metadata operativa)
+biller-mcp-audit.log
+*.audit.log
+
+# Editor / OS
+.DS_Store
+*.log
+.idea/
+.vscode/

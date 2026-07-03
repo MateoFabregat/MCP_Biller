@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "biller": {
+      "command": "node",
+      "args": [
+        "/ABSOLUTE/PATH/TO/MCP_Biller/dist/index.js"
+      ],
+      "env": {
+        "BILLER_API_BASE_URL": "https://test.biller.uy",
+        "BILLER_API_TOKEN": "pegá-tu-token-de-test-aqui",
+        "BILLER_CAPABILITY_MODE": "read_only",
+        "BILLER_WRITE_ENABLED": "false"
+      }
+    }
+  }
+}
