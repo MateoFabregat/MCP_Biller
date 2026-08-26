@@ -23,6 +23,7 @@ import type { BillerCapabilityMode } from "../config.js";
 import { similitudEdicion } from "../services/resolver.js";
 import type { InteractivoBotones, InteractivoLista } from "./client.js";
 import { PREFIJO_PASO } from "./emision.js";
+import { esPedidoDeEmision, extraerPedidoEmision } from "./extraerPedido.js";
 
 /** Prefijo de los ids del menú. Distingue una elección de menú de otras respuestas. */
 export const PREFIJO_MENU = "menu:";
@@ -81,6 +82,33 @@ export interface MenuOpcion {
  * puede resolver mirando otra pantalla, y es la que tiene al cliente esperando
  * del otro lado del mostrador. Cobrar puede esperar treinta segundos; facturar
  * no.
+ *
+ * EL CRITERIO, EXTENDIDO A LAS DIEZ FILAS: LO DEL MOSTRADOR ARRIBA.
+ *
+ * El mismo argumento que puso a emitir en la 1 decide el resto del orden, y no
+ * la frecuencia con que se consulta cada cosa. Lo que cambió:
+ *
+ *   · "Lo de siempre" (menu:repetir) SUBE A LA 2. Es el camino de dos mensajes
+ *     —"lo de siempre a Pérez" y confirmar— y estaba OCULTO, o sea invisible
+ *     para todo el que no supiera que existía. La función más rápida del
+ *     producto no puede ser la que hay que adivinar.
+ *   · "Registrar un cobro" (menu:cobro) SUBE A LA 5, pegado a "¿Quién me
+ *     debe?". Estaban separados por la visibilidad: se veía el saldo y no había
+ *     cómo decir "esta ya me la pagaron". Ver la deuda sin poder tocarla es lo
+ *     que hace que la gente vuelva a la planilla.
+ *   · "Ver un comprobante" ENTRA COMO 3. Buscar lo que ya se emitió es la
+ *     segunda cosa que se hace en un mostrador (después de emitir) y no tenía
+ *     ninguna fila: se llegaba de casualidad por "mandame el pdf".
+ *   · "Plata en riesgo", "Mis clientes" y "Cosas para atender" BAJAN A OCULTAS.
+ *     Son analítica: se leen sentado, una vez por semana, no con un cliente
+ *     enfrente. El enrutador las sigue entendiendo igual — bajar de fila no es
+ *     sacar del catálogo (ver `oculta`).
+ *   · "Mandar" y "Anular" bajan a las filas 8 y 9 y cambian de sección a
+ *     "Otros". El grupo es el ENCABEZADO de sección que ve el usuario, y las
+ *     secciones tienen que quedar contiguas o el número que se escribe deja de
+ *     coincidir con la fila que se toca (ver `construirMenuInteractivo`). Las
+ *     dos son cosas que se le hacen a un comprobante que YA existe, así que
+ *     bajarlas del grupo "Facturar" describe mejor lo que son.
  */
 export const OPCIONES_MENU: readonly MenuOpcion[] = [
   {
@@ -106,30 +134,56 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
     ],
   },
   {
-    id: `${PREFIJO_MENU}enviar_pdf`,
-    titulo: "Mandar un comprobante",
-    descripcion: "Adjunta el PDF de un CFE ya emitido",
+    // "Lo de siempre" es SU propia intención y no un sinónimo de "emitir":
+    // enrutan a la misma tool, pero el agente tiene que llamarla DISTINTO
+    // (con `repetir_ultima_de`), y esa diferencia solo se puede transmitir si
+    // la opción es otra. Un sinónimo más de "emitir" habría hecho el match y
+    // perdido el dato de que hay que copiar la factura anterior.
+    //
+    // YA NO ESTÁ OCULTA. Era el camino más corto del producto —dos mensajes
+    // hasta un CFE— y solo llegaba el que ya sabía la fórmula. Una función que
+    // hay que adivinar no existe para el 90% de la gente.
+    id: `${PREFIJO_MENU}repetir`,
+    titulo: "Lo de siempre",
+    descripcion: "Repite la última factura de un cliente: mismos ítems, mismos precios",
     grupo: "Facturar",
-    tools: ["biller_listar_comprobantes_emitidos", "biller_enviar_comprobante_whatsapp"],
+    tools: ["biller_resolver_nombre", "biller_emision_guiada"],
+    requiereEscritura: true,
     sinonimos: [
-      "mandar factura", "enviar pdf", "pdf", "adjuntar factura", "mandame la factura",
-      "mandar comprobante", "enviar comprobante", "reenviar factura", "pasame la factura",
-      "necesito el pdf", "mandale la factura", "me pide el comprobante", "pide la factura",
-      "mandarle el comprobante", "reenviar el comprobante",
+      "lo de siempre", "facturale lo de siempre", "lo mismo de siempre", "otra igual",
+      "la misma factura", "repetir factura", "facturale lo mismo", "lo mismo que ayer",
+      "lo mismo del otro dia", "otra como la anterior", "repetile la factura",
+      "hacele la de siempre", "la de todas las semanas",
     ],
   },
   {
-    id: `${PREFIJO_MENU}anular`,
-    titulo: "Anular un comprobante",
-    descripcion: "Te dice exactamente qué nota de crédito hace falta",
+    // BUSCAR UN COMPROBANTE YA EMITIDO NO TENÍA NINGUNA PUERTA.
+    //
+    // Las tres tools existen y andan desde siempre, pero la única entrada desde
+    // el chat era "mandame el pdf" — o sea, para MIRAR una factura había que
+    // pedir que te la manden. "¿cuánto le facturé a Pérez la última vez?" caía
+    // en "no entendí" con el dato a un GET de distancia.
+    id: `${PREFIJO_MENU}ver_comprobantes`,
+    titulo: "Ver un comprobante",
+    descripcion: "Busca una factura ya emitida y te muestra el detalle",
     grupo: "Facturar",
-    tools: ["biller_plan_anulacion"],
+    tools: [
+      "biller_listar_comprobantes_emitidos",
+      "biller_obtener_comprobante",
+      "biller_obtener_pdf",
+    ],
     sinonimos: [
-      "anular", "cancelar factura", "nota de credito", "me equivoque", "anular comprobante",
-      "dar de baja una factura", "esta mal la factura", "anular factura",
-      "como anulo", "hay que anular", "anular la factura", "tengo que anular",
-      // Imperativo con clítico. "anulala" a secas es una frase completa acá.
-      "anulala", "anulalo", "anulame", "dala de baja", "bajala",
+      "ver un comprobante", "ver una factura", "ver la factura", "ver comprobantes",
+      "mostrame las ultimas facturas", "mostrame la ultima factura", "mostrame la factura",
+      "mostrame las facturas", "ultimas facturas", "ultimos comprobantes",
+      // "la ultima factura de" lleva la preposición pegada A PROPÓSITO: sin
+      // ella, "la ultima factura" es subcadena de "mandame el pdf de la ultima
+      // factura" y le robaba el mensaje a "Mandar un comprobante" por ser el
+      // sinónimo más largo. Con la preposición, solo matchea cuando después
+      // viene un cliente ("la última factura de Pérez"), que es este caso.
+      "la ultima factura de", "cual fue la ultima factura", "detalle de la factura",
+      "buscar una factura", "buscame la factura", "que le facture a",
+      "la factura numero", "el comprobante numero", "que facturas emiti",
     ],
   },
   {
@@ -147,15 +201,22 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
     ],
   },
   {
-    id: `${PREFIJO_MENU}riesgo`,
-    titulo: "Plata en riesgo",
-    descripcion: "Clientes que se están yendo y deuda por vencer",
+    // VA PEGADO A "¿QUIÉN ME DEBE?" Y NO ESTÁ MÁS OCULTO.
+    //
+    // Eran las dos mitades de la misma tarea separadas por la visibilidad: el
+    // usuario veía la deuda y no tenía cómo decir "esta ya me la pagaron". Ver
+    // el saldo sin poder tocarlo es lo que hace que la gente vuelva a la
+    // planilla.
+    id: `${PREFIJO_MENU}cobro`,
+    titulo: "Registrar un cobro",
+    descripcion: "Marca una factura como cobrada (emite el recibo)",
     grupo: "Plata",
-    tools: ["biller_plata_en_riesgo"],
+    tools: ["biller_cuenta_corriente", "biller_crear_recibo"],
+    requiereEscritura: true,
     sinonimos: [
-      "riesgo", "plata en riesgo", "alertas de plata", "clientes en fuga",
-      "que plata puedo perder", "clientes que se van", "clientes que se estan yendo",
-      "se me van los clientes", "que puedo perder",
+      "me pagaron", "registrar un cobro", "registrar un pago", "cobre una factura",
+      "me deposito", "recibi un pago", "marcar como pagada", "ya me pago",
+      "me pago el cliente", "hacer un recibo", "emitir un recibo",
     ],
   },
   {
@@ -167,6 +228,15 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
     sinonimos: [
       "resumen del dia", "reporte", "digest", "como viene el dia", "novedades",
       "que paso hoy", "resumen diario", "como venimos hoy",
+      // LO DE HOY ES DEL DÍA, NO DEL MES.
+      //
+      // "ventas de hoy" y "qué vendí hoy" caían en "no entendí": el catálogo
+      // tenía "ventas del mes" y "cuánto vendí", y la palabra que las
+      // distingue —"hoy"— no aparecía en ninguna intención. La coincidencia
+      // exacta gana antes que cualquier puntaje por tokens, así que estas
+      // frases van completas y no le sacan nada a `menu:mes`.
+      "ventas de hoy", "ventas del dia", "que vendi hoy", "cuanto vendi hoy",
+      "cuanto facture hoy", "lo de hoy", "cuanto llevo hoy", "como viene hoy",
     ],
   },
   {
@@ -181,29 +251,62 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
       "facturacion del mes", "como fue el mes", "cuanto facture este mes",
       "cuanto llevo facturado", "mes pasado", "comparar con el mes pasado",
       "vendimos mas", "vendi mas", "cuanto vendimos", "como venimos con las ventas",
+      // "comparame junio con julio": los meses no están en ningún catálogo y no
+      // van a estarlo, así que la evidencia es el VERBO. Va como palabra suelta
+      // (matchea por token, no por subcadena) y `menu:sucursales` se defiende
+      // con frases más largas —"comparame los locales"— que le ganan por
+      // longitud sin llegar a un empate, porque la contienen.
+      "comparame", "comparar", "compara", "comparar periodos", "comparar los meses",
+      "comparame los meses", "compara los meses",
     ],
   },
   {
-    id: `${PREFIJO_MENU}clientes`,
-    titulo: "Mis clientes",
-    descripcion: "Top, nuevos, dormidos y cuánto dependés de uno solo",
-    grupo: "Números",
-    tools: ["biller_ranking_clientes"],
-    sinonimos: [
-      "clientes", "mejores clientes", "ranking", "top clientes", "mis clientes",
-      "quien me compra mas", "clientes nuevos", "clientes dormidos",
-    ],
-  },
-  {
-    id: `${PREFIJO_MENU}alertas`,
-    titulo: "Cosas para atender",
-    descripcion: "Rechazos de DGI, CAE por agotarse y otros pendientes",
+    id: `${PREFIJO_MENU}enviar_pdf`,
+    titulo: "Mandar un comprobante",
+    descripcion: "Adjunta el PDF de un CFE ya emitido",
     grupo: "Otros",
-    tools: ["biller_alertas_operativas"],
+    tools: ["biller_listar_comprobantes_emitidos", "biller_enviar_comprobante_whatsapp"],
     sinonimos: [
-      "alertas", "problemas", "rechazos", "dgi", "pendientes", "cosas para atender",
-      "hay algo mal", "que tengo pendiente", "hay algun problema", "hay algo rechazado",
-      "el cae", "se me acaba el cae", "certificado de dgi", "problemas con dgi",
+      "mandar factura", "enviar pdf", "pdf", "adjuntar factura", "mandame la factura",
+      "mandar comprobante", "enviar comprobante", "reenviar factura", "pasame la factura",
+      "necesito el pdf", "mandale la factura", "me pide el comprobante", "pide la factura",
+      "mandarle el comprobante", "reenviar el comprobante",
+      // Cómo transcribe WhatsApp un audio que dice "pedeefe". No es un typo:
+      // es el canal. Va como palabra suelta porque nadie la escribe por error.
+      "pedeefe", "mandame el pedeefe", "pasame el pedeefe",
+      // Más largo que "la ultima factura de" a propósito: ver el comentario de
+      // `menu:ver_comprobantes`. Acá gana el que trae el PDF.
+      "pdf de la ultima factura", "el pdf de la ultima", "pedeefe de la ultima",
+    ],
+  },
+  {
+    id: `${PREFIJO_MENU}anular`,
+    titulo: "Anular un comprobante",
+    descripcion: "Te dice exactamente qué nota de crédito hace falta",
+    grupo: "Otros",
+    // EL PLAN PRIMERO, PERO LA TOOL QUE ANULA TAMBIÉN DECLARADA.
+    //
+    // `biller_plan_anulacion` sigue siendo el camino —distingue anular una
+    // venta (NC) de revertir una anulación (ND) y avisa si ya hay una nota de
+    // crédito encima—, pero el agente necesita las DOS: con una sola, sabía qué
+    // había que emitir y no tenía con qué emitirlo, y terminaba buscando la
+    // tool por su cuenta o contestando "andá a Biller".
+    //
+    // No lleva `requiereEscritura`: en modo consulta el plan se calcula igual y
+    // es la mitad útil de la respuesta. Marcarla cerraría una intención que en
+    // read_only sigue teniendo algo que contestar.
+    tools: ["biller_plan_anulacion", "biller_anular_comprobante"],
+    sinonimos: [
+      "anular", "cancelar factura", "nota de credito", "me equivoque", "anular comprobante",
+      "dar de baja una factura", "esta mal la factura", "anular factura",
+      "como anulo", "hay que anular", "anular la factura", "tengo que anular",
+      // Imperativo con clítico. "anulala" a secas es una frase completa acá.
+      "anulala", "anulalo", "anulame", "dala de baja", "bajala",
+      // El imperativo SIN acento y sin clítico ("anula la última"), que es como
+      // llega la mitad de los mensajes escritos desde el teléfono. Van como
+      // palabras sueltas: ninguna de las dos aparece por accidente en otra
+      // intención, y "anular la 456" ya se apoyaba en la misma regla.
+      "anula", "borra", "borrala", "borralo", "borrar la factura", "borra la ultima",
     ],
   },
   {
@@ -226,22 +329,91 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
   // antes no tenía ninguna puerta de entrada desde el chat: preguntar por ellas
   // caía en "no entendí" aunque el server supiera contestar perfectamente.
   //
-  // La más importante es la primera. "¿Quién me debe?" era una calle sin
-  // salida: el usuario veía la deuda y no tenía cómo decir "esta ya me la
-  // pagaron". Ver el saldo sin poder tocarlo es lo que hace que la gente vuelva
-  // a la planilla.
+  // Las TRES PRIMERAS bajaron de la vidriera en el reorden de mostrador, y esa
+  // es la diferencia entre este archivo y una lista de features: bajar de fila
+  // no saca nada del catálogo. "Plata en riesgo" se sigue entendiendo palabra
+  // por palabra; lo único que cambió es que no le ocupa el lugar a "Registrar
+  // un cobro" en la pantalla de alguien que tiene un cliente enfrente.
   {
-    id: `${PREFIJO_MENU}cobro`,
-    titulo: "Registrar un cobro",
-    descripcion: "Marca una factura como cobrada (emite el recibo)",
+    id: `${PREFIJO_MENU}riesgo`,
+    titulo: "Plata en riesgo",
+    descripcion: "Clientes que se están yendo y deuda por vencer",
     grupo: "Plata",
-    tools: ["biller_cuenta_corriente", "biller_crear_recibo"],
+    tools: ["biller_plata_en_riesgo"],
+    oculta: true,
+    sinonimos: [
+      "riesgo", "plata en riesgo", "alertas de plata", "clientes en fuga",
+      "que plata puedo perder", "clientes que se van", "clientes que se estan yendo",
+      "se me van los clientes", "que puedo perder",
+    ],
+  },
+  {
+    id: `${PREFIJO_MENU}clientes`,
+    titulo: "Mis clientes",
+    descripcion: "Top, nuevos, dormidos y cuánto dependés de uno solo",
+    grupo: "Números",
+    tools: ["biller_ranking_clientes"],
+    oculta: true,
+    sinonimos: [
+      "clientes", "mejores clientes", "ranking", "top clientes", "mis clientes",
+      "quien me compra mas", "clientes nuevos", "clientes dormidos",
+    ],
+  },
+  {
+    id: `${PREFIJO_MENU}alertas`,
+    titulo: "Cosas para atender",
+    descripcion: "Rechazos de DGI, CAE por agotarse y otros pendientes",
+    grupo: "Otros",
+    tools: ["biller_alertas_operativas"],
+    oculta: true,
+    sinonimos: [
+      "alertas", "problemas", "rechazos", "dgi", "pendientes", "cosas para atender",
+      "hay algo mal", "que tengo pendiente", "hay algun problema", "hay algo rechazado",
+      "el cae", "se me acaba el cae", "certificado de dgi", "problemas con dgi",
+    ],
+  },
+  {
+    // Lo que ME facturaron. `biller_listar_comprobantes_recibidos` está
+    // registrada desde siempre y no había ninguna frase que llegara: "¿qué
+    // facturas me llegaron?" caía en "no entendí" o —peor— en las facturas
+    // EMITIDAS, que es contestar con la plata que entra una pregunta sobre la
+    // plata que sale.
+    id: `${PREFIJO_MENU}recibidos`,
+    titulo: "Lo que me facturaron",
+    descripcion: "Comprobantes que te emitieron tus proveedores",
+    grupo: "Números",
+    tools: ["biller_listar_comprobantes_recibidos"],
+    oculta: true,
+    sinonimos: [
+      "que facturas me llegaron", "facturas recibidas", "comprobantes recibidos",
+      "que me facturaron", "que factura me llego", "me llego una factura",
+      "facturas que recibi", "lo que me facturaron", "comprobantes que me emitieron",
+    ],
+  },
+  {
+    // "Me equivoqué con el recibo" NO es "me equivoqué con la factura".
+    //
+    // Un recibo mal hecho se CANCELA (biller_cancelar_recibo); una factura mal
+    // hecha se anula con una nota de crédito. Sin esta intención, la frase
+    // matcheaba "me equivoque" y caía en `menu:anular`, así que el agente
+    // arrancaba a armar una NC por un recibo — un documento fiscal de más por
+    // un problema que se resolvía con otra tool.
+    id: `${PREFIJO_MENU}cancelar_recibo`,
+    titulo: "Deshacer un cobro",
+    descripcion: "Cancela un recibo mal emitido y devuelve el saldo",
+    grupo: "Plata",
+    tools: ["biller_cuenta_corriente", "biller_cancelar_recibo"],
     requiereEscritura: true,
     oculta: true,
     sinonimos: [
-      "me pagaron", "registrar un cobro", "registrar un pago", "cobre una factura",
-      "me deposito", "recibi un pago", "marcar como pagada", "ya me pago",
-      "me pago el cliente", "hacer un recibo", "emitir un recibo",
+      // Todas LARGAS a propósito: la inclusión ordena por longitud, así que
+      // "me equivoque con el recibo" (26) le gana a "me equivoque" (12) de
+      // `menu:anular`, y como una contiene a la otra no hay empate que
+      // preguntar. Un sinónimo corto acá volvería a chocar con anular.
+      "me equivoque con el recibo", "me equivoque en el recibo", "el recibo esta mal",
+      "cancelar el recibo", "anular el recibo", "borrar el recibo",
+      "deshacer un cobro", "el cobro estaba mal", "cancelar un recibo",
+      "el recibo esta mal hecho", "me equivoque al cobrar",
     ],
   },
   {
@@ -301,26 +473,10 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
       "como va cada local", "por sucursal", "ranking de sucursales", "mis locales",
       "cuanto vendio cada local", "comparar sucursales", "que local vende mas",
       "facturacion por sucursal", "como van los locales",
-    ],
-  },
-  {
-    // "Lo de siempre" es SU propia intención y no un sinónimo de "emitir":
-    // enrutan a la misma tool, pero el agente tiene que llamarla DISTINTO
-    // (con `repetir_ultima_de`), y esa diferencia solo se puede transmitir si
-    // la opción es otra. Un sinónimo más de "emitir" habría hecho el match y
-    // perdido el dato de que hay que copiar la factura anterior.
-    id: `${PREFIJO_MENU}repetir`,
-    titulo: "Lo de siempre",
-    descripcion: "Repite la última factura de un cliente: mismos ítems, mismos precios",
-    grupo: "Facturar",
-    tools: ["biller_resolver_nombre", "biller_emision_guiada"],
-    requiereEscritura: true,
-    oculta: true,
-    sinonimos: [
-      "lo de siempre", "facturale lo de siempre", "lo mismo de siempre", "otra igual",
-      "la misma factura", "repetir factura", "facturale lo mismo", "lo mismo que ayer",
-      "lo mismo del otro dia", "otra como la anterior", "repetile la factura",
-      "hacele la de siempre", "la de todas las semanas",
+      // La defensa contra el "comparame" suelto de `menu:mes`: estas frases lo
+      // CONTIENEN, así que ganan por longitud sin producir un empate.
+      "comparame los locales", "comparame las sucursales", "comparar los locales",
+      "comparame cada local",
     ],
   },
   {
@@ -669,6 +825,8 @@ export interface Interpretacion {
    * - `no_disponible`: la opción existe pero el server no la tiene habilitada.
    * - `emision_confirmada` / `emision_cancelada`: tocó ✅ o ✖️ en el preview.
    * - `flujo_emision`: es una respuesta de la emisión guiada, no del menú.
+   * - `pedido_emision`: no matcheó ningún sinónimo, pero el texto ES un pedido
+   *   de facturación con datos adentro. Ver `extraerPedido.ts`.
    */
   via:
     | "id"
@@ -682,6 +840,7 @@ export interface Interpretacion {
     | "emision_confirmada"
     | "emision_cancelada"
     | "flujo_emision"
+    | "pedido_emision"
     | "resolucion_elegida"
     | "afirmacion"
     | "cancelacion"
@@ -708,6 +867,17 @@ export interface Interpretacion {
    * `indice` es la posición dentro del array `candidatos` de ESA respuesta.
    */
   resolucion?: { tipo: "cliente" | "producto"; indice: number };
+  /**
+   * Cuando `via` es "pedido_emision": QUÉ CAMPOS trae el mensaje, por nombre.
+   *
+   * Nombres, nunca valores. El concepto de un ítem es texto libre y su clave
+   * está en `CAMPOS_NO_CONFIABLES`: devolverlo acá lo haría salir envuelto en
+   * ⟦dato-no-confiable⟧ por la barrera y volvería a entrar así al borrador.
+   * Los VALORES los vuelve a leer `biller_emision_guiada`, del lado del server,
+   * con el mismo extractor — que es lo que hace que el resultado no dependa de
+   * que el modelo los haya copiado bien.
+   */
+  pedido_campos?: string[];
 }
 
 /**
@@ -1116,6 +1286,41 @@ export function interpretarMensaje(raw: string, opciones: MenuOpciones = {}): In
       via: "flujo_emision",
       mostrar_menu: false,
     };
+  }
+
+  // 6c. ¿ES UN PEDIDO DE FACTURACIÓN AUNQUE NO SE PAREZCA A NINGÚN SINÓNIMO?
+  //
+  //     "perez 2 bolsas portland 6500" no matchea nada del catálogo y es una
+  //     orden de facturar perfectamente clara. El catálogo compara contra
+  //     FRASES; un pedido real trae un cliente, una cantidad y un precio, y eso
+  //     no se puede enumerar. `extraerPedido.ts` lo lee con una gramática, y
+  //     con dos campos adentro ya no hay ambigüedad sobre qué se está pidiendo.
+  //
+  //     VA ÚLTIMO Y NO PRIMERO, a propósito: cualquier coincidencia del
+  //     catálogo —exacta, por inclusión o por parecido— le gana, igual que le
+  //     gana la rama del flujo. El extractor no compite con el enrutador; se
+  //     queda con lo que el enrutador iba a tirar a "no entendí".
+  const pedido = extraerPedidoEmision(texto);
+  if (esPedidoDeEmision(pedido)) {
+    const emitir = OPCIONES_MENU.find((o) => o.id === `${PREFIJO_MENU}emitir`);
+    if (emitir !== undefined) {
+      // En modo consulta la emisión no existe, y decirlo es mejor que abrir un
+      // flujo que no puede terminar. Misma regla que el resto del enrutador.
+      if (!intenciones.includes(emitir)) {
+        return {
+          opcion: emitir,
+          via: "no_disponible",
+          mostrar_menu: false,
+          respuesta_sugerida: motivoNoDisponible(emitir),
+        };
+      }
+      return {
+        opcion: emitir,
+        via: "pedido_emision",
+        mostrar_menu: false,
+        pedido_campos: pedido.campos,
+      };
+    }
   }
 
   // 7. No se entendió. El menú es mejor respuesta que "no te entendí" — pero

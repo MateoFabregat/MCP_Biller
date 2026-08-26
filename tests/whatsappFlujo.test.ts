@@ -639,8 +639,13 @@ describe("intenciones que no ocupan fila del menú", () => {
   const modo = { capabilityMode: "write_enabled" } as const;
 
   it("llega a tools registradas que no entran en las 10 filas", () => {
+    // "me pagaron la factura 1234" SALIÓ de esta lista, y el motivo es una
+    // buena noticia: `menu:cobro` dejó de estar oculta. En el reorden de
+    // mostrador subió a la fila 5, pegada a "¿Quién me debe?" — eran las dos
+    // mitades de la misma tarea separadas por la visibilidad. Su ruteo se sigue
+    // verificando en el corpus de evals y en `revisionMostrador.test.ts`.
     const casos: Array<[string, string, string]> = [
-      ["me pagaron la factura 1234", "menu:cobro", "biller_crear_recibo"],
+      ["plata en riesgo", "menu:riesgo", "biller_plata_en_riesgo"],
       ["qué productos vendo más", "menu:productos", "biller_ranking_productos"],
       ["cuánto le compré a mis proveedores", "menu:proveedores", "biller_compras_proveedores"],
       ["dar de alta un cliente", "menu:alta_cliente", "biller_crear_cliente"],
@@ -664,6 +669,8 @@ describe("intenciones que no ocupan fila del menú", () => {
   });
 
   it("en modo consulta, pedir registrar un cobro explica por qué no se puede", () => {
+    // Sigue valiendo con `menu:cobro` ya visible: lo que decide esto es
+    // `requiereEscritura`, no si la opción ocupa o no una fila.
     const r = interpretarMensaje("me pagaron la factura 1234", { capabilityMode: "read_only" });
     expect(r.via).toBe("no_disponible");
     expect(r.respuesta_sugerida ?? "").toContain("solo de consulta");

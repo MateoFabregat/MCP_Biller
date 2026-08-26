@@ -23,3 +23,21 @@
 {"mensaje": "menú", "modo": "write_enabled", "en_flujo": true, "esperado_via": "saludo", "origen": "V5.2 (salida explícita)"}
 {"mensaje": "necesito facturar", "modo": "read_only", "esperado_via": "no_disponible", "origen": "modo consulta"}
 {"mensaje": "mandame el pdf de la ultima factura", "modo": "write_enabled", "esperado_opcion": "menu:enviar_pdf", "origen": "auditoria-155"}
+{"mensaje": "factura a perez, 2 bolsas de portland, 6500 cada una", "modo": "write_enabled", "esperado_opcion": "menu:emitir", "origen": "revision-flujo ago-2026 (sin verbo conjugado)"}
+{"mensaje": "2 bolsas de portland a 6500 para perez", "modo": "write_enabled", "esperado_opcion": "menu:emitir", "origen": "revision-flujo ago-2026 (cliente al final)"}
+{"mensaje": "perez 2 bolsas portland 6500", "modo": "write_enabled", "esperado_opcion": "menu:emitir", "origen": "revision-flujo ago-2026 (telegrafico)"}
+{"mensaje": "una factura de 12000 a la panaderia", "modo": "write_enabled", "esperado_opcion": "menu:emitir", "origen": "revision-flujo ago-2026 (monto sin items)"}
+{"mensaje": "ponele una factura a perez de 2 bolsas", "modo": "write_enabled", "esperado_opcion": "menu:emitir", "origen": "revision-flujo ago-2026"}
+{"mensaje": "sale factura para perez", "modo": "write_enabled", "esperado_opcion": "menu:emitir", "origen": "revision-flujo ago-2026 (mostrador)"}
+{"mensaje": "cobrale 1500 a martinez", "modo": "write_enabled", "esperado_opcion": "menu:emitir", "prohibido_opcion": "menu:cobro", "origen": "revision-flujo ago-2026 (cobrarle != me pagaron)"}
+{"mensaje": "anula la ultima", "modo": "write_enabled", "esperado_opcion": "menu:anular", "origen": "revision-flujo ago-2026 (imperativo sin acento)"}
+{"mensaje": "borra la ultima factura", "modo": "write_enabled", "esperado_opcion": "menu:anular", "origen": "revision-flujo ago-2026"}
+{"mensaje": "ventas de hoy", "modo": "write_enabled", "esperado_opcion": "menu:dia", "origen": "revision-flujo ago-2026"}
+{"mensaje": "que vendi hoy", "modo": "write_enabled", "esperado_opcion": "menu:dia", "origen": "revision-flujo ago-2026"}
+{"mensaje": "comparame junio con julio", "modo": "write_enabled", "esperado_opcion": "menu:mes", "origen": "revision-flujo ago-2026"}
+{"mensaje": "mostrame las ultimas facturas", "modo": "write_enabled", "esperado_opcion": "menu:ver_comprobantes", "origen": "revision-flujo ago-2026 (intencion nueva)"}
+{"mensaje": "la ultima factura de perez", "modo": "write_enabled", "esperado_opcion": "menu:ver_comprobantes", "origen": "revision-flujo ago-2026 (intencion nueva)"}
+{"mensaje": "mandame el pedeefe de la ultima", "modo": "write_enabled", "esperado_opcion": "menu:enviar_pdf", "origen": "revision-flujo ago-2026 (audio: pdf fonetico)"}
+{"mensaje": "me equivoque con el recibo", "modo": "write_enabled", "esperado_opcion": "menu:cancelar_recibo", "origen": "revision-flujo ago-2026 (intencion nueva)"}
+{"mensaje": "el rut es 210475730011", "modo": "write_enabled", "en_flujo": true, "esperado_via": "flujo_emision", "origen": "revision-flujo ago-2026 (correccion en flujo)"}
+{"mensaje": "sin iva", "modo": "write_enabled", "en_flujo": true, "esperado_via": "flujo_emision", "origen": "revision-flujo ago-2026 (correccion en flujo)"}

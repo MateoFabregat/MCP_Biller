@@ -28,6 +28,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { BillerConfig } from "../config.js";
+import type { BorradorStore } from "../kapso/borradorStore.js";
 import {
   HEADER_FIRMA,
   MAX_BODY_BYTES,
@@ -141,6 +142,7 @@ async function atenderWebhook(
   req: IncomingMessage,
   res: ServerResponse,
   config: BillerConfig,
+  borradores: BorradorStore | undefined,
 ): Promise<void> {
   const secreto = config.kapso?.webhookSecret;
   if (secreto === undefined) {
@@ -181,6 +183,9 @@ async function atenderWebhook(
   const decision = decidirWebhook(evento, {
     capabilityMode: config.capabilityMode,
     remitentesAutorizados: remitentesAutorizados(config),
+    // Para que una corrección en medio de una carga ("pará, eran 3 no 2") no se
+    // autorresponda con el menú. Ver `DecidirOpciones.borradores`.
+    ...(borradores === undefined ? {} : { borradores }),
   });
 
   // El log lleva el HECHO, nunca el texto: un mensaje entrante puede tener
@@ -229,6 +234,17 @@ export async function iniciarTransporteHttp(
   config: BillerConfig,
   crearServidorMcp: (tenant: Tenant | null) => McpServer,
   registro: RegistroTenants = SIN_TENANTS,
+  /**
+   * El store de borradores del contexto base, para que el webhook sepa si la
+   * conversación tiene una emisión a medio cargar. Opcional a propósito: los
+   * llamadores que no lo pasen (los tests, sobre todo) siguen andando igual, y
+   * el webhook se comporta como antes.
+   *
+   * Es el store del contexto de UNA empresa porque el webhook ya lo es: se
+   * atiende con `config`, no con el tenant de la request. Si algún día el
+   * webhook aprende de tenants, este parámetro se muda con él.
+   */
+  borradores?: BorradorStore,
 ): Promise<HttpTransportHandle> {
   const sesiones = new Map<string, StreamableHTTPServerTransport>();
 
@@ -247,7 +263,7 @@ export async function iniciarTransporteHttp(
       // MCP. Meterlo detrás del bearer significaría ponerle nuestro token a un
       // tercero, que es exactamente lo que la firma evita.
       if (url.pathname === WEBHOOK_PATH) {
-        await atenderWebhook(req, res, config);
+        await atenderWebhook(req, res, config, borradores);
         return;
       }
 

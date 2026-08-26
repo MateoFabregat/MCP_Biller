@@ -36,6 +36,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { BillerCapabilityMode } from "../config.js";
 import { normalizarTelefono } from "../config.js";
+import { claveSesion, type BorradorStore } from "./borradorStore.js";
 import { interpretarMensaje, type Interpretacion } from "./menu.js";
 
 /** Header con el que Meta (y Kapso, que lo reenvía) firma el cuerpo. */
@@ -207,6 +208,18 @@ export interface DecidirOpciones {
   capabilityMode?: BillerCapabilityMode;
   /** Allowlist de remitentes, ya normalizada. Vacía = se rechaza todo. */
   remitentesAutorizados: readonly string[];
+  /**
+   * El store de borradores, para saber si ESTA conversación tiene una emisión a
+   * medio cargar. Opcional: sin él el webhook se comporta como antes.
+   *
+   * LEER NUESTRO PROPIO ESTADO NO VIOLA LA DECISIÓN 2 DEL ENCABEZADO. Lo que el
+   * webhook no puede hacer es ejecutar algo que toque plata o que necesite un
+   * dato de Biller; mirar un borrador que este mismo server guardó no es ni una
+   * cosa ni la otra. Y sin esto, "pará, eran 3 no 2" en medio de una carga no
+   * matchea nada, cae en `desconocido` —que ES autorrespondible— y el webhook
+   * le contesta el MENÚ ENTERO a alguien que estaba corrigiendo una cantidad.
+   */
+  borradores?: BorradorStore;
 }
 
 /**
@@ -249,8 +262,16 @@ export function decidirWebhook(evento: EventoEntrante, opciones: DecidirOpciones
     };
   }
 
+  // El `from` ya viene normalizado a dígitos por `normalizarEvento`, que es la
+  // misma forma que `biller_emision_guiada` recibe en `sesion` — y
+  // `canonizarSesion` absorbe el resto de las diferencias de formato.
+  const enFlujo =
+    opciones.borradores !== undefined &&
+    opciones.borradores.leer(claveSesion(evento.from)) !== null;
+
   const interpretacion = interpretarMensaje(evento.texto, {
     capabilityMode: opciones.capabilityMode,
+    en_flujo: enFlujo,
   });
 
   if (VIAS_AUTORESPONDIBLES.has(interpretacion.via)) {

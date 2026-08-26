@@ -24,6 +24,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { normalizarTelefono } from "../config.js";
+import { resolverClaveSesion } from "../kapso/borradorStore.js";
 import { KapsoClient } from "../kapso/client.js";
 import {
   construirDesambiguacion,
@@ -52,13 +53,22 @@ const inputShape = {
         'devuelve qué tool corresponde llamar. Un saludo ("hola") o algo que no matchea ninguna ' +
         "opción devuelve el menú.",
     ),
+  sesion: z
+    .string()
+    .optional()
+    .describe(
+      "Identificador de la conversación — el número de WhatsApp, o el 'sesion.id' que devolvió " +
+        "biller_emision_guiada. PASALO SIEMPRE que exista una conversación: con esto el server " +
+        "MIRA SI HAY UN BORRADOR A MEDIO CARGAR y deduce 'en_flujo' solo, sin que tengas que " +
+        "acordarte vos. El número no se guarda: se guarda un hash.",
+    ),
   en_flujo: z
     .boolean()
     .optional()
-    .default(false)
     .describe(
-      "true si hay una emisión guiada A MEDIO CARGAR en esta conversación. Cambia el default del " +
-        'enrutador: lo que no matchea nada ("pará, eran 3 no 2", "que sean de 25kg") se devuelve ' +
+      "OVERRIDE de lo que el server deduce con 'sesion'. Normalmente NO hace falta mandarlo. " +
+        "true si hay una emisión guiada A MEDIO CARGAR en esta conversación: cambia el default del " +
+        'enrutador, y lo que no matchea nada ("pará, eran 3 no 2", "que sean de 25kg") se devuelve ' +
         "como respuesta del flujo (via=flujo_emision) para pasarle a biller_emision_guiada, en vez " +
         'de contestar el menú en medio de la carga. "menú", "cancelá" y "dale" siguen ganando.',
     ),
@@ -129,6 +139,16 @@ const outputShape = {
       resolucion: z
         .object({ tipo: z.enum(["cliente", "producto"]), indice: z.number() })
         .nullable(),
+      /**
+       * Cuando via="pedido_emision": qué campos del comprobante trae el
+       * mensaje, POR NOMBRE. Los valores no salen de acá — los vuelve a leer
+       * biller_emision_guiada con el mismo extractor. Ver `Interpretacion`.
+       */
+      pedido_campos: z.array(z.string()),
+      /** true si el enrutador trabajó sabiendo que había una carga a medio hacer. */
+      en_flujo: z.boolean(),
+      /** true si `en_flujo` lo dedujo el server del borrador, y no lo mandó el agente. */
+      en_flujo_derivado: z.boolean(),
       /** La instrucción concreta para el agente. Siempre hay una. */
       siguiente_accion: z.string(),
     })
@@ -230,6 +250,16 @@ function siguienteAccion(r: ReturnType<typeof interpretarMensaje>): string {
         "biller_emision_guiada (en 'mensaje'), junto con TODO lo que ya sepas de la conversación. " +
         "No la interpretes acá ni mandes el menú: hacerlo tira a la basura los datos que ya juntaste."
       );
+    case "pedido_emision":
+      return (
+        "El mensaje NO matcheó ninguna opción del menú, pero es un pedido de facturación con datos " +
+        `adentro: el server le leyó ${(r.pedido_campos ?? []).length} campo(s) ` +
+        `(${(r.pedido_campos ?? []).join(", ")}). Llamá a biller_emision_guiada pasándole el TEXTO ` +
+        "TAL CUAL en 'mensaje' y la 'sesion' de la conversación: el server lo vuelve a leer con el " +
+        "mismo extractor y prellena el borrador solo. NO copies vos el precio ni la cantidad — " +
+        'Number("6.500") es 6,5 y en Uruguay son seis mil quinientos; esa conversión la hace ' +
+        "TypeScript. Contestá únicamente la pregunta que devuelva la tool."
+      );
     case "desconocido":
       return (
         "No matcheó ninguna opción. Si es una pregunta concreta sobre facturación, contestala con " +
@@ -256,12 +286,31 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
 
   try {
     const config = ctx.getConfig();
+    const warnings: string[] = [];
+
+    // EL "ESTOY EN MEDIO DE UNA CARGA" LO SABE EL SERVER, NO EL MODELO.
+    //
+    // `en_flujo` era un booleano que tenía que acordarse de mandar el agente, y
+    // el modo de falla era silencioso y caro: en medio de una emisión, "pará,
+    // eran 3 no 2" con `en_flujo` olvidado cae en `desconocido` y el webhook
+    // AUTORRESPONDE el menú — la carga a medio hacer se pierde y el usuario
+    // recibe diez opciones como respuesta a una corrección.
+    //
+    // El dato ya existe del lado del server: o hay un borrador vivo para esa
+    // sesión o no lo hay. Se lee de ahí, y el booleano explícito queda como
+    // override para el llamador que sepa algo que el store no.
+    let enFlujo = a.en_flujo ?? false;
+    let flujoDerivado = false;
+    if (a.en_flujo === undefined && a.sesion !== undefined && a.sesion.trim() !== "") {
+      enFlujo = ctx.getBorradorStore().leer(resolverClaveSesion(a.sesion)) !== null;
+      flujoDerivado = true;
+    }
+
     const opcionesMenu = {
       capabilityMode: config.capabilityMode,
       empresa: config.defaultEmpresaRut,
-      en_flujo: a.en_flujo,
+      en_flujo: enFlujo,
     };
-    const warnings: string[] = [];
 
     const disponibles = opcionesDisponibles(opcionesMenu);
     const texto = construirMenuTexto(opcionesMenu);
@@ -300,6 +349,9 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
         candidatas: candidatas.map((o) => ({ id: o.id, titulo: o.titulo, tools: o.tools })),
         confirmation_token: r.confirmation_token ?? null,
         resolucion: r.resolucion ?? null,
+        pedido_campos: r.pedido_campos ?? [],
+        en_flujo: enFlujo,
+        en_flujo_derivado: flujoDerivado,
         siguiente_accion: siguienteAccion(r),
       };
       if (r.via === "ambiguo") {
@@ -410,9 +462,13 @@ export function registerMenuWhatsapp(server: McpServer, ctx: ToolContext): void 
         "El menú de opciones del asistente por WhatsApp, y el enrutador de lo que escribe el " +
         'usuario. Llamala cuando la conversación arranca ("hola", "menú", "ayuda") o cuando no ' +
         "quede claro qué está pidiendo: devuelve las opciones disponibles y, si le pasás " +
-        "'mensaje', a qué opción corresponde y qué tool llamar. Por defecto solo devuelve el " +
-        "texto; con enviar=true lo manda como lista interactiva tocable al número indicado, que " +
-        "debe estar en la allowlist.",
+        "'mensaje', a qué opción corresponde y qué tool llamar. PASALE SIEMPRE 'sesion' (el número " +
+        "de la conversación): con eso el server mira si hay una emisión a medio cargar y entiende " +
+        'una corrección ("pará, eran 3 no 2") como respuesta del flujo en vez de contestar el menú ' +
+        "en el medio. También reconoce pedidos de facturación escritos con datos adentro " +
+        '("perez 2 bolsas portland 6500") aunque no matcheen ninguna opción. Por defecto solo ' +
+        "devuelve el texto; con enviar=true lo manda como lista interactiva tocable al número " +
+        "indicado, que debe estar en la allowlist.",
       inputSchema: inputShape,
       outputSchema: outputShape,
       // Igual que el reporte diario: cuando puede enviar deja de ser read-only.

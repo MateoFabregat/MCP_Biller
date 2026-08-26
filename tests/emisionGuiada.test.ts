@@ -1132,3 +1132,116 @@ describe("'✏️ Otra fecha': la única respuesta que retrocede el flujo", () =
     expect(conFecha.comprobante_borrador.fecha_emision).toBe("20/08/2026");
   });
 });
+
+// ---------------------------------------------------------------------------
+// El pedido leído por el server: el resultado deja de depender del modelo
+// ---------------------------------------------------------------------------
+
+describe("biller_emision_guiada lee el texto del pedido por su cuenta", () => {
+  const llamar = async (args: Record<string, unknown>, ctx: Parameters<typeof handleEmisionGuiada>[1]) =>
+    JSON.parse((await handleEmisionGuiada(args, ctx)).content[0]!.text) as Record<string, any>;
+
+  it("prellena el borrador aunque el modelo no haya mandado NINGÚN campo", async () => {
+    // Éste es el punto entero: el agente pasa el texto tal cual y el server
+    // saca cliente, cantidad, concepto y precio. Antes, si el modelo se
+    // olvidaba de extraer, el flujo preguntaba las cuatro cosas de nuevo.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar({ mensaje: "facturale a perez 2 bolsas de portland a 6.500" }, ctx);
+
+    expect(r.estado_entendido.nombre_cliente).toBe("perez");
+    expect(r.estado_entendido.items[0]).toMatchObject({ concepto_cargado: true, cantidad: 2 });
+    // Y el precio es SEIS MIL QUINIENTOS, no 6,5: `Number("6.500")` da 6.5 y
+    // ese error no se ve hasta que el CFE está emitido.
+    expect(r.estado_entendido.items[0].precio).toBe(6500);
+  });
+
+  it("lo que mandó el agente EXPLÍCITO nunca se pisa", async () => {
+    // El texto dice 2 bolsas a 6.500; el agente dice 3 a 7.000 porque el
+    // usuario lo corrigió después. Gana el dato explícito, siempre.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar(
+      {
+        mensaje: "facturale a perez 2 bolsas de portland a 6.500",
+        nombre_cliente: "Panadería La Espiga",
+        items: [{ concepto: "Bolsa de portland", cantidad: 3, precio: 7000 }],
+      },
+      ctx,
+    );
+    expect(r.estado_entendido.nombre_cliente).toBe("Panadería La Espiga");
+    expect(r.estado_entendido.items[0]).toMatchObject({ cantidad: 3, precio: 7000 });
+  });
+
+  it("solo LLENA HUECOS: completa el precio que el agente no mandó", async () => {
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar(
+      {
+        mensaje: "facturale a perez 2 bolsas de portland a 6.500",
+        items: [{ concepto: "Bolsa de portland", cantidad: 3 }],
+      },
+      ctx,
+    );
+    expect(r.estado_entendido.items[0].cantidad).toBe(3);
+    expect(r.estado_entendido.items[0].precio).toBe(6500);
+  });
+
+  it("la ambigüedad de un precio llega como warning, no como un número callado", async () => {
+    // "6.50" son 6,50 o 6.500 según quién lo escriba: cien veces de diferencia.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar({ mensaje: "facturale a perez 2 bolsas a 6.50" }, ctx);
+    expect(r.warnings.join(" ")).toContain("CONFIRMALO");
+  });
+
+  it("las señales explícitas valen aunque el mensaje no sea un pedido entero", async () => {
+    // "sin IVA" contestando una pregunta del flujo es exactamente esa señal, y
+    // sale de una marca inequívoca, no de una gramática posicional.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar(
+      {
+        sesion: "59895923567",
+        mensaje: "sin iva",
+        clase_receptor: "consumidor_final",
+        sin_receptor: true,
+        items: [{ concepto: "Café", cantidad: 1, precio: 100 }],
+        indicador_facturacion: 3,
+      },
+      ctx,
+    );
+    expect(r.comprobante_borrador.montos_brutos).toBe(false);
+    expect(r.paso).toBe("confirmar");
+  });
+
+  it("una CORRECCIÓN en medio del flujo no deja basura en el borrador", async () => {
+    // "pará, eran 3 no 2" no es un pedido, así que el cliente y los ítems no se
+    // tocan: un nombre sacado de una gramática posicional acá terminaría
+    // impreso en un documento fiscal.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar({ mensaje: "pará, eran 3 no 2" }, ctx);
+    expect(r.estado_entendido.nombre_cliente).toBeUndefined();
+    expect(r.estado_entendido.items).toBeUndefined();
+  });
+
+  it("la moneda se convierte en PREGUNTA, no en decisión", async () => {
+    // El extractor lee "en dólares" perfectamente. La tool igual pregunta: es
+    // el único campo donde equivocarse cuesta 40x, y sale bien formado ante DGI.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar(
+      {
+        mensaje: "facturale a la barraca el flete, son 200 dolares",
+        clase_receptor: "empresa",
+        documento: "219999830019",
+        cliente_ya_facturado: true,
+      },
+      ctx,
+    );
+    expect(r.paso).toBe("moneda");
+  });
+
+  it("un id de botón NO pasa por el extractor", async () => {
+    // "emision:iva:3" no es castellano; interpretarlo con una gramática de
+    // pedidos sería leer un id como si fuera una venta.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar({ mensaje: "emision:iva:3" }, ctx);
+    expect(r.estado_entendido.indicador_facturacion).toBe(3);
+    expect(r.estado_entendido.nombre_cliente).toBeUndefined();
+  });
+});

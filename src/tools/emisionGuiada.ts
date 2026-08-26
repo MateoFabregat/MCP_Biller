@@ -40,6 +40,11 @@ import {
   type EstadoEmision,
   type ItemEnCurso,
 } from "../kapso/emision.js";
+import {
+  esPedidoDeEmision,
+  extraerPedidoEmision,
+  type PedidoEmision,
+} from "../kapso/extraerPedido.js";
 import { extractClienteRut } from "../biller/normalize.js";
 import { fetchEmitidos } from "../biller/queries.js";
 import { hoyComoDateUy, hoyIsoUy } from "../services/fechaUy.js";
@@ -373,6 +378,81 @@ function normalizarItems(
   return { items: out, warnings };
 }
 
+/**
+ * Vuelca lo que el extractor leyó del texto SOBRE LOS HUECOS del estado.
+ *
+ * LA REGLA, Y NO TIENE EXCEPCIONES: un campo que ya tiene valor no se toca.
+ * Lo que mandó el agente es un dato explícito de la conversación; lo de acá es
+ * una inferencia gramatical sobre el mismo texto. Cuando los dos dicen algo,
+ * gana el explícito — y cuando el explícito falta, esto es la diferencia entre
+ * una pregunta menos y una pregunta más.
+ *
+ * DOS NIVELES DE CONFIANZA, Y POR ESO DOS TRATOS DISTINTOS:
+ *
+ *   · Las SEÑALES (forma de pago, criterio de IVA) salen de marcas inequívocas
+ *     —"a crédito", "más IVA"— y valen aunque el mensaje no sea un pedido
+ *     entero: "sin IVA" contestando una pregunta del flujo es exactamente eso.
+ *   · El CLIENTE y los ÍTEMS salen de una gramática posicional, y solo se
+ *     aplican cuando el mensaje ES un pedido (`esPedidoDeEmision`). Sin ese
+ *     filtro, "pará, eran 3 no 2" en medio de una carga dejaba un cliente
+ *     llamado "eran" en el borrador de un CFE.
+ *
+ * LA MONEDA NO SE FIJA ACÁ, A PROPÓSITO. El extractor la lee ("en dólares") y
+ * esta función la convierte en `moneda_dudosa`, o sea en una PREGUNTA. Es el
+ * único campo donde equivocarse cuesta 40x —una factura en pesos por un precio
+ * cotizado en dólares sale perfectamente bien formada ante DGI— y un toque de
+ * más es barato al lado de eso. Ver `moneda_dudosa` en `emision.ts`.
+ */
+function rellenarDesdePedido(estado: EstadoEmision, pedido: PedidoEmision): string[] {
+  const puestos: string[] = [];
+
+  if (estado.montos_brutos === undefined && pedido.montos_brutos !== undefined) {
+    estado.montos_brutos = pedido.montos_brutos;
+    puestos.push("montos_brutos");
+  }
+  if (estado.forma_pago === undefined && pedido.forma_pago !== undefined) {
+    estado.forma_pago = pedido.forma_pago;
+    puestos.push("forma_pago");
+  }
+  if (pedido.moneda === "USD" && (estado.moneda ?? "") === "") {
+    estado.moneda_dudosa = true;
+  }
+
+  if (!esPedidoDeEmision(pedido)) return puestos;
+
+  // El NOMBRE, no el documento: quién es ese nombre lo contesta
+  // `biller_resolver_nombre`, que sabe preguntar cuando hay dos candidatos.
+  if (
+    pedido.cliente !== undefined &&
+    (estado.nombre_cliente ?? "") === "" &&
+    (estado.documento ?? "") === ""
+  ) {
+    estado.nombre_cliente = pedido.cliente;
+    puestos.push("nombre_cliente");
+  }
+
+  if (pedido.items.length === 0) return puestos;
+  const items: ItemEnCurso[] = [...(estado.items ?? [])];
+  pedido.items.forEach((leido, i) => {
+    const base: ItemEnCurso = { ...(items[i] ?? {}) };
+    if ((base.concepto ?? "") === "" && leido.concepto !== undefined) {
+      base.concepto = leido.concepto;
+      puestos.push(`items[${i}].concepto`);
+    }
+    if (base.cantidad === undefined && leido.cantidad !== undefined) {
+      base.cantidad = leido.cantidad;
+      puestos.push(`items[${i}].cantidad`);
+    }
+    if (base.precio === undefined && leido.precio !== undefined) {
+      base.precio = leido.precio;
+      puestos.push(`items[${i}].precio`);
+    }
+    items[i] = base;
+  });
+  if (items.length > 0) estado.items = items;
+  return puestos;
+}
+
 export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   const parsed = inputSchema.safeParse(args);
   if (!parsed.success) {
@@ -470,6 +550,22 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       estadoArgs.moneda_dudosa = true;
     }
 
+    // --- El pedido, leído por TypeScript ------------------------------------
+    //
+    // "facturale a Pérez 2 bolsas de portland a 6.500" trae cuatro campos, y
+    // hasta acá el único que los sacaba del texto era el modelo. Eso hacía que
+    // el resultado dependiera de que hubiera copiado bien un número —y
+    // `Number("6.500")` es 6,5—. Ahora el server lo vuelve a leer con
+    // `extraerPedido.ts` y usa lo que saque SOLO PARA LLENAR HUECOS: un campo
+    // que el agente mandó explícito no se toca nunca. Ver `rellenarDesdePedido`.
+    //
+    // Los ids de botón (`emision:*`) no pasan por acá: no son castellano, y
+    // para ellos ya está `interpretarPaso` unas líneas más abajo.
+    const pedido: PedidoEmision | null =
+      a.mensaje === undefined || a.mensaje.trim().startsWith(PREFIJO_PASO)
+        ? null
+        : extraerPedidoEmision(a.mensaje);
+
     // --- El store: lo que ya sabíamos va DEBAJO de lo que llegó ahora --------
     //
     // Este es el cambio que saca al flujo de emisión de encima del contexto del
@@ -507,6 +603,22 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
         "Ya hay un borrador en curso en esta sesión: no se pisó con la factura anterior. " +
           "Si el usuario quiere empezar de nuevo con lo de siempre, mandá reiniciar=true junto con repetir_ultima_de.",
       );
+    }
+
+    // Lo que el extractor pudo leer del texto, DESPUÉS de lo copiado y de lo
+    // explícito: llena huecos y nada más. Ver `rellenarDesdePedido`.
+    if (pedido !== null) {
+      const puestos = rellenarDesdePedido(estado, pedido);
+      if (puestos.length > 0) {
+        warnings.push(
+          `Del texto del usuario salieron ${puestos.length} dato(s) que no venían en los parámetros ` +
+            `(${puestos.join(", ")}). Los leyó el server, no vos: verificalos en 'estado_entendido' ` +
+            "y ecoálos en el preview antes de emitir.",
+        );
+      }
+      for (const detalle of pedido.ambiguo ? pedido.detalles : []) {
+        if (detalle.startsWith("Precio:")) warnings.push(`⚠️ ${detalle}`);
+      }
     }
 
     // El numero_interno nace CON el borrador y no cambia más. Ver EstadoEmision.

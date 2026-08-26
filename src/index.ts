@@ -97,6 +97,11 @@ async function main(): Promise<void> {
         return crearServidorMcp(contextos.para(tenant), configTenant.capabilityMode);
       },
       registro,
+      // El webhook lee este store para saber si la conversación tiene una
+      // emisión a medio cargar. Es el MISMO que usan las tools en modo de una
+      // sola empresa, que es lo que hace que el dato sea el de verdad y no una
+      // copia vacía.
+      ctx.getBorradorStore(),
     );
 
     if (registro.tenants.length > 0) {
