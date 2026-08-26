@@ -14,6 +14,7 @@
 import type { ComprobanteBody } from "../biller/cfeSchema.js";
 import { INDICADORES_FACTURACION } from "../biller/cfeSchema.js";
 import { round2 } from "../biller/coerce.js";
+import { formatearUy } from "./importe.js";
 
 /**
  * Tasas de IVA por indicador de facturación (Uruguay: básica 22%, mínima 10%).
@@ -249,15 +250,168 @@ export function calcularTotales(body: ComprobanteBody): TotalesEstimados {
   };
 }
 
-/** Resumen de una línea para mostrar en el preview/confirmación. */
-export function formatearTotales(t: TotalesEstimados): string {
-  const moneda = t.moneda ?? "";
-  const aprox = t.exacto ? "" : " (aprox.)";
-  const iva =
-    Object.keys(t.iva_por_tasa).length > 0
-      ? ` — IVA ${Object.entries(t.iva_por_tasa)
-          .map(([tasa, monto]) => `${tasa}%: ${monto}`)
-          .join(", ")}`
-      : "";
-  return `Total estimado${aprox}: ${moneda} ${t.total} (neto ${t.subtotal}${iva})`;
+// =============================================================================
+// El preview que lee el humano antes de emitir.
+//
+// LO QUE ESTABA MAL Y NO SE VEÍA
+//
+// La versión anterior devolvía UNA línea con los números crudos de JavaScript:
+//
+//     Total estimado: UYU 13000 (neto 10655.74 — IVA 22%: 2344.26)
+//
+// Tres problemas, y ninguno es cosmético:
+//
+//   1. `13000` y `10655.74` están escritos al revés de como se escriben en
+//      Uruguay. `formatearUy` existe desde siempre para esto, y su propio
+//      comentario dice por qué: "el eco de confirmación tiene que estar escrito
+//      como el usuario escribe los números, o el usuario no puede verificar lo
+//      que le estamos preguntando". El preview era justo el eco que no lo hacía.
+//
+//   2. No listaba los ítems. El único chequeo posible era "¿el total suena
+//      bien?" — y el error típico no es el total, es la línea: dos bolsas en vez
+//      de veinte, el precio del otro producto.
+//
+//   3. No mostraba NINGÚN supuesto. Ahora que la fecha, la forma de pago y la
+//      cantidad se completan solas, eso dejó de ser una omisión y pasó a ser
+//      inaceptable: un default que el usuario no ve no es un default, es una
+//      suposición nuestra impresa en un documento fiscal.
+//
+// Los números los sigue calculando `calcularTotales` en TypeScript, y el
+// `confirmation_token` sigue atado al payload por hash. Acá solo cambia cómo se
+// escribe lo ya calculado.
+// =============================================================================
+
+/**
+ * Los supuestos del comprobante, para poder declararlos.
+ *
+ * Son exactamente los campos que `aplicarDefaults` (kapso/emision.ts) completa
+ * solo, más el criterio de IVA que sí se pregunta. Llegan por el cuerpo del CFE
+ * y no por el `EstadoEmision` porque en el momento de emitir el estado ya no
+ * existe: el payload es lo único que sobrevive al viaje por el modelo. Son los
+ * mismos valores — el borrador los copia de ahí.
+ */
+export interface ContextoPreview {
+  /** Fecha del comprobante, dd/mm/aaaa. */
+  fecha_emision?: string;
+  /** Código de FORMAS_PAGO: 1 contado, 2 crédito. */
+  forma_pago?: number;
+  /** Vencimiento dd/mm/aaaa, cuando es a crédito. */
+  fecha_vencimiento?: string;
+  /** true = los precios ya traían el IVA adentro. */
+  montos_brutos?: boolean;
+  /** Hoy en dd/mm/aaaa, para poder decir "Hoy 26/08/2026". Inyectable. */
+  hoy?: string;
+  /** Cuántas líneas de ítem se listan antes de resumir el resto. */
+  max_lineas?: number;
+}
+
+/** Cuántas líneas de ítem entran cómodas en los 1024 chars del cuerpo. */
+const MAX_LINEAS_PREVIEW = 8;
+
+/** Hasta dónde se recorta el concepto de una línea. */
+const MAX_CONCEPTO_PREVIEW = 24;
+
+/** "$" o "U$S". Mismo criterio que `simboloMoneda` de la emisión guiada. */
+function simbolo(moneda: string | null): string {
+  const m = (moneda ?? "UYU").toUpperCase();
+  if (m === "USD") return "U$S";
+  return m === "UYU" ? "$" : `${m} `;
+}
+
+/**
+ * Alinea a la derecha una columna de importes.
+ *
+ * WhatsApp no usa tipografía monoespaciada, así que esto no queda perfecto — y
+ * queda MUCHO mejor que no hacerlo: los importes terminan más o menos en la
+ * misma zona y la línea se lee como una factura y no como una oración.
+ */
+function fila(etiqueta: string, importe: string, ancho: number): string {
+  const espacio = Math.max(1, ancho - etiqueta.length - importe.length);
+  return `${etiqueta}${" ".repeat(espacio)}${importe}`;
+}
+
+/**
+ * La línea de supuestos: fecha · forma de pago · criterio de IVA.
+ *
+ * LA ARMA TYPESCRIPT, NUNCA EL MODELO. Es la contrapartida de haber sacado
+ * cinco preguntas del flujo: lo que dejó de preguntarse tiene que aparecer acá,
+ * y si lo redactara el modelo podría describir un comprobante distinto del que
+ * se va a emitir sin que nadie lo note.
+ */
+export function describirSupuestos(ctx: ContextoPreview): string {
+  const partes: string[] = [];
+
+  if (ctx.fecha_emision !== undefined && ctx.fecha_emision !== "") {
+    // "Hoy" adelante cuando coincide: es la forma más rápida de que alguien
+    // detecte que el comprobante se está emitiendo con la fecha equivocada.
+    partes.push(ctx.fecha_emision === ctx.hoy ? `Hoy ${ctx.fecha_emision}` : ctx.fecha_emision);
+  }
+
+  if (ctx.forma_pago === 1) partes.push("Contado");
+  else if (ctx.forma_pago === 2) {
+    partes.push(
+      ctx.fecha_vencimiento === undefined || ctx.fecha_vencimiento === ""
+        ? "Crédito"
+        : `Crédito, vence ${ctx.fecha_vencimiento}`,
+    );
+  }
+
+  if (ctx.montos_brutos === true) partes.push("precios con IVA incluido");
+  else if (ctx.montos_brutos === false) partes.push("IVA sumado aparte");
+
+  return partes.join(" · ");
+}
+
+/**
+ * El preview completo: ítems, desglose de IVA, total y supuestos.
+ *
+ * Pensado para el cuerpo de un interactivo de WhatsApp (1024 chars), así que
+ * recorta conceptos largos y resume las líneas de más en vez de arriesgarse a
+ * que el mensaje se trunque justo donde está el total.
+ */
+export function formatearTotales(t: TotalesEstimados, ctx: ContextoPreview = {}): string {
+  const sim = simbolo(t.moneda);
+  const plata = (n: number): string => `${sim}${formatearUy(n)}`;
+
+  const visibles = t.lineas.slice(0, ctx.max_lineas ?? MAX_LINEAS_PREVIEW);
+  const ocultas = t.lineas.length - visibles.length;
+
+  const lineasItems = visibles.map((l) => {
+    const concepto =
+      l.concepto.length > MAX_CONCEPTO_PREVIEW
+        ? `${l.concepto.slice(0, MAX_CONCEPTO_PREVIEW - 1)}…`
+        : l.concepto;
+    const etiqueta = `${formatearUy(l.cantidad)} × ${concepto}`;
+    // Una entrega gratuita muestra el precio tachado de la única forma honesta:
+    // diciendo que no suma. Mostrar su importe sin aclararlo haría que el total
+    // pareciera mal sumado.
+    return { etiqueta, importe: l.aporta_al_total ? plata(l.total) : "sin cargo" };
+  });
+
+  const totales: Array<{ etiqueta: string; importe: string }> = [
+    { etiqueta: "Neto", importe: plata(t.subtotal) },
+    ...Object.entries(t.iva_por_tasa).map(([tasa, monto]) => ({
+      etiqueta: `IVA ${tasa}%`,
+      importe: plata(monto),
+    })),
+    { etiqueta: `TOTAL${t.exacto ? "" : " (aprox.)"}`, importe: plata(t.total) },
+  ];
+
+  const ancho =
+    Math.max(...[...lineasItems, ...totales].map((f) => f.etiqueta.length + f.importe.length)) + 3;
+
+  const bloques: string[] = [];
+  if (lineasItems.length > 0) {
+    const cuerpo = lineasItems.map((f) => fila(f.etiqueta, f.importe, ancho));
+    if (ocultas > 0) cuerpo.push(`… y ${ocultas} ítem${ocultas === 1 ? "" : "s"} más`);
+    bloques.push(cuerpo.join("\n"), "———");
+  }
+  bloques.push(totales.map((f) => fila(f.etiqueta, f.importe, ancho)).join("\n"));
+
+  // Los supuestos van separados por una línea en blanco: no son parte de la
+  // suma, son la letra chica de lo que el sistema decidió por su cuenta.
+  const supuestos = describirSupuestos(ctx);
+  if (supuestos !== "") bloques.push("", supuestos);
+
+  return bloques.join("\n");
 }

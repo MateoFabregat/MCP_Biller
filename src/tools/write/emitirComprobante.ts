@@ -23,6 +23,7 @@ import { resolverClaveSesion } from "../../kapso/borradorStore.js";
 import { KapsoClient } from "../../kapso/client.js";
 import { construirConfirmacionEmision } from "../../kapso/menu.js";
 import { calcularTotales } from "../../services/calcularTotales.js";
+import { hoyDgiUy } from "../../services/fechaUy.js";
 import { buscarPorNumeroInterno } from "../../services/dedupe.js";
 import {
   WRITE_ANNOTATIONS,
@@ -247,6 +248,19 @@ export async function handleEmitirComprobante(
     rateLimitClass: "dgi", // creación de comprobantes: 1 req/seg
     warnings,
     totalesEstimados: totales,
+    // Los supuestos del preview salen del MISMO payload que se hashea, no de
+    // una descripción aparte: no hay forma de que el mensaje diga "contado" y
+    // se emita a crédito. `hoy` entra para poder escribir "Hoy 26/08/2026", y
+    // sale de `fechaUy` y no de `new Date()` por lo de siempre (ver fechaUy.ts).
+    contextoPreview: {
+      ...(payload.fecha_emision !== undefined ? { fecha_emision: payload.fecha_emision } : {}),
+      ...(payload.forma_pago !== undefined ? { forma_pago: payload.forma_pago } : {}),
+      ...(payload.fecha_vencimiento !== undefined
+        ? { fecha_vencimiento: payload.fecha_vencimiento }
+        : {}),
+      ...(payload.montos_brutos !== undefined ? { montos_brutos: payload.montos_brutos } : {}),
+      hoy: hoyDgiUy(),
+    },
   });
 
   // El borrador se descarta cuando el CFE existe, no antes.
@@ -359,6 +373,7 @@ async function adjuntarConfirmacionWhatsapp(
       construirConfirmacionEmision({
         resumen,
         cliente: nombreCliente(p.payload.cliente),
+        documento: documentoCliente(p.payload.cliente),
         tipoComprobante: TIPOS_COMPROBANTE[p.payload.tipo_comprobante],
         ambiente: config.environment,
         token,
@@ -391,7 +406,19 @@ function nombreCliente(cliente: ComprobanteBody["cliente"]): string | undefined 
   if (typeof cliente === "string") return cliente.trim() === "" ? undefined : cliente;
   if (cliente === undefined || cliente === null) return undefined;
   const razon = (cliente as { razon_social?: unknown }).razon_social;
-  return typeof razon === "string" && razon.trim() !== "" ? razon : undefined;
+  if (typeof razon === "string" && razon.trim() !== "") return razon;
+  // Con cédula el nombre principal va en `nombre_fantasia`, no en `razon_social`
+  // (ver el `completar` de emisionGuiada). Sin este fallback, el preview de un
+  // e-Ticket identificado no decía a nombre de quién salía.
+  const fantasia = (cliente as { nombre_fantasia?: unknown }).nombre_fantasia;
+  return typeof fantasia === "string" && fantasia.trim() !== "" ? fantasia : undefined;
+}
+
+/** RUT o CI del receptor, para el encabezado del preview. Se enmascara al mostrarlo. */
+function documentoCliente(cliente: ComprobanteBody["cliente"]): string | undefined {
+  if (typeof cliente !== "object" || cliente === null) return undefined;
+  const doc = (cliente as { documento?: unknown }).documento;
+  return typeof doc === "string" && doc.trim() !== "" ? doc : undefined;
 }
 
 export function registerEmitirComprobante(server: McpServer, ctx: ToolContext): void {

@@ -8,7 +8,7 @@ import {
   elegirComprobanteARepetir,
   estadoDesdeComprobante,
 } from "../src/services/repetirUltima.js";
-import { siguientePaso } from "../src/kapso/emision.js";
+import { aplicarDefaults, siguientePaso } from "../src/kapso/emision.js";
 import { handleEmisionGuiada } from "../src/tools/emisionGuiada.js";
 import { handleEmitirComprobante } from "../src/tools/write/emitirComprobante.js";
 import { interpretarMensaje } from "../src/kapso/menu.js";
@@ -83,8 +83,12 @@ describe("estadoDesdeComprobante", () => {
     // evitar — la repetición no puede reintroducirlo por otra puerta.
     const r = estadoDesdeComprobante(detalle());
     expect(r.estado.fecha_emision).toBeUndefined();
-    // Con todo copiado, lo próximo que pregunta el flujo ES la fecha.
-    expect(siguientePaso(r.estado).paso).toBe("fecha");
+
+    // Y "de hoy" dejó de costar una pregunta: `aplicarDefaults` la pone. Antes
+    // este era el único paso que quedaba después de copiar todo; ahora la
+    // repetición va derecho al preview, que es donde la fecha se verifica.
+    expect(siguientePaso(r.estado, { hoy: "26/08/2026" }).paso).toBe("confirmar");
+    expect(aplicarDefaults(r.estado, { hoy: "26/08/2026" }).estado.fecha_emision).toBe("26/08/2026");
   });
 
   it("NO copia adenda ni tasa de cambio", () => {
@@ -99,7 +103,7 @@ describe("estadoDesdeComprobante", () => {
 describe("el flujo entero: repetir → completar conceptos al emitir", () => {
   const SESION = "+59899123456";
 
-  it("repetir_ultima_de deja el flujo a UNA pregunta (la fecha)", async () => {
+  it("repetir_ultima_de deja el flujo en CERO preguntas: derecho al preview", async () => {
     const { ctx } = makeCtx({
       impl: (opts) => {
         // La misma respuesta sirve para el listado y el detalle: el detalle es
@@ -122,7 +126,12 @@ describe("el flujo entero: repetir → completar conceptos al emitir", () => {
         )
       ).content[0]!.text,
     );
-    expect(r.paso).toBe("fecha");
+    // "Facturale lo de siempre a Pérez" ahora no pregunta NADA: los ítems, el
+    // IVA y la forma de pago vienen copiados, y la fecha —lo único que faltaba—
+    // es hoy por default y sale escrita en el preview.
+    expect(r.paso).toBe("confirmar");
+    expect(r.listo_para_requisitos).toBe(true);
+    expect(r.defaults_aplicados).toContain("fecha_emision");
     // El concepto NO viaja en la respuesta: quedó en el store.
     expect(JSON.stringify(r)).not.toContain("bolsas de harina");
     expect(r.estado_entendido.items[0].concepto_cargado).toBe(true);

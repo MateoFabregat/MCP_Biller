@@ -34,6 +34,7 @@
 
 import { FORMAS_PAGO, INDICADORES_FACTURACION, TIPOS_COMPROBANTE } from "../biller/cfeSchema.js";
 import { hoyDgiUy } from "../services/fechaUy.js";
+import { formatearUy } from "../services/importe.js";
 import type { InteractivoBotones, InteractivoLista } from "./client.js";
 
 /** Prefijo de los ids de la emisión guiada. Distinto del de confirmación. */
@@ -53,14 +54,37 @@ export type ClaseReceptor = "empresa" | "consumidor_final";
  * — y el que tiene que reconstruir qué falta es el modelo, justo lo que este
  * módulo existe para evitar.
  *
- * Ahora cada dato es su propio paso: concepto → precio → cantidad → IVA. Son
- * más mensajes, pero cada uno se contesta con una palabra o un toque, y en
- * cualquier momento se puede cortar y retomar sin que nadie tenga que acordarse
- * de qué le faltaba.
+ * Ahora cada dato es su propio paso: concepto → precio → IVA. Son más mensajes,
+ * pero cada uno se contesta con una palabra o un toque, y en cualquier momento
+ * se puede cortar y retomar sin que nadie tenga que acordarse de qué le faltaba.
  *
  * Eso NO significa preguntar lo que ya se sabe: quien escribe "facturale a
- * Pérez 2 bolsas de harina a 6000" llega con cuatro pasos resueltos de una y el
- * flujo arranca en el quinto. El orden es la ruta más larga, no la obligatoria.
+ * Pérez 2 bolsas de harina a 6000" llega con todo resuelto y va derecho al
+ * preview. El orden es la ruta más larga, no la obligatoria.
+ *
+ * LO QUE DEJÓ DE SER UN PASO, Y POR QUÉ
+ *
+ * Una emisión a un cliente conocido hacía DOCE preguntas. Medido: incluso
+ * arrancando con "facturale a Pérez 2 bolsas a 6500" quedaban siete. Cada una
+ * es un mensaje más para alguien que tiene a un cliente esperando enfrente.
+ *
+ * Cinco de esas doce se contestaban solas y ahora las contesta el código:
+ *
+ *   · `fecha` → hoy. Es la respuesta el 99% de las veces, y el 1% restante se
+ *     escribe ("para el viernes") sin que nadie tenga que tocar un botón.
+ *   · `forma_pago` → contado.
+ *   · `moneda` → UYU, salvo que el texto del usuario hable de dólares.
+ *   · `cantidad` → 1 cuando no vino en el mensaje.
+ *   · `precio_incluye_iva` + `iva` → UN paso con tres botones.
+ *
+ * Y dos se mudaron al preview de confirmación, que es donde el usuario ya está
+ * mirando el comprobante entero: `otro_item` (botón ➕ Otro ítem) y `adenda`
+ * (se escribe: "ponele una nota: orden 4471").
+ *
+ * NINGÚN DEFAULT ES SILENCIOSO. Los cinco aparecen en el preview antes de
+ * emitir — la fecha, la forma de pago y el criterio de IVA en la línea de
+ * supuestos, la cantidad como "1 × concepto". Un default que el usuario no ve
+ * no es un default, es una suposición nuestra impresa en un documento fiscal.
  */
 export type PasoEmision =
   | "receptor"
@@ -74,10 +98,7 @@ export type PasoEmision =
   | "concepto"
   | "precio"
   | "precio_incluye_iva"
-  | "cantidad"
   | "iva"
-  | "otro_item"
-  | "adenda"
   | "confirmar";
 
 /** Un ítem en construcción. Se completa campo por campo, en su propio paso. */
@@ -129,6 +150,20 @@ export interface EstadoEmision {
   indicador_facturacion?: number;
   moneda?: string;
   /**
+   * true cuando el TEXTO del usuario dejó la moneda en duda ("son 200 dólares").
+   *
+   * Es lo que convierte el default de moneda en algo defendible. Sin esta
+   * marca hay dos opciones y las dos están mal: preguntar siempre (un paso más
+   * para el 95% que factura en pesos) o defaultear siempre a UYU (una factura
+   * en pesos por un precio que el usuario cotizó en dólares — un error de 40x
+   * que además queda perfectamente bien formado ante DGI).
+   *
+   * Con la marca, el default vale para el silencio y la pregunta aparece justo
+   * cuando hay algo que desambiguar. La pone `sugiereDolares` desde el mensaje;
+   * `siguientePaso` no lee texto libre, solo este booleano.
+   */
+  moneda_dudosa?: boolean;
+  /**
    * Pesos por unidad de la moneda extranjera. Solo cuando la moneda no es UYU.
    *
    * Sin esto, `totalEnPesos` devuelve null y el chequeo del umbral de 5.000 UI
@@ -162,9 +197,23 @@ export interface EstadoEmision {
    * mitad de los casos.
    */
   montos_brutos?: boolean;
-  /** Nota al pie del comprobante. Texto libre del usuario. */
+  /**
+   * Nota al pie del comprobante. Texto libre del usuario.
+   *
+   * YA NO ES UN PASO. Preguntar "¿querés agregar una nota?" al final de un
+   * flujo largo es poner una pregunta abierta justo donde la gente abandona, y
+   * la respuesta es "no" casi siempre. Se setea escribiéndola en cualquier
+   * momento del flujo ("ponele una nota: orden 4471"): el enrutador manda eso a
+   * `flujo_emision` y el agente lo pasa como `adenda`.
+   */
   adenda?: string;
-  /** true cuando el usuario dijo explícitamente que no quiere adenda. */
+  /**
+   * true cuando el usuario dijo explícitamente que no quiere adenda.
+   *
+   * Sobrevive a la eliminación del paso porque los borradores guardados de
+   * antes lo traen, y porque sigue siendo un dato honesto: "me lo preguntaron y
+   * dije que no". Ya no cambia ningún camino del flujo.
+   */
   sin_adenda?: boolean;
   /**
    * Identificador de deduplicación, generado por el server al abrir el borrador.
@@ -354,9 +403,13 @@ export function construirSubmenuIva(): InteractivoBotones {
 /**
  * La fecha, con el caso normal a un toque.
  *
- * El 99% de las veces la respuesta es "hoy", así que la pregunta abierta
- * ("¿qué fecha?") le cobra a todo el mundo el costo del caso raro. Con el botón,
- * lo normal es un toque y lo excepcional sigue siendo posible escribiéndolo.
+ * YA NO ES UN PASO DEL FLUJO: el 99% de las veces la respuesta es "hoy", así
+ * que ahora "hoy" es el default y la fecha aparece en el preview en vez de en
+ * una pregunta. Un botón cuyo 99% es una sola opción no es una pregunta, es una
+ * confirmación disfrazada — y confirmar es justo lo que hace el preview.
+ *
+ * Se conserva para el camino explícito: el usuario que dice "quiero cambiar la
+ * fecha" sin decir cuál. Ahí sí hay una pregunta genuina que hacer.
  */
 export function construirSubmenuFecha(hoy: string = hoyDgi()): InteractivoBotones {
   return {
@@ -393,48 +446,34 @@ export function construirSubmenuReceptorOpcional(): InteractivoBotones {
   };
 }
 
-/** Cantidad, con el caso normal (una unidad) a un toque. */
-export function construirSubmenuCantidad(): InteractivoBotones {
+/**
+ * La salida del ítem que se abrió por error.
+ *
+ * `➕ Otro ítem` en el preview mete un ítem vacío y el flujo pasa a pedir su
+ * concepto, que es texto libre. Sin este botón, tocar ➕ sin querer deja al
+ * usuario en una pregunta abierta sin ninguna salida tocable — el mismo modo de
+ * falla que el paso `otro_item` vino a arreglar en su momento, reintroducido
+ * por la puerta de al lado. El invariante del módulo es que el flujo no se
+ * puede trancar, y un botón vale más que un comentario que lo declare.
+ */
+export function construirSubmenuConceptoExtra(): InteractivoBotones {
   return {
     tipo: "botones",
-    encabezado: "¿Cuántos?",
-    cuerpo: "Si es uno solo, tocá el botón. Si son varios, escribime el número.",
-    botones: [{ id: `${PREFIJO_PASO}cantidad:1`, titulo: "1 unidad" }],
-  };
-}
-
-/** ¿Va otro ítem o ya está? Sin esto, un comprobante es siempre de una línea. */
-export function construirSubmenuOtroItem(cantidadItems: number): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: cantidadItems === 1 ? "Un ítem cargado" : `${cantidadItems} ítems cargados`,
-    cuerpo: "¿Le agregás otra cosa al comprobante, o lo cerramos así?",
-    botones: [
-      { id: `${PREFIJO_PASO}item:listo`, titulo: "✅ Así está bien" },
-      { id: `${PREFIJO_PASO}item:otro`, titulo: "➕ Agregar otro" },
-    ],
+    encabezado: "¿Qué le agregás?",
+    cuerpo:
+      "Decime qué es lo otro que le vendiste.\n\nSi tocaste ➕ sin querer, volvemos al comprobante " +
+      "como estaba.",
+    botones: [{ id: `${PREFIJO_PASO}item:cancelar`, titulo: "↩️ Volver así" }],
   };
 }
 
 /**
- * La adenda es el último paso y trae su propia salida.
+ * Contado o crédito. Define si la factura entra en la cuenta corriente.
  *
- * Es opcional de verdad, así que la pregunta tiene que poder contestarse con un
- * toque que diga "no". Una pregunta abierta al final de un flujo largo es donde
- * la gente abandona.
+ * YA NO ES UN PASO: el default es contado y sale escrito en el preview. Se
+ * conserva para el pedido explícito ("quiero cambiar la forma de pago") y
+ * porque el crédito sigue derivando el paso de vencimiento.
  */
-export function construirSubmenuAdenda(): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "¿Alguna nota?",
-    cuerpo:
-      "Podés agregarle una adenda al comprobante: una referencia, un número de orden, " +
-      "condiciones de entrega. Si no hace falta, seguimos.",
-    botones: [{ id: `${PREFIJO_PASO}adenda:no`, titulo: "Sin nota, dale" }],
-  };
-}
-
-/** Contado o crédito. Define si la factura entra en la cuenta corriente. */
 export function construirSubmenuFormaPago(): InteractivoBotones {
   return {
     tipo: "botones",
@@ -461,12 +500,11 @@ export function construirSubmenuFormaPago(): InteractivoBotones {
  * de la misma factura.
  */
 export function construirSubmenuMontosBrutos(precio: number, moneda: string): InteractivoBotones {
-  const simbolo = moneda === "USD" ? "U$S" : "$";
   return {
     tipo: "botones",
     encabezado: "Una cosa sobre el precio",
     cuerpo:
-      `Los ${simbolo}${precio} que me pasaste, ¿ya tienen el IVA adentro?\n\n` +
+      `Los ${simboloMoneda(moneda)}${formatearUy(precio)} que me pasaste, ¿ya tienen el IVA adentro?\n\n` +
       "Si es el precio que le cobrás al cliente en el mostrador, sí. Si es el precio sin impuestos " +
       "y el IVA se suma aparte, no.",
     pie: "Si me equivoco acá, la factura sale 22% distinta.",
@@ -475,6 +513,49 @@ export function construirSubmenuMontosBrutos(precio: number, moneda: string): In
       { id: `${PREFIJO_PASO}iva_incluido:no`, titulo: "➕ Se suma aparte" },
     ],
   };
+}
+
+/**
+ * LAS DOS PREGUNTAS DE IVA, EN UN SOLO MENSAJE.
+ *
+ * Eran dos pasos seguidos —"¿ya incluye IVA?" y después "¿qué tasa?"— y eran
+ * dos formas de preguntar lo mismo: cómo tratar el impuesto de esta venta. La
+ * segunda además tenía la respuesta cantada: la tasa básica es el 22% de las
+ * ventas y bastante más del 90% de las líneas de una PyME.
+ *
+ * Fusionadas, los dos botones grandes contestan LAS DOS COSAS de una (criterio
+ * de precio + tasa básica) y el tercero abre el caso raro. El que vende
+ * alimentos al 10% paga un toque de más; el resto ahorra un mensaje entero, que
+ * es la proporción correcta.
+ *
+ * Nótese que los dos primeros botones son EXACTAMENTE los de `montos_brutos`:
+ * la pregunta que se conserva es la que mueve plata (equivocarse cambia la
+ * factura un 22%), y la que se defaultea es la que casi nunca cambia.
+ */
+export function construirSubmenuIvaFusionado(precio: number, moneda: string): InteractivoBotones {
+  return {
+    tipo: "botones",
+    encabezado: "Una cosa sobre el precio",
+    cuerpo:
+      `Los ${simboloMoneda(moneda)}${formatearUy(precio)} que me pasaste, ¿ya tienen el IVA adentro?\n\n` +
+      "Si es el precio que le cobrás al cliente en el mostrador, sí. Si es el precio sin impuestos " +
+      "y el IVA se suma aparte, no.\n\n" +
+      "En los dos casos tomo la tasa básica (22%). Si esto lleva otro IVA —10%, exento—, tocá el " +
+      "tercer botón.",
+    pie: "Si me equivoco acá, la factura sale 22% distinta.",
+    botones: [
+      { id: `${PREFIJO_PASO}iva_incluido:si`, titulo: "✅ Ya incluye IVA" },
+      { id: `${PREFIJO_PASO}iva_incluido:no`, titulo: "➕ Se suma aparte" },
+      { id: `${PREFIJO_PASO}iva_incluido:otro`, titulo: "🔢 Otro IVA" },
+    ],
+  };
+}
+
+/** "$" o "U$S". Se usa en toda pregunta que le muestre plata al usuario. */
+export function simboloMoneda(moneda: string | undefined): string {
+  const m = (moneda ?? "UYU").toUpperCase();
+  if (m === "USD") return "U$S";
+  return m === "UYU" ? "$" : `${m} `;
 }
 
 /** Moneda. Solo se pregunta si algo en el mensaje sugiere que no es UYU. */
@@ -488,6 +569,31 @@ export function construirSubmenuMoneda(): InteractivoBotones {
       { id: `${PREFIJO_PASO}moneda:USD`, titulo: "💵 Dólares" },
     ],
   };
+}
+
+/**
+ * ¿El texto del usuario habla de dólares?
+ *
+ * El comentario de `construirSubmenuMoneda` declaraba desde siempre que la
+ * moneda "solo se pregunta si algo en el mensaje sugiere que no es UYU" — y el
+ * código la preguntaba SIEMPRE. Esta función es lo que hacía falta para que la
+ * declaración fuera cierta.
+ *
+ * Es a propósito estrecha: solo detecta lo que nombra al dólar. No intenta
+ * inferir "es un monto chico, debe ser en pesos" ni nada por el estilo. Un
+ * falso positivo cuesta una pregunta; un falso negativo emite una factura en
+ * pesos por un precio cotizado en dólares, que es un error de 40x. Ante la duda
+ * conviene preguntar, así que el sesgo va para ese lado.
+ */
+export function sugiereDolares(texto: string): boolean {
+  const limpio = texto
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "");
+  // "u$s", "us$" y "usd" no sobreviven a un \b (el $ ya es límite de palabra),
+  // así que van por inclusión directa.
+  if (limpio.includes("u$s") || limpio.includes("us$") || limpio.includes("usd")) return true;
+  return /\bdolar(es)?\b/.test(limpio);
 }
 
 /**
@@ -532,7 +638,8 @@ export type RespuestaPaso =
   | { paso: "cantidad"; cantidad: number }
   | { paso: "item_otro" }
   | { paso: "item_listo" }
-  | { paso: "adenda_no" }
+  | { paso: "item_cancelar" }
+  | { paso: "iva_otro" }
   | { paso: "iva"; indicador_facturacion: number }
   | { paso: "moneda"; moneda: string }
   | { paso: "forma_pago"; forma_pago: number }
@@ -576,9 +683,8 @@ export function interpretarPaso(raw: string): RespuestaPaso {
     case "item":
       if (valor === "otro") return { paso: "item_otro" };
       if (valor === "listo") return { paso: "item_listo" };
+      if (valor === "cancelar") return { paso: "item_cancelar" };
       return { paso: "ninguna" };
-    case "adenda":
-      return valor === "no" ? { paso: "adenda_no" } : { paso: "ninguna" };
     case "iva": {
       const codigo = Number(valor);
       return Number.isInteger(codigo) && codigo in INDICADORES_FACTURACION
@@ -594,12 +700,141 @@ export function interpretarPaso(raw: string): RespuestaPaso {
         : { paso: "ninguna" };
     }
     case "iva_incluido":
+      // Los dos primeros contestan las DOS cosas: criterio de precio y tasa
+      // básica. El tercero no contesta nada, abre la pregunta de la tasa.
       if (valor === "si") return { paso: "montos_brutos", incluye_iva: true };
       if (valor === "no") return { paso: "montos_brutos", incluye_iva: false };
+      if (valor === "otro") return { paso: "iva_otro" };
       return { paso: "ninguna" };
     default:
       return { paso: "ninguna" };
   }
+}
+
+// --- Dirección y ciudad, en un solo mensaje ---------------------------------
+
+/**
+ * "Rivera 1234, Melo" -> { direccion: "Rivera 1234", ciudad: "Melo" }
+ *
+ * Eran dos preguntas seguidas y son un solo dato en la cabeza del usuario: nadie
+ * dice su dirección sin la ciudad. Cobrarle dos mensajes al cliente NUEVO —el
+ * único que pasa por acá, y el que más chance tiene de abandonar porque todavía
+ * no vio ningún resultado— era el peor lugar posible para poner un paso de más.
+ *
+ * SE PARTE POR LA ÚLTIMA COMA, y no por la primera: las direcciones uruguayas
+ * llevan comas adentro ("Av. Italia 1234, apto 302, Montevideo"). Con la
+ * primera, el apartamento se convertía en la ciudad.
+ *
+ * Sin coma no se adivina: se devuelve todo como dirección y `ciudad` queda
+ * `undefined`, así que el flujo repregunta SOLO la ciudad. Partir por el último
+ * espacio ("Rivera 1234 Melo" -> ciudad "Melo") funcionaría en el ejemplo y
+ * fallaría en "Ruta 8 km 32", dejando "32" como ciudad de un cliente real.
+ */
+export function separarDireccionCiudad(bruto: string): { direccion: string; ciudad?: string } {
+  const texto = bruto.trim();
+  const coma = texto.lastIndexOf(",");
+  if (coma === -1) return { direccion: texto };
+
+  const direccion = texto.slice(0, coma).trim();
+  const ciudad = texto.slice(coma + 1).trim();
+  // Una coma al final ("Rivera 1234,") no es una ciudad vacía: es una coma al
+  // final. Y una dirección vacía ("‚ Melo") tampoco sirve de nada.
+  if (direccion === "" || ciudad === "") return { direccion: texto.replace(/,\s*$/, "") };
+  return { direccion, ciudad };
+}
+
+// --- Los defaults -----------------------------------------------------------
+
+/** Qué campo se completó solo. Se usa para explicarlo en el preview. */
+export type ClaveDefault = "fecha_emision" | "moneda" | "forma_pago" | "cantidad";
+
+export interface EstadoConDefaults {
+  /** Copia del estado con los defaults ya puestos. El original no se toca. */
+  estado: EstadoEmision;
+  /** Qué se completó solo, para poder decirlo. */
+  aplicados: ClaveDefault[];
+}
+
+/** Lo que `aplicarDefaults` necesita saber del mundo. Todo inyectable. */
+export interface ContextoDefaults {
+  /** Hoy en dd/mm/aaaa. Se inyecta para que la máquina de estados no lea el reloj. */
+  hoy?: string;
+}
+
+/**
+ * Completa lo que se puede contestar solo.
+ *
+ * POR QUÉ DEVUELVE UNA COPIA Y NO ESCRIBE EN EL ESTADO GUARDADO
+ *
+ * Es la decisión más importante de esta función y la que hace que las
+ * correcciones sigan funcionando. En el borrador que se persiste,
+ * `forma_pago: undefined` significa "no me dijeron nada" y `forma_pago: 1`
+ * significa "el usuario dijo contado". Si el default se escribiera en el
+ * borrador, los dos casos quedarían indistinguibles — y peor: `fusionarEstado`
+ * trata lo guardado como base, así que el default escrito sería un dato con la
+ * misma jerarquía que una respuesta del usuario.
+ *
+ * Manteniéndolo afuera, "es a crédito" dicho tres mensajes después llega como
+ * `forma_pago: 2`, pisa un `undefined` y no hay nada que discutir. El default
+ * se vuelve a calcular en cada lectura, que es exactamente lo que un default
+ * tiene que ser: la respuesta al silencio, no un dato.
+ *
+ * Los cinco defaults, y por qué son defendibles:
+ *
+ *   · fecha = hoy. Se factura lo que se acaba de vender.
+ *   · moneda = UYU, salvo que el texto haya hablado de dólares (ver
+ *     `moneda_dudosa`). Ahí la pregunta vuelve, porque hay algo que resolver.
+ *   · forma_pago = contado. Es el default de DGI y el del mostrador.
+ *   · cantidad = 1 por ítem que no la traiga. "una bolsa de portland" es lo que
+ *     alguien dice cuando vende una.
+ *   · el IVA NO se defaultea acá: se pregunta, fusionado, en un solo paso.
+ *     Equivocarse ahí cambia la factura un 22% (ver `montos_brutos`), así que
+ *     es la única de las seis que se sigue preguntando.
+ *
+ * Y los cinco vuelven a aparecer en el preview antes de emitir. Un default que
+ * el usuario no ve es una suposición nuestra impresa en un documento fiscal.
+ */
+export function aplicarDefaults(
+  estado: EstadoEmision,
+  contexto: ContextoDefaults = {},
+): EstadoConDefaults {
+  const hoy = contexto.hoy ?? hoyDgi();
+  const salida: EstadoEmision = { ...estado };
+  const aplicados: ClaveDefault[] = [];
+
+  if ((salida.fecha_emision ?? "") === "") {
+    salida.fecha_emision = hoy;
+    aplicados.push("fecha_emision");
+  }
+
+  // La moneda se defaultea SOLO cuando no hay nada que desambiguar. Con
+  // `moneda_dudosa` se deja en blanco a propósito: `siguientePaso` la pregunta.
+  if ((salida.moneda ?? "") === "" && salida.moneda_dudosa !== true) {
+    salida.moneda = "UYU";
+    aplicados.push("moneda");
+  }
+
+  if (salida.forma_pago === undefined) {
+    salida.forma_pago = 1;
+    aplicados.push("forma_pago");
+  }
+
+  // La cantidad se completa solo en los ítems que ya tienen concepto: un ítem
+  // vacío es "estoy por agregar otra cosa", y ponerle cantidad 1 lo haría
+  // parecer a medio cargar en vez de recién abierto.
+  if (salida.items !== undefined) {
+    let toco = false;
+    salida.items = salida.items.map((item) => {
+      const tieneConcepto = (item.concepto ?? "") !== "";
+      const sinCantidad = typeof item.cantidad !== "number" || item.cantidad <= 0;
+      if (!tieneConcepto || !sinCantidad) return item;
+      toco = true;
+      return { ...item, cantidad: 1 };
+    });
+    if (toco) aplicados.push("cantidad");
+  }
+
+  return { estado: salida, aplicados };
 }
 
 // --- Qué sigue --------------------------------------------------------------
@@ -620,14 +855,26 @@ export interface SiguientePaso {
  * Dado lo que se sabe, qué preguntar ahora. UNA sola cosa por vez.
  *
  * El orden no es arbitrario: primero lo que DERIVA otras decisiones (a quién),
- * después lo que el usuario tiene en la cabeza en ese momento (qué vendió y a
- * cuánto), y al final lo administrativo (IVA, moneda, forma de pago), que es lo
- * que se puede defaultear sin que nadie se sorprenda.
+ * y después lo que el usuario tiene en la cabeza en ese momento (qué vendió y a
+ * cuánto). Lo administrativo —fecha, moneda, forma de pago, cantidad— ya no se
+ * pregunta: lo contesta `aplicarDefaults` y se muestra en el preview.
+ *
+ * SIGUE SIENDO PURA. El único dato del mundo que necesita es qué día es hoy, y
+ * entra como parámetro (`contexto.hoy`) con un default inyectable — el mismo
+ * patrón que `hoyDgi(ahora)` y `construirSubmenuFecha(hoy)`. Así el test que
+ * verifica que la fecha se defaultea no depende de cuándo se corra.
  *
  * Nunca devuelve "no sé qué preguntar": si no falta nada, `listo` es true. Ese
  * es el invariante que hace que el flujo no se pueda trancar.
  */
-export function siguientePaso(estado: EstadoEmision): SiguientePaso {
+export function siguientePaso(
+  estadoCrudo: EstadoEmision,
+  contexto: ContextoDefaults = {},
+): SiguientePaso {
+  // Se razona SOBRE los defaults: un campo que se contesta solo no es un campo
+  // que falte. El estado que llegó no se toca (ver `aplicarDefaults`).
+  const estado = aplicarDefaults(estadoCrudo, contexto).estado;
+
   const tipo = estado.clase_receptor === undefined ? null : tipoComprobanteSugerido(estado.clase_receptor);
   const paso = (p: Omit<SiguientePaso, "tipo" | "listo">): SiguientePaso => ({
     ...p,
@@ -647,14 +894,10 @@ export function siguientePaso(estado: EstadoEmision): SiguientePaso {
     };
   }
 
-  // 2. Fecha.
-  if ((estado.fecha_emision ?? "") === "") {
-    return paso({
-      paso: "fecha",
-      pregunta: `¿De qué fecha es el comprobante? Si es de hoy (${hoyDgi()}), decime "hoy".`,
-      interactivo: construirSubmenuFecha(),
-    });
-  }
+  // 2. La fecha ya no se pregunta acá: es hoy salvo que el usuario diga otra
+  //    cosa, y sale escrita en el preview. El paso "fecha" sigue existiendo en
+  //    `PasoEmision` porque la tool lo devuelve cuando el usuario pide cambiarla
+  //    sin decir por cuál; lo que ya no existe es la pregunta obligatoria.
 
   // 3. Cliente. Para e-Factura es obligatorio SIEMPRE; para e-Ticket se puede
   //    no identificar, pero tiene que decirlo explícitamente.
@@ -687,15 +930,22 @@ export function siguientePaso(estado: EstadoEmision): SiguientePaso {
   ) {
     return paso({
       paso: "datos_cliente_nuevo",
+      // Las dos cosas en un mensaje: nadie dice su dirección sin la ciudad. Si
+      // vino con coma, `separarDireccionCiudad` ya las partió y este paso no se
+      // alcanza; la repregunta queda solo para el que mandó una sin la otra.
       pregunta:
         (estado.direccion_cliente ?? "") === ""
-          ? "Es la primera vez que le facturás a este cliente, así que hay que darlo de alta. ¿Cuál es su dirección?"
+          ? "Es la primera vez que le facturás a este cliente, así que hay que darlo de alta. " +
+            '¿Dirección y ciudad? Todo junto va bien: "Rivera 1234, Melo".'
           : "¿En qué ciudad?",
       interactivo: null,
     });
   }
 
-  // 5. Moneda.
+  // 5. Moneda. Solo se llega acá cuando el texto del usuario habló de dólares:
+  //    en el silencio, `aplicarDefaults` ya la dejó en UYU. Es la promesa que
+  //    el comentario de `construirSubmenuMoneda` venía haciendo desde siempre y
+  //    el código no cumplía.
   if ((estado.moneda ?? "") === "") {
     return paso({
       paso: "moneda",
@@ -718,14 +968,9 @@ export function siguientePaso(estado: EstadoEmision): SiguientePaso {
     });
   }
 
-  // 6. Forma de pago.
-  if (estado.forma_pago === undefined) {
-    return paso({
-      paso: "forma_pago",
-      pregunta: "¿Te paga al contado o a crédito?",
-      interactivo: construirSubmenuFormaPago(),
-    });
-  }
+  // 6. La forma de pago ya no se pregunta: el default es contado y sale escrito
+  //    en el preview. "Es a crédito" dicho en cualquier momento la cambia, y
+  //    ahí sí aparece el paso de vencimiento de acá abajo.
 
   // 6b. Vencimiento, SOLO a crédito. Sin esto la venta a crédito no aparece en
   //     "¿quién me debe?" ni en vencimientos: se emitió para cobrar después y
@@ -740,15 +985,18 @@ export function siguientePaso(estado: EstadoEmision): SiguientePaso {
     });
   }
 
-  // 7-10. El ítem en curso, campo por campo.
+  // 7-9. El ítem en curso, campo por campo: concepto → precio → IVA.
+  //
+  // La cantidad dejó de estar en esa lista: `aplicarDefaults` la pone en 1 y el
+  // preview la muestra como "1 × concepto". El que dice "2 bolsas" ya la trajo;
+  // el que no la dijo casi siempre está vendiendo una.
   //
   // Si el usuario ya cerró los ítems, los que quedaron a medio cargar se
-  // descartan. Sin esto el flujo se trancaba PARA SIEMPRE: tocar "➕ Agregar
-  // otro" por error mete un ítem vacío, y el chequeo de `concepto` (paso 7) va
-  // ANTES que el de `items_cerrados` (paso 11), así que "✅ Así está bien" no
-  // servía de nada y la pregunta que volvía era texto libre, sin ningún botón de
-  // salida. Rompía el invariante declarado del módulo: el flujo no se puede
-  // trancar.
+  // descartan. Sin esto el flujo se trancaba PARA SIEMPRE: abrir un ítem por
+  // error deja uno vacío, y el chequeo de `concepto` va ANTES que el de
+  // `items_cerrados`. Hoy la salida de ese callejón es el botón "↩️ Volver así"
+  // de `construirSubmenuConceptoExtra`, pero el filtro se conserva: los
+  // borradores viejos traen `items_cerrados` y el invariante vale igual.
   const items = (estado.items ?? []).filter(
     (i) => estado.items_cerrados !== true || (i.concepto ?? "") !== "",
   );
@@ -756,13 +1004,16 @@ export function siguientePaso(estado: EstadoEmision): SiguientePaso {
   const ordinal = items.length <= 1 ? "" : ` del ítem ${items.length}`;
 
   if (enCurso === undefined || (enCurso.concepto ?? "") === "") {
+    // Con un ítem completo atrás, este paso es "tocaste ➕": la pregunta lleva
+    // su propia salida. Con ninguno, es la primera pregunta del comprobante y
+    // no hay a qué volver.
+    const esAgregado = items.length > 1;
     return paso({
       paso: "concepto",
-      pregunta:
-        items.length === 0
-          ? '¿Qué le vendiste? Decime solo qué es, por ejemplo: "bolsas de harina".'
-          : "¿Qué es lo que agregás?",
-      interactivo: null,
+      pregunta: esAgregado
+        ? "¿Qué es lo que agregás?"
+        : '¿Qué le vendiste? Decime solo qué es, por ejemplo: "bolsas de harina".',
+      interactivo: esAgregado ? construirSubmenuConceptoExtra() : null,
     });
   }
 
@@ -774,50 +1025,47 @@ export function siguientePaso(estado: EstadoEmision): SiguientePaso {
     });
   }
 
-  // El IVA incluido se pregunta UNA vez, apenas hay un precio sobre la mesa. Es
-  // el paso que evita facturar 22% de más sobre un precio de mostrador.
-  if (estado.montos_brutos === undefined) {
+  // EL IVA, EN UN SOLO PASO.
+  //
+  // Los dos datos —si el precio ya lo incluye y a qué tasa— eran dos preguntas
+  // seguidas sobre lo mismo. Fusionadas, los dos botones normales contestan las
+  // dos cosas (criterio + tasa básica) y el tercero abre el caso raro.
+  //
+  // Las tres ramas siguen existiendo por separado porque el estado puede llegar
+  // con una mitad resuelta: por `repetir_ultima_de`, que copia el indicador de
+  // la venta anterior, o por el propio botón "🔢 Otro IVA", que fija la tasa y
+  // deja el criterio de precio pendiente.
+  const indicador = enCurso.indicador_facturacion ?? estado.indicador_facturacion;
+  if (estado.montos_brutos === undefined && indicador === undefined) {
     return paso({
-      paso: "precio_incluye_iva",
-      pregunta: `Los ${enCurso.precio} que me pasaste, ¿ya tienen el IVA adentro?`,
-      interactivo: construirSubmenuMontosBrutos(enCurso.precio, estado.moneda ?? "UYU"),
+      paso: "iva",
+      pregunta:
+        `Los ${simboloMoneda(estado.moneda)}${formatearUy(enCurso.precio)} que me pasaste, ` +
+        "¿ya tienen el IVA adentro? (tomo tasa básica 22% salvo que me digas otra cosa)",
+      interactivo: construirSubmenuIvaFusionado(enCurso.precio, estado.moneda ?? "UYU"),
     });
   }
-
-  if (typeof enCurso.cantidad !== "number" || enCurso.cantidad <= 0) {
-    return paso({
-      paso: "cantidad",
-      pregunta: `¿Cuántos${ordinal}?`,
-      interactivo: construirSubmenuCantidad(),
-    });
-  }
-
-  if (enCurso.indicador_facturacion === undefined && estado.indicador_facturacion === undefined) {
+  if (indicador === undefined) {
     return paso({
       paso: "iva",
       pregunta: "¿Qué IVA lleva? Tasa básica (22%), mínima (10%) o exento.",
       interactivo: construirSubmenuIva(),
     });
   }
-
-  // 11. ¿Otro ítem? Sin este paso, todo comprobante tiene exactamente una línea.
-  if (estado.items_cerrados !== true) {
+  if (estado.montos_brutos === undefined) {
     return paso({
-      paso: "otro_item",
-      pregunta: "¿Le agregás otro ítem al comprobante, o lo cerramos así?",
-      interactivo: construirSubmenuOtroItem(items.length),
+      paso: "precio_incluye_iva",
+      pregunta:
+        `Los ${simboloMoneda(estado.moneda)}${formatearUy(enCurso.precio)} que me pasaste, ` +
+        "¿ya tienen el IVA adentro?",
+      interactivo: construirSubmenuMontosBrutos(enCurso.precio, estado.moneda ?? "UYU"),
     });
   }
 
-  // 12. Adenda, opcional y con salida de un toque.
-  if ((estado.adenda ?? "") === "" && estado.sin_adenda !== true) {
-    return paso({
-      paso: "adenda",
-      pregunta: "¿Querés agregarle alguna nota al comprobante (adenda)? Si no, seguimos.",
-      interactivo: construirSubmenuAdenda(),
-    });
-  }
-
+  // 10. Y ya está: el resto se decide sobre el preview, que es donde el usuario
+  //     tiene el comprobante entero delante. "¿Otro ítem?" es un botón de ahí, y
+  //     la adenda se escribe. Preguntar las dos cosas acá era cobrarle dos
+  //     mensajes a todo el mundo por dos casos minoritarios.
   return {
     paso: "confirmar",
     pregunta:

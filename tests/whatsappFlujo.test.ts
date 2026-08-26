@@ -689,6 +689,7 @@ describe("confirmación de emisión con botones", () => {
     const conf = construirConfirmacionEmision({
       resumen: "Total: UYU 14.640,00 (IVA 2.640,00)",
       cliente: "PANADERÍA LA ESPIGA SRL",
+      documento: "219999830019",
       tipoComprobante: "e-Factura",
       ambiente: "test",
       token,
@@ -700,10 +701,58 @@ describe("confirmación de emisión con botones", () => {
 
     const vuelta = interpretarRespuestaEmision(conf.botones[0]!.id);
     expect(vuelta).toEqual({ accion: "emitir", token });
-    expect(interpretarRespuestaEmision(conf.botones[1]!.id)).toEqual({ accion: "cancelar" });
+    // Cancelar pasó a ser el TERCER botón: en el medio entró "➕ Otro ítem",
+    // que se comió los pasos `otro_item` y `adenda` del flujo. Emitir sigue
+    // primero y cancelar sigue último, que es lo que importa para no confundir
+    // el toque.
+    expect(interpretarRespuestaEmision(conf.botones[2]!.id)).toEqual({ accion: "cancelar" });
+    expect(conf.botones).toHaveLength(3);
 
     // Y el payload real no viola ningún límite (el id del botón es lo más largo).
     expect(() => construirPayloadInteractivo(conf)).not.toThrow();
+  });
+
+  it("el encabezado dice a quién, con el documento enmascarado", () => {
+    // El error más caro de una emisión no es el total, es el cliente. Antes el
+    // nombre iba DESPUÉS de los números, donde se lee último o no se lee.
+    const conf = construirConfirmacionEmision({
+      resumen: "TOTAL  $13.000,00",
+      cliente: "PANADERÍA LA ESPIGA SRL",
+      documento: "219999830019",
+      tipoComprobante: "e-Factura",
+      ambiente: "production",
+      token,
+    });
+
+    const lineas = conf.cuerpo.split("\n");
+    expect(lineas[0]).toBe("e-Factura a PANADERÍA LA ESPIGA SRL");
+    expect(lineas[1]).toBe("RUT 21…0019");
+    // Enmascarado de verdad: alcanza para reconocer al cliente, no para
+    // copiarlo entero de un mensaje que queda en el teléfono.
+    expect(conf.cuerpo).not.toContain("219999830019");
+  });
+
+  it("una cédula se rotula CI, y sin documento no se inventa una línea", () => {
+    const conCi = construirConfirmacionEmision({
+      resumen: "x",
+      cliente: "Juan Pérez",
+      documento: "1.234.567-8",
+      tipoComprobante: "e-Ticket",
+      ambiente: "test",
+      token,
+    });
+    expect(conCi.cuerpo).toContain("CI 12…5678");
+
+    const sinDoc = construirConfirmacionEmision({
+      resumen: "x",
+      cliente: "Mostrador",
+      tipoComprobante: "e-Ticket",
+      ambiente: "test",
+      token,
+    });
+    expect(sinDoc.cuerpo.split("\n")[0]).toBe("e-Ticket a Mostrador");
+    expect(sinDoc.cuerpo).not.toContain("RUT");
+    expect(sinDoc.cuerpo).not.toContain("CI ");
   });
 
   it("en producción el pie lo dice; en test también", () => {
@@ -990,6 +1039,62 @@ describe("emitir con confirmación por WhatsApp", () => {
     // Y el importe del mensaje es el que calculó TypeScript, no una redacción.
     expect(body.interactive.body.text).toContain(String(out.resumen));
     expect(body.interactive.body.text).toContain("PANADERÍA LA ESPIGA SRL");
+  });
+
+  it("el preview que llega al teléfono trae ítems, IVA, total y supuestos", async () => {
+    // EL RECORRIDO COMPLETO DE LA REFORMA, punta a punta: `calcularTotales` →
+    // `formatearTotales` → `construirConfirmacionEmision` → el body que sale
+    // por Kapso. Es lo único que el humano lee antes de que exista un CFE.
+    const { fn, llamadas } = fakeFetch();
+    vi.stubGlobal("fetch", fn);
+    const fx = makeCtx({ config: { kapso: kapsoConfig(), writeEnabled: true } });
+
+    await handleEmitirComprobante(
+      { comprobante: COMPROBANTE, confirmar_por_whatsapp: PERMITIDO },
+      fx.ctx,
+    );
+    const texto = JSON.parse(String(llamadas[0]!.init.body)).interactive.body.text as string;
+
+    // A quién, arriba de todo y con el documento enmascarado.
+    expect(texto.split("\n")[0]).toBe("e-Factura a PANADERÍA LA ESPIGA SRL");
+    expect(texto).toContain("RUT 21…0017");
+    expect(texto).not.toContain("212345670017");
+
+    // Qué: la línea, con la cantidad adelante.
+    expect(texto).toContain("2 × Bolsas de harina");
+
+    // Cuánto: 2 × 6000 netos, IVA 22% aparte = 14.640. A la uruguaya.
+    expect(texto).toContain("$12.000");
+    expect(texto).toContain("$2.640");
+    expect(texto).toContain("$14.640");
+    expect(texto).not.toContain("14640");
+
+    // Y los supuestos: la forma de pago y el criterio de IVA que el usuario
+    // nunca vio pasar por una pregunta.
+    expect(texto).toContain("Contado");
+    expect(texto).toContain("IVA sumado aparte");
+
+    // Todo eso tiene que entrar en el cuerpo de un interactivo de WhatsApp.
+    expect(texto.length).toBeLessThanOrEqual(LIMITES_INTERACTIVO.cuerpo);
+  });
+
+  it("el resumen NO sale envuelto por la barrera, aunque lleve conceptos adentro", async () => {
+    // La barrera de salida envuelve POR NOMBRE DE CLAVE, y `concepto` está en
+    // el set. Ahora el preview lleva los conceptos adentro del TEXTO, bajo la
+    // clave `resumen` — y tiene que seguir saliendo limpio: un resumen envuelto
+    // es el mensaje que el usuario lee con ⟦dato-no-confiable⟧ impreso, y peor,
+    // el texto que un agente podría copiar de vuelta a la emisión.
+    //
+    // Es legítimo: ese texto lo escribió el propio usuario en ESTA conversación,
+    // no un tercero en un comprobante recibido. Mismo criterio que
+    // `NO_ENVUELTOS_A_PROPOSITO` para `nombre`.
+    const fx = makeCtx({ config: { writeEnabled: true } });
+    const dry = await handleEmitirComprobante({ comprobante: COMPROBANTE }, fx.ctx);
+    const saneado = sanitizeToolResult(dry, fx.ctx);
+    const resumen = (saneado.structuredContent as { resumen: string }).resumen;
+
+    expect(resumen).toContain("Bolsas de harina");
+    expect(resumen).not.toContain("dato-no-confiable");
   });
 
   it("el token del botón ejecuta la emisión sin volver a pedir nada", async () => {

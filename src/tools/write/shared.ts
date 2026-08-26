@@ -9,7 +9,11 @@
 // =============================================================================
 
 import { z } from "zod";
-import { formatearTotales, type TotalesEstimados } from "../../services/calcularTotales.js";
+import {
+  formatearTotales,
+  type ContextoPreview,
+  type TotalesEstimados,
+} from "../../services/calcularTotales.js";
 import type { RateLimitClass } from "../../utils/rateLimit.js";
 import { BillerConfirmationError } from "../../utils/errors.js";
 import { checkConfirmationToken, computeConfirmationToken } from "../../write/confirm.js";
@@ -164,6 +168,12 @@ export interface RunWriteParams {
    */
   totalesEstimados?: TotalesEstimados;
   /**
+   * Fecha, forma de pago y criterio de IVA, para la LÍNEA DE SUPUESTOS del
+   * preview. Tampoco entra en el hash: sale del mismo payload que ya está
+   * hasheado, así que no puede describir otra cosa que lo que se va a emitir.
+   */
+  contextoPreview?: ContextoPreview;
+  /**
    * Quién pidió la operación. Va al audit log enmascarado y NO entra en el hash
    * del confirmation_token: si entrara, un dry-run pedido desde un teléfono y
    * confirmado desde otro daría "el payload cambió", que es un diagnóstico falso
@@ -227,7 +237,7 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
         ...(p.totalesEstimados !== undefined
           ? {
               totales_estimados: p.totalesEstimados,
-              resumen: formatearTotales(p.totalesEstimados),
+              resumen: formatearTotales(p.totalesEstimados, p.contextoPreview ?? {}),
             }
           : {}),
         warnings,

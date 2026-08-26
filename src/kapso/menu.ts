@@ -1251,21 +1251,26 @@ export function construirMenuTexto(opciones: MenuOpciones = {}): string {
  * cómo notarlo.
  */
 export function construirConfirmacionEmision(datos: {
+  /** El cuerpo ya formateado: ítems, IVA, total y supuestos. Ver `formatearTotales`. */
   resumen: string;
   cliente?: string;
+  /** RUT o CI del receptor. Se enmascara. */
+  documento?: string;
   tipoComprobante?: string;
   ambiente: "test" | "production";
   token: string;
 }): InteractivoBotones {
-  const lineas = [
-    datos.tipoComprobante === undefined ? "Comprobante a emitir:" : `${datos.tipoComprobante} a emitir:`,
-    "",
-    datos.resumen,
-  ];
-  if (datos.cliente !== undefined && datos.cliente.trim() !== "") {
-    lineas.push("", `Cliente: ${datos.cliente}`);
-  }
-  lineas.push("", "¿Lo emito?");
+  // El encabezado dice a QUIÉN, y va arriba de todo: el error más caro de una
+  // emisión no es el total, es el cliente. Antes el nombre iba después de los
+  // números, donde se lee último o no se lee.
+  const quien = datos.cliente === undefined || datos.cliente.trim() === "" ? "" : datos.cliente.trim();
+  const encabezado =
+    (datos.tipoComprobante ?? "Comprobante") + (quien === "" ? "" : ` a ${quien}`);
+
+  const lineas = [encabezado];
+  const doc = enmascararDocumento(datos.documento);
+  if (doc !== null) lineas.push(doc);
+  lineas.push("", datos.resumen, "", "¿Lo emito?");
 
   return {
     tipo: "botones",
@@ -1274,11 +1279,37 @@ export function construirConfirmacionEmision(datos: {
       datos.ambiente === "production"
         ? "⚠️ PRODUCCIÓN: se emite ante DGI de verdad."
         : "Ambiente de prueba (no va a DGI real).",
+    // TRES BOTONES, QUE ES EL MÁXIMO DE WHATSAPP.
+    //
+    // El tercero reemplaza dos pasos enteros del flujo (`otro_item` y `adenda`)
+    // por una opción que solo paga el que la usa. Antes, agregar una segunda
+    // línea costaba una pregunta a TODAS las emisiones — incluidas las de una
+    // sola línea, que son la mayoría. Acá el que quiere agregar toca; el que no,
+    // ni se entera de que existía la pregunta.
+    //
+    // Al tocarlo se abre un ítem vacío y el flujo pide su concepto y su precio;
+    // después vuelve a este mismo preview, con el token recalculado sobre el
+    // payload nuevo. El ciclo dry-run → token → confirm no cambia en nada.
     botones: [
       { id: `${PREFIJO_EMISION}si:${datos.token}`, titulo: "✅ Emitir" },
+      { id: `${PREFIJO_PASO}item:otro`, titulo: "➕ Otro ítem" },
       { id: `${PREFIJO_EMISION}no`, titulo: "✖️ Cancelar" },
     ],
   };
+}
+
+/**
+ * "219999830019" -> "RUT 21…0011". null si no hay documento.
+ *
+ * Mismo criterio que el enmascarado del `payload_preview` (write/shared.ts):
+ * queda suficiente para reconocer al cliente y no para copiarlo entero. Acá
+ * pesa además que el mensaje va por WhatsApp, o sea que queda en el teléfono.
+ */
+function enmascararDocumento(bruto: string | undefined): string | null {
+  const digitos = (bruto ?? "").replace(/\D/g, "");
+  if (digitos.length < 7) return null;
+  const etiqueta = digitos.length === 12 ? "RUT" : "CI";
+  return `${etiqueta} ${digitos.slice(0, 2)}…${digitos.slice(-4)}`;
 }
 
 /**

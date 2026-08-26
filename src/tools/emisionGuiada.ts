@@ -24,12 +24,17 @@ import { normalizarTelefono } from "../config.js";
 import { fusionarEstado, resolverClaveSesion, type BorradorStore } from "../kapso/borradorStore.js";
 import { KapsoClient } from "../kapso/client.js";
 import {
+  aplicarDefaults,
   clasificarDocumento,
   construirDesempateReceptor,
   construirListaClientes,
+  construirSubmenuIva,
   hoyDgi,
   interpretarPaso,
+  separarDireccionCiudad,
   siguientePaso,
+  sugiereDolares,
+  PREFIJO_PASO,
   tipoComprobanteSugerido,
   type ClaseReceptor,
   type EstadoEmision,
@@ -37,7 +42,7 @@ import {
 } from "../kapso/emision.js";
 import { extractClienteRut } from "../biller/normalize.js";
 import { fetchEmitidos } from "../biller/queries.js";
-import { hoyIsoUy } from "../services/fechaUy.js";
+import { hoyComoDateUy, hoyIsoUy } from "../services/fechaUy.js";
 import { formatearUy, parsearCantidad, parsearImporte } from "../services/importe.js";
 import { aIso, consultarPorPeriodo } from "../services/periodo.js";
 import {
@@ -98,7 +103,8 @@ const inputShape = {
     .string()
     .optional()
     .describe(
-      'Fecha del comprobante en dd/mm/aaaa. Si el usuario dice "hoy", mandá la fecha de hoy en ese formato.',
+      "Fecha del comprobante en dd/mm/aaaa. NO HACE FALTA MANDARLA: si no viene, es hoy, y el " +
+        'preview lo dice. Mandala solo cuando el usuario nombró otra ("la de ayer", "para el viernes").',
     ),
   sin_receptor: z
     .boolean()
@@ -115,28 +121,53 @@ const inputShape = {
         "(cliente_rut). Si es false, el flujo pide dirección y ciudad: Biller EXIGE esos dos campos " +
         "para dar de alta un cliente durante la emisión y sin ellos devuelve 422.",
     ),
-  direccion_cliente: z.string().optional().describe("Dirección del cliente. Solo para clientes nuevos."),
+  direccion_cliente: z
+    .string()
+    .optional()
+    .describe(
+      "Dirección del cliente. Solo para clientes nuevos. Podés mandar dirección y ciudad juntas tal " +
+        'como las escribió el usuario ("Rivera 1234, Melo"): la tool las separa por la última coma.',
+    ),
   ciudad_cliente: z.string().optional().describe("Ciudad del cliente. Solo para clientes nuevos."),
   items: z
     .array(itemShape)
     .optional()
     .describe(
       "Lo que se está vendiendo, con lo que se sepa hasta ahora. El ÚLTIMO ítem del array es el que " +
-        "se está cargando: el flujo pide concepto, precio, cantidad e IVA de a uno por vez. Para " +
-        "agregar otro ítem, sumá un objeto vacío al final.",
+        "se está cargando: el flujo pide concepto, precio e IVA de a uno por vez. La cantidad NO se " +
+        "pregunta (si no viene, es 1 y el preview la muestra como '1 × concepto'), así que mandala " +
+        'solo si el usuario la dijo. Para agregar otro ítem, sumá un objeto vacío al final.',
     ),
   items_cerrados: z
     .boolean()
     .optional()
-    .describe("true cuando el usuario dijo que no agrega más ítems."),
-  adenda: z.string().optional().describe("Nota al pie del comprobante, con las palabras del usuario."),
-  sin_adenda: z.boolean().optional().describe("true si el usuario dijo que no quiere adenda."),
+    .describe(
+      "true cuando el usuario dijo que no agrega más ítems. Ya casi nunca hace falta: el flujo va al " +
+        "preview apenas el ítem está completo, y agregar otro es el botón ➕ de ahí.",
+    ),
+  adenda: z
+    .string()
+    .optional()
+    .describe(
+      "Nota al pie del comprobante, con las palabras del usuario. Ya NO se pregunta: mandala cuando " +
+        'el usuario la dicte solo ("ponele una nota: orden 4471"), en cualquier momento del flujo.',
+    ),
+  sin_adenda: z
+    .boolean()
+    .optional()
+    .describe("true si el usuario dijo que no quiere adenda. Ya no cambia ningún camino del flujo."),
   indicador_facturacion: z
     .number()
     .int()
     .optional()
     .describe("Tratamiento de IVA por defecto para los ítems: 3 básica (22%), 2 mínima (10%), 1 exento."),
-  moneda: z.string().optional().describe("UYU o USD."),
+  moneda: z
+    .string()
+    .optional()
+    .describe(
+      "UYU o USD. NO HACE FALTA MANDARLA: el default es UYU. La tool mira el 'mensaje' y, si el " +
+        "usuario habló de dólares, devuelve la pregunta en vez de defaultear.",
+    ),
   tasa_cambio: z
     .union([z.number(), z.string()])
     .optional()
@@ -150,7 +181,8 @@ const inputShape = {
     .describe(
       "true si los precios que dio el usuario YA INCLUYEN IVA (precio de mostrador), false si el " +
         "IVA se suma aparte. NO lo adivines: si el usuario no lo dijo, no lo mandes y la tool " +
-        "devuelve la pregunta. Equivocarse acá cambia la factura en un 22%.",
+        "devuelve la pregunta. Equivocarse acá cambia la factura en un 22%. Es lo ÚNICO que el " +
+        "flujo sigue preguntando de la parte administrativa, y por eso mismo: es la que mueve plata.",
     ),
   fecha_vencimiento: z
     .string()
@@ -159,7 +191,14 @@ const inputShape = {
       "Vencimiento en dd/mm/aaaa. Obligatorio cuando forma_pago=2 (crédito): sin esto la venta no " +
         'aparece en "¿quién me debe?" ni en vencimientos.',
     ),
-  forma_pago: z.number().int().optional().describe("1 contado, 2 crédito."),
+  forma_pago: z
+    .number()
+    .int()
+    .optional()
+    .describe(
+      "1 contado, 2 crédito. NO HACE FALTA MANDARLA: el default es contado, y el preview lo dice. " +
+        'Mandá 2 cuando el usuario lo diga ("es a crédito", "me paga a 30 días").',
+    ),
   clientes_frecuentes: z
     .array(z.object({ nombre: z.string(), documento: z.string().optional() }))
     .optional()
@@ -172,8 +211,9 @@ const inputShape = {
     .optional()
     .describe(
       'Para "facturale lo de siempre a Pérez": RUT o CI del cliente. El server busca su última ' +
-        "venta aceptada, copia ítems, precios, IVA y forma de pago al borrador, y el flujo arranca " +
-        "casi al final (la fecha y, si es a crédito, el vencimiento se preguntan igual: son de HOY). " +
+        "venta aceptada, copia ítems, precios, IVA y forma de pago al borrador, y el flujo va DERECHO " +
+        "al preview: la fecha es de hoy por default (nunca se copia la vieja) y sale escrita ahí. Si " +
+        "la venta copiada era a crédito, se pregunta el vencimiento, que sí es de hoy en adelante. " +
         "Requiere 'sesion'. Los conceptos quedan guardados del lado del server: al emitir, pasá la " +
         "misma sesion y se completan solos.",
     ),
@@ -213,6 +253,13 @@ const outputShape = {
   tipo_etiqueta: z.string().nullable(),
   tipo_motivo: z.string().nullable(),
   estado_entendido: z.record(z.unknown()),
+  /**
+   * Qué campos completó el sistema porque el usuario no los dijo: fecha (hoy),
+   * moneda (UYU), forma de pago (contado), cantidad (1). Todos aparecen en el
+   * preview antes de emitir; esta lista existe para que el agente pueda
+   * mencionarlos si el usuario pregunta, y para poder contarlos.
+   */
+  defaults_aplicados: z.array(z.string()),
   comprobante_borrador: z.record(z.unknown()),
   /** Qué le falta al borrador y de dónde sacarlo. Ver `borradorComprobante`. */
   completar: z.array(z.string()),
@@ -399,6 +446,30 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     if (a.moneda !== undefined) estadoArgs.moneda = a.moneda.toUpperCase();
     if (tasaCambio !== undefined) estadoArgs.tasa_cambio = tasaCambio;
 
+    // "Rivera 1234, Melo" son DOS campos en un mensaje. Se parten acá, con las
+    // reglas escritas de `separarDireccionCiudad`, y no en el prompt del
+    // modelo: partir por la coma equivocada le pone "apto 302" de ciudad a un
+    // cliente que queda dado de alta así para siempre.
+    if (estadoArgs.direccion_cliente !== undefined && estadoArgs.ciudad_cliente === undefined) {
+      const partido = separarDireccionCiudad(estadoArgs.direccion_cliente);
+      estadoArgs.direccion_cliente = partido.direccion;
+      if (partido.ciudad !== undefined) estadoArgs.ciudad_cliente = partido.ciudad;
+    }
+
+    // ¿EL TEXTO HABLÓ DE DÓLARES?
+    //
+    // La moneda tiene default UYU, y el default solo es defendible si algo mira
+    // el mensaje. Lo mira acá —la tool, que es la que ve texto libre— y no
+    // `siguientePaso`, que es pura y no lee castellano. Ver `moneda_dudosa`.
+    if (
+      a.mensaje !== undefined &&
+      !a.mensaje.trim().startsWith(PREFIJO_PASO) &&
+      a.moneda === undefined &&
+      sugiereDolares(a.mensaje)
+    ) {
+      estadoArgs.moneda_dudosa = true;
+    }
+
     // --- El store: lo que ya sabíamos va DEBAJO de lo que llegó ahora --------
     //
     // Este es el cambio que saca al flujo de emisión de encima del contexto del
@@ -455,6 +526,7 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     let pidioDesempate = false;
     let pidioOtroCliente = false;
     let pidioOtraFecha = false;
+    let pidioOtraTasa = false;
     if (a.mensaje !== undefined) {
       const r = interpretarPaso(a.mensaje);
       switch (r.paso) {
@@ -486,27 +558,53 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
           break;
         case "item_otro":
           // Abrir un ítem vacío ES la forma de decir "seguí preguntando por
-          // otro": `siguientePaso` mira siempre el último del array.
+          // otro": `siguientePaso` mira siempre el último del array. Llega
+          // tanto del flujo como del botón ➕ del preview de confirmación.
           estado.items = [...(estado.items ?? []), {}];
           estado.items_cerrados = false;
           break;
         case "item_listo":
           estado.items_cerrados = true;
           break;
-        case "adenda_no":
-          estado.sin_adenda = true;
+        case "item_cancelar":
+          // "↩️ Volver así": se descarta el ítem vacío que se abrió por error y
+          // el flujo vuelve al preview. Solo se saca si está VACÍO — un ítem a
+          // medio cargar es trabajo del usuario, no basura.
+          if ((estado.items ?? []).length > 1) {
+            const ultimo = estado.items![estado.items!.length - 1]!;
+            if (Object.keys(ultimo).length === 0) estado.items = estado.items!.slice(0, -1);
+          }
+          estado.items_cerrados = true;
           break;
         case "iva":
           estado.indicador_facturacion = r.indicador_facturacion;
           break;
+        case "iva_otro":
+          // "🔢 Otro IVA" no contesta nada: abre la pregunta de la tasa. El
+          // criterio de precio (montos_brutos) queda pendiente y se pregunta
+          // después, ya con dos botones.
+          pidioOtraTasa = true;
+          break;
         case "moneda":
           estado.moneda = r.moneda;
+          // Elegida la moneda, la duda dejó de existir. Sin esto la marca queda
+          // guardada en el borrador y reaparece si alguien limpia `moneda`.
+          delete estado.moneda_dudosa;
           break;
         case "forma_pago":
           estado.forma_pago = r.forma_pago;
           break;
         case "montos_brutos":
           estado.montos_brutos = r.incluye_iva;
+          // LOS DOS BOTONES GRANDES CONTESTAN LAS DOS COSAS.
+          //
+          // El paso fusionado dice, en el mismo mensaje, "tomo tasa básica
+          // salvo que me digas otra cosa". Si el indicador no se fijara acá, el
+          // usuario tocaría "✅ Ya incluye IVA" y le volveríamos a preguntar la
+          // tasa — o sea, la fusión no ahorraría nada. Solo COMPLETA: un
+          // indicador que ya venía (de `repetir_ultima_de`, o del botón "Otro
+          // IVA") no se pisa.
+          estado.indicador_facturacion ??= 3;
           break;
         case "ninguna":
           break;
@@ -551,7 +649,17 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     }
 
     // --- Qué sigue -----------------------------------------------------------
-    const siguiente = siguientePaso(estado);
+    let siguiente = siguientePaso(estado);
+
+    // "✏️ Otra fecha" es la única respuesta que RETROCEDE el flujo: el usuario
+    // descartó un dato que ya estaba resuelto (hoy, por default) y todavía no
+    // dio el reemplazo. Sin este override, `siguientePaso` devolvería
+    // "confirmar" con `listo: true` mientras le preguntamos la fecha — o sea,
+    // le diríamos al agente "andá a emitir" en medio de una pregunta.
+    if (pidioOtraFecha) {
+      siguiente = { ...siguiente, paso: "fecha", listo: false };
+    }
+
     const tipo =
       siguiente.tipo ??
       (estado.clase_receptor === undefined
@@ -565,11 +673,18 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     if (pidioDesempate) {
       interactivo = construirDesempateReceptor();
       pregunta = "¿Te pidieron la factura a nombre de una empresa con RUT?";
-    } else if (pidioOtraFecha && siguiente.paso === "fecha") {
+    } else if (pidioOtraFecha) {
       // Ya eligió "otra fecha": volver a mostrarle el botón "Hoy" sería
-      // ofrecerle justo lo que acaba de descartar.
+      // ofrecerle justo lo que acaba de descartar. No se condiciona al paso —
+      // desde que la fecha tiene default, `siguientePaso` NUNCA devuelve "fecha"
+      // y la condición vieja hacía que este botón dejara de contestar nada.
       interactivo = null;
       pregunta = "Dale, ¿qué fecha? Escribímela como dd/mm/aaaa.";
+    } else if (pidioOtraTasa) {
+      // "🔢 Otro IVA": el paso sigue siendo el mismo (el IVA está sin resolver),
+      // cambia el mensaje — de los tres botones fusionados a las tres tasas.
+      interactivo = construirSubmenuIva();
+      pregunta = "¿Qué IVA lleva? Tasa básica (22%), mínima (10%) o exento.";
     } else if (
       siguiente.paso === "cliente" &&
       !pidioOtroCliente &&
@@ -845,7 +960,16 @@ async function responder(p: {
     messageId = resultado.message_id;
   }
 
-  const { borrador, completar } = borradorComprobante(estado, tipo?.tipo_comprobante ?? null);
+  // EL BORRADOR SALE CON LOS DEFAULTS PUESTOS; EL BORRADOR GUARDADO, NO.
+  //
+  // Los dos lados de la misma decisión. Lo que se GUARDA es lo que dijo el
+  // usuario, así que `forma_pago: undefined` sigue significando "no me dijeron
+  // nada" y una corrección posterior lo pisa sin discutir (ver
+  // `aplicarDefaults`). Lo que SALE hacia el CFE tiene que estar completo: un
+  // comprobante sin `fecha_emision` no se emite, y un `montos_brutos` ausente
+  // factura 22% de más.
+  const { estado: conDefaults, aplicados } = aplicarDefaults(estado);
+  const { borrador, completar } = borradorComprobante(conDefaults, tipo?.tipo_comprobante ?? null);
 
   const notaSesion =
     clave === null
@@ -881,7 +1005,12 @@ async function responder(p: {
     tipo_comprobante: tipo?.tipo_comprobante ?? null,
     tipo_etiqueta: tipo?.etiqueta ?? null,
     tipo_motivo: tipo?.motivo ?? null,
-    estado_entendido: resumirEstado(estado),
+    // El espejo muestra el estado YA RESUELTO, que es el comprobante que se va
+    // a emitir. `defaults_aplicados` dice cuáles de esos valores los puso el
+    // sistema y no el usuario: sin esa lista, el agente no tiene cómo
+    // distinguir "dijo contado" de "no dijo nada" y no puede avisarlo.
+    estado_entendido: resumirEstado(conDefaults),
+    defaults_aplicados: aplicados,
     comprobante_borrador: borrador,
     completar,
     documento_detectado: documentoDetectado,
@@ -924,7 +1053,9 @@ async function prellenarDesdeUltimaVenta(
   estado: EstadoEmision,
 ): Promise<ResultadoRepeticion | null> {
   const client = ctx.getClient();
-  const hoy = new Date();
+  // Anclado al día uruguayo: con el instante crudo, después de las 21:00 la
+  // ventana de 180 días arrancaba (y terminaba) un día corrida.
+  const hoy = hoyComoDateUy();
   const desde = aIso(new Date(hoy.getTime() - 180 * 86_400_000));
   const hasta = hoyIsoUy(hoy);
 
@@ -983,8 +1114,12 @@ export function registerEmisionGuiada(server: McpServer, ctx: ToolContext): void
         'pedirle a alguien que elija entre "101" y "111": la tool pregunta a QUIÉN se le factura ' +
         "(empresa con RUT o consumidor final), DEDUCE de ahí el tipo de CFE, y va devolviendo una " +
         "sola pregunta por vez con el mensaje tocable ya armado. Detecta si un documento es RUT o " +
-        "cédula y corrige la clase de receptor en consecuencia. Devuelve 'comprobante_borrador' " +
-        "con la forma exacta que espera biller_emitir_comprobante. No emite nada.",
+        "cédula y corrige la clase de receptor en consecuencia. " +
+        "PREGUNTA POCO A PROPÓSITO: la fecha (hoy), la moneda (UYU), la forma de pago (contado) y la " +
+        "cantidad (1) se completan solas y aparecen en el preview de confirmación — no las mandes " +
+        "salvo que el usuario las haya dicho, y no se las preguntes vos por tu cuenta. " +
+        "Devuelve 'comprobante_borrador' con la forma exacta que espera biller_emitir_comprobante " +
+        "y 'defaults_aplicados' con lo que se completó solo. No emite nada.",
       inputSchema: inputShape,
       outputSchema: outputShape,
       annotations: puedeEnviar
