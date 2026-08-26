@@ -159,6 +159,25 @@ if (previo === undefined) {
   console.log(`✓ Workflow actualizado: ${workflow.id}`);
 }
 
+// --- Publicar ----------------------------------------------------------------
+//
+// Un workflow nace en `draft` y un draft NO CORRE, aunque su trigger esté
+// activo. Este script no lo publicaba: dejaba todo perfectamente configurado
+// —definición, MCP, bearer, trigger— y después imprimía "escribile hola y
+// debería contestar". El mensaje llegaba a WhatsApp, no pasaba nada, y no
+// había ningún error en ningún lado: `execution_count` se quedaba en 0.
+//
+// Por eso se publica ACÁ y se VERIFICA leyendo el estado de vuelta. Un script
+// de puesta en marcha que termina diciendo "listo" sin comprobarlo es peor que
+// uno que no existe: manda a buscar el problema al lugar equivocado.
+if (workflow.status !== "active") {
+  const r = await kapso("PATCH", `/workflows/${workflow.id}`, { workflow: { status: "active" } });
+  workflow = r.data ?? workflow;
+  console.log(`✓ Workflow publicado (estaba en "${previo?.status ?? "draft"}").`);
+} else {
+  console.log("✓ El workflow ya estaba activo.");
+}
+
 // --- El trigger --------------------------------------------------------------
 // Solo un workflow puede tener el trigger activo por número, así que esto es
 // idempotente por diseño: si ya existe, se deja como está.
@@ -174,6 +193,26 @@ if (yaHay) {
     trigger: { trigger_type: "inbound_message", active: true, phone_number_id: phoneNumberId },
   });
   console.log(`✓ Trigger inbound_message activado para el número ${phoneNumberId}.`);
+}
+
+// --- Verificación final ------------------------------------------------------
+// Se relee el estado del server de Kapso en vez de confiar en lo que
+// devolvieron los PATCH: es la diferencia entre "mandé el pedido" y "quedó".
+const verificado = await kapso("GET", `/workflows/${workflow.id}`);
+const estado = verificado.data?.status ?? "?";
+const triggersFinales = await kapso("GET", `/workflows/${workflow.id}/triggers`).catch(() => ({
+  data: [],
+}));
+const triggerActivo = (triggersFinales.data ?? []).some(
+  (t) => t.trigger_type === "inbound_message" && t.active === true,
+);
+
+if (estado !== "active" || !triggerActivo) {
+  console.error(
+    `\n✗ Quedó a medias: estado="${estado}", trigger activo=${triggerActivo}. ` +
+      "El número NO va a contestar. Revisá el workflow en el panel de Kapso.",
+  );
+  process.exit(1);
 }
 
 console.log(`\nMCP apuntado a: ${urlMcp}`);
