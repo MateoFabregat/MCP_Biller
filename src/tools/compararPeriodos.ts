@@ -9,13 +9,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { compararPeriodos } from "../services/comparacion.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
-import {
-  PERIODOS_SOPORTADOS,
-  consultarPorPeriodo,
-  resolverPeriodo,
-  type RangoFechas,
-} from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS, resolverPeriodo, type RangoFechas } from "../services/periodo.js";
+import { resolverRango, traerVentana } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,
@@ -161,64 +156,41 @@ export async function handleCompararPeriodos(args: unknown, ctx: ToolContext): P
   if (!parsed.success) return validationErrorResult(parsed.error, ctx);
   const a = parsed.data;
 
-  let rangoActual: RangoFechas;
-  if (a.desde !== undefined && a.hasta !== undefined) {
-    rangoActual = { desde: a.desde, hasta: a.hasta };
-  } else {
-    const resuelto = resolverPeriodo(a.periodo);
-    if (resuelto === null) {
-      return simpleErrorResult(
-        `No se pudo interpretar el período "${a.periodo}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
-        ctx,
-      );
-    }
-    rangoActual = resuelto;
-  }
+  const resuelto = resolverRango({ periodo: a.periodo, desde: a.desde, hasta: a.hasta });
+  if (!resuelto.ok) return simpleErrorResult(resuelto.error, ctx);
+  const rangoActual = resuelto.rango;
 
-  if (rangoActual.desde > rangoActual.hasta) {
-    return simpleErrorResult(
-      `El período está invertido: 'desde' (${rangoActual.desde}) es posterior a 'hasta' (${rangoActual.hasta}).`,
-      ctx,
-    );
-  }
-
+  // `comparar_con` NO pasa por `resolverRango`: su mensaje de error nombra el
+  // parámetro que el usuario escribió mal, y decirle "no se pudo interpretar el
+  // período" cuando el período estaba bien manda a mirar el lugar equivocado.
   let rangoAnterior: RangoFechas;
   if (a.comparar_con !== undefined) {
-    const resuelto = resolverPeriodo(a.comparar_con);
-    if (resuelto === null) {
+    const comparado = resolverPeriodo(a.comparar_con);
+    if (comparado === null) {
       return simpleErrorResult(
         `No se pudo interpretar comparar_con="${a.comparar_con}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
         ctx,
       );
     }
-    rangoAnterior = resuelto;
+    rangoAnterior = comparado;
   } else {
     rangoAnterior = periodoAnterior(rangoActual);
   }
 
   try {
-    const config = ctx.getConfig();
-    const client = ctx.getClient();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
-    const opts = { sucursal, ventanaDias: a.ventana_dias };
+    const opts = { sucursal: a.sucursal, ventana_dias: a.ventana_dias };
 
-    const [cActual, cAnterior] = await Promise.all([
-      consultarPorPeriodo(client, rangoActual, opts),
-      consultarPorPeriodo(client, rangoAnterior, opts),
+    // Los dos períodos en paralelo. Desde que la partición está anclada a una
+    // grilla global, cuando se solapan (p.ej. "ultimos_30" contra los 30
+    // previos) la segunda consulta encuentra en memoria las ventanas comunes.
+    const [actual, anterior] = await Promise.all([
+      traerVentana(ctx, { ...opts, rango: rangoActual }),
+      traerVentana(ctx, { ...opts, rango: rangoAnterior }),
     ]);
 
-    const emitidosActual = filterEmitidos(cActual.comprobantes, {
-      emitidas_desde: rangoActual.desde,
-      emitidas_hasta: rangoActual.hasta,
-    });
-    const emitidosAnterior = filterEmitidos(cAnterior.comprobantes, {
-      emitidas_desde: rangoAnterior.desde,
-      emitidas_hasta: rangoAnterior.hasta,
-    });
-
     const resultado = compararPeriodos(
-      emitidosActual.list,
-      emitidosAnterior.list,
+      actual.comprobantes,
+      anterior.comprobantes,
       rangoActual,
       rangoAnterior,
       { solo_aceptados: a.solo_aceptados },
@@ -234,15 +206,9 @@ export async function handleCompararPeriodos(args: unknown, ctx: ToolContext): P
       proyeccion: resultado.proyeccion,
       exposicion_cambiaria: resultado.exposicion_cambiaria,
       moneda_principal: resultado.moneda_principal,
-      ventanas_consultadas: cActual.ventanas + cAnterior.ventanas,
+      ventanas_consultadas: actual.ventanas + anterior.ventanas,
       no_convertir_moneda: true,
-      warnings: [
-        ...cActual.warnings,
-        ...cAnterior.warnings,
-        ...emitidosActual.warnings,
-        ...emitidosAnterior.warnings,
-        ...resultado.warnings,
-      ],
+      warnings: [...actual.warnings, ...anterior.warnings, ...resultado.warnings],
     });
   } catch (err) {
     return errorToolResult(err, ctx);

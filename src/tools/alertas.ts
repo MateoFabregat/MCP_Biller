@@ -21,16 +21,10 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { fetchCertificadoDgi } from "../biller/queries.js";
 import { CAE_DIAS_ADVERTENCIA, CAE_DIAS_CRITICO, generarAlertas, type Alerta } from "../services/alertas.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
 import { hoyIsoUy } from "../services/fechaUy.js";
-import {
-  PERIODOS_SOPORTADOS,
-  aIso,
-  consultarPorPeriodo,
-  resolverPeriodo,
-  type RangoFechas,
-} from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS, aIso } from "../services/periodo.js";
 import { diasEntre } from "../services/vencimientos.js";
+import { resolverRango, traerVentana } from "../services/ventana.js";
 import { toSafeError } from "../utils/errors.js";
 import {
   READ_ONLY_ANNOTATIONS,
@@ -463,43 +457,20 @@ export async function handleAlertas(args: unknown, ctx: ToolContext): Promise<To
   const a = parsed.data;
 
   // desde/hasta explícitos tienen prioridad sobre el default de `periodo`.
-  let rango: RangoFechas;
-  if (a.desde !== undefined && a.hasta !== undefined) {
-    rango = { desde: a.desde, hasta: a.hasta };
-  } else {
-    const resuelto = resolverPeriodo(a.periodo);
-    if (resuelto === null) {
-      return simpleErrorResult(
-        `No se pudo interpretar el período "${a.periodo}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
-        ctx,
-      );
-    }
-    rango = resuelto;
-  }
-
-  if (rango.desde > rango.hasta) {
-    return simpleErrorResult(
-      `El período está invertido: 'desde' (${rango.desde}) es posterior a 'hasta' (${rango.hasta}).`,
-      ctx,
-    );
-  }
+  const resuelto = resolverRango({ periodo: a.periodo, desde: a.desde, hasta: a.hasta });
+  if (!resuelto.ok) return simpleErrorResult(resuelto.error, ctx);
+  const rango = resuelto.rango;
 
   try {
     const config = ctx.getConfig();
-    const client = ctx.getClient();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
 
-    const consulta = await consultarPorPeriodo(client, rango, {
-      sucursal,
-      ventanaDias: a.ventana_dias,
+    const ventana = await traerVentana(ctx, {
+      rango,
+      sucursal: a.sucursal,
+      ventana_dias: a.ventana_dias,
     });
 
-    const filtered = filterEmitidos(consulta.comprobantes, {
-      emitidas_desde: rango.desde,
-      emitidas_hasta: rango.hasta,
-    });
-
-    const resultado = generarAlertas(filtered.list, { max_por_estado: a.max_por_estado });
+    const resultado = generarAlertas(ventana.comprobantes, { max_por_estado: a.max_por_estado });
 
     let certificado: CertificadoDgiResultado = {
       consultado: false,
@@ -547,9 +518,9 @@ export async function handleAlertas(args: unknown, ctx: ToolContext): Promise<To
       racha_sin_facturar: resultado.racha_sin_facturar,
       certificado_dgi: certificado,
       comprobantes_analizados: resultado.comprobantes_analizados,
-      ventanas_consultadas: consulta.ventanas,
+      ventanas_consultadas: ventana.ventanas,
       severidad_minima: a.severidad_minima,
-      warnings: [...consulta.warnings, ...filtered.warnings, ...resultado.warnings, ...warningsCertificado],
+      warnings: [...ventana.warnings, ...resultado.warnings, ...warningsCertificado],
     });
   } catch (err) {
     return errorToolResult(err, ctx);

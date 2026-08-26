@@ -73,7 +73,18 @@ export type NombreMetrica =
   /** La emisión guiada pidió un paso. Etiqueta: paso. Es el embudo. */
   | "emision.paso"
   /** Cómo terminó una emisión: emitida, rechazada o solo preview. Cierra el embudo. */
-  | "emision.desenlace";
+  | "emision.desenlace"
+  /**
+   * Ventanas de comprobantes servidas de memoria vs. pedidas a la API.
+   * Etiqueta: resultado (hit|miss).
+   *
+   * Es POR EMPRESA como todo lo demás en este registro, y acá el motivo tiene
+   * filo propio: un contador global de proceso le mostraría a una empresa
+   * cuánto consulta la otra. Con el cache compartido entre tenants la
+   * tentación de un singleton es real —el cache SÍ es uno solo—, pero lo que
+   * se cuenta no es el cache: es el uso de una empresa.
+   */
+  | "cache.ventana";
 
 // NO EXISTEN, Y ES A PROPÓSITO: `whatsapp.envio` y `webhook.evento`.
 //
@@ -196,7 +207,15 @@ export interface InstantaneaMetricas {
 }
 
 export interface Metricas {
-  contar(nombre: NombreMetrica, etiquetas?: Etiquetas): void;
+  /**
+   * Suma `veces` (default 1) a un contador.
+   *
+   * El parámetro existe por un caso concreto: una consulta de un año son 54
+   * ventanas, y contarlas de a una emitía 54 líneas de log idénticas para
+   * responder una sola pregunta. El contador tiene que quedar igual; lo que no
+   * tiene que multiplicarse por 54 es el ruido.
+   */
+  contar(nombre: NombreMetrica, etiquetas?: Etiquetas, veces?: number): void;
   /** Registra una duración en su bucket. No guarda el valor exacto. */
   observarDuracion(nombre: NombreMetrica, ms: number, etiquetas?: Etiquetas): void;
   instantanea(): InstantaneaMetricas;
@@ -226,7 +245,12 @@ export class RegistroMetricas implements Metricas {
 
   private readonly ahora: () => Date;
 
-  contar(nombre: NombreMetrica, etiquetas: Etiquetas = {}): void {
+  contar(nombre: NombreMetrica, etiquetas: Etiquetas = {}, veces = 1): void {
+    // Un `veces` no entero, negativo o NaN no suma nada: un contador con basura
+    // adentro es peor que un contador que no se movió.
+    const cantidad = Number.isFinite(veces) ? Math.trunc(veces) : 0;
+    if (cantidad <= 0) return;
+
     const clave = claveDe(nombre, etiquetas);
     const existente = this.contadores.get(clave);
 
@@ -240,7 +264,7 @@ export class RegistroMetricas implements Metricas {
         // nueva de etiquetas. Salir sin sumarlo al total dejaba a
         // `no_entendidos_pct` dividiendo por un denominador incompleto — o sea
         // que el desborde no solo perdía detalle, corrompía los porcentajes.
-        this.total += 1;
+        this.total += cantidad;
         return;
       }
       vistas.add(clave);
@@ -251,12 +275,12 @@ export class RegistroMetricas implements Metricas {
         const normalizado = normalizarValor(v);
         if (normalizado !== null) limpias[k] = normalizado;
       }
-      this.contadores.set(clave, { nombre, etiquetas: limpias, valor: 1 });
+      this.contadores.set(clave, { nombre, etiquetas: limpias, valor: cantidad });
     } else {
-      existente.valor += 1;
+      existente.valor += cantidad;
     }
 
-    this.total += 1;
+    this.total += cantidad;
 
     if (this.emitirLog) {
       // Una línea por evento. Solo el nombre y las etiquetas YA normalizadas:

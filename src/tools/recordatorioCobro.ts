@@ -221,7 +221,9 @@ export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): 
       solo_a_credito: true,
       solo_aceptados: true,
       incluir_canceladas: false,
-      sucursal: a.sucursal ?? config.defaultSucursalId,
+      // Sin `?? config.defaultSucursalId`: el default de la empresa lo aplica
+      // `traerVentana`, una sola vez para todas las tools.
+      sucursal: a.sucursal,
       ventana_dias: a.ventana_dias,
       // En el paso de confirmación se relee todo. El cache de ventanas tiene
       // 120 s de TTL, que para una consulta es un ahorro enorme y acá sería el

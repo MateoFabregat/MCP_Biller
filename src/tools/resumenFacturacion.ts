@@ -12,14 +12,9 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
-import {
-  PERIODOS_SOPORTADOS,
-  consultarPorPeriodo,
-  resolverPeriodo,
-  type RangoFechas,
-} from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS } from "../services/periodo.js";
 import { DIMENSIONES, resumirFacturacion, type Dimension } from "../services/resumenFacturacion.js";
+import { resolverRango, traerVentana } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,
@@ -195,51 +190,32 @@ export async function handleResumenFacturacion(
   const a = parsed.data;
 
   // --- Resolución del período ---------------------------------------------
-  let rango: RangoFechas;
-  if (a.periodo !== undefined) {
-    const resuelto = resolverPeriodo(a.periodo);
-    if (resuelto === null) {
-      return simpleErrorResult(
-        `No se pudo interpretar el período "${a.periodo}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
-        ctx,
-      );
-    }
-    rango = resuelto;
-  } else if (a.desde !== undefined && a.hasta !== undefined) {
-    rango = { desde: a.desde, hasta: a.hasta };
-  } else {
-    return simpleErrorResult(
-      "Falta el período: pasá 'periodo' (ej: \"2026-06\", \"mes_pasado\") o 'desde' + 'hasta' en aaaa-mm-dd.",
-      ctx,
-    );
-  }
-
-  if (rango.desde > rango.hasta) {
-    return simpleErrorResult(
-      `El período está invertido: 'desde' (${rango.desde}) es posterior a 'hasta' (${rango.hasta}).`,
-      ctx,
-    );
-  }
+  // `prioridad: "periodo"` porque esta tool lo DOCUMENTA así: si vienen los dos,
+  // gana `periodo`. En el resto de las tools es al revés (ahí `periodo` tiene
+  // default de schema y siempre viene, así que pisaría a desde/hasta).
+  const resuelto = resolverRango({
+    periodo: a.periodo,
+    desde: a.desde,
+    hasta: a.hasta,
+    prioridad: "periodo",
+  });
+  if (!resuelto.ok) return simpleErrorResult(resuelto.error, ctx);
+  const rango = resuelto.rango;
 
   try {
     const config = ctx.getConfig();
-    const client = ctx.getClient();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
 
-    const consulta = await consultarPorPeriodo(client, rango, {
-      sucursal,
-      ventanaDias: a.ventana_dias,
-    });
-
-    // Filtro local por fecha de EMISIÓN (la consulta fue por creación + margen).
-    const filtered = filterEmitidos(consulta.comprobantes, {
+    // Consulta por CREACIÓN con margen + ventaneo + cache + recorte local por
+    // EMISIÓN, todo adentro. Ver `services/ventana.ts`.
+    const ventana = await traerVentana(ctx, {
+      rango,
+      sucursal: a.sucursal,
+      ventana_dias: a.ventana_dias,
       moneda: a.moneda,
       cliente_rut: a.cliente_rut,
-      emitidas_desde: rango.desde,
-      emitidas_hasta: rango.hasta,
     });
 
-    const resumen = resumirFacturacion(filtered.list, {
+    const resumen = resumirFacturacion(ventana.comprobantes, {
       incluir_anulados: a.incluir_anulados,
       solo_aceptados: a.solo_aceptados,
       agrupar_por: a.agrupar_por,
@@ -248,7 +224,7 @@ export async function handleResumenFacturacion(
       limite_detalle: a.limite_comprobantes,
     });
 
-    const warnings = [...consulta.warnings, ...filtered.warnings, ...resumen.warnings];
+    const warnings = [...ventana.warnings, ...resumen.warnings];
 
     if (a.agrupar_por?.includes("sucursal") && Object.keys(config.sucursales).length === 0) {
       warnings.push(
@@ -265,11 +241,11 @@ export async function handleResumenFacturacion(
 
     return jsonResult({
       periodo: { desde: rango.desde, hasta: rango.hasta, criterio: "fecha_emision" },
-      rango_consultado_por_creacion: consulta.rango_consultado,
+      rango_consultado_por_creacion: ventana.rango_consultado,
       fuente: "biller:/v2/comprobantes/obtener",
       filtros_aplicados: {
         periodo: a.periodo ?? null,
-        sucursal: sucursal ?? null,
+        sucursal: ventana.sucursal ?? null,
         moneda: a.moneda ?? null,
         cliente_rut: a.cliente_rut ?? null,
         agrupar_por: a.agrupar_por ?? [],
@@ -293,7 +269,7 @@ export async function handleResumenFacturacion(
       conteo_total: resumen.conteo_total,
       conteo_incluidos: resumen.conteo_incluidos,
       conteo_excluidos: resumen.conteo_excluidos,
-      ventanas_consultadas: consulta.ventanas,
+      ventanas_consultadas: ventana.ventanas,
       warnings,
       no_convertir_moneda: true,
     });

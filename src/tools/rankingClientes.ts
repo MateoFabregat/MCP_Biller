@@ -8,16 +8,10 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
 import { extractClienteRut } from "../biller/normalize.js";
-import {
-  PERIODOS_SOPORTADOS,
-  aIso,
-  consultarPorPeriodo,
-  resolverPeriodo,
-  type RangoFechas,
-} from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS, aIso } from "../services/periodo.js";
 import { DIAS_DORMIDO, rankingClientes } from "../services/rankingClientes.js";
+import { resolverRango, traerVentana } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,
@@ -191,39 +185,15 @@ export async function handleRankingClientes(args: unknown, ctx: ToolContext): Pr
     );
   }
 
-  let rango: RangoFechas;
-  if (a.desde !== undefined && a.hasta !== undefined) {
-    rango = { desde: a.desde, hasta: a.hasta };
-  } else {
-    const resuelto = resolverPeriodo(a.periodo);
-    if (resuelto === null) {
-      return simpleErrorResult(
-        `No se pudo interpretar el período "${a.periodo}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
-        ctx,
-      );
-    }
-    rango = resuelto;
-  }
-
-  if (rango.desde > rango.hasta) {
-    return simpleErrorResult(
-      `El período está invertido: 'desde' (${rango.desde}) es posterior a 'hasta' (${rango.hasta}).`,
-      ctx,
-    );
-  }
+  const resuelto = resolverRango({ periodo: a.periodo, desde: a.desde, hasta: a.hasta });
+  if (!resuelto.ok) return simpleErrorResult(resuelto.error, ctx);
+  const rango = resuelto.rango;
 
   try {
-    const config = ctx.getConfig();
-    const client = ctx.getClient();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
-
-    const consulta = await consultarPorPeriodo(client, rango, {
-      sucursal,
-      ventanaDias: a.ventana_dias,
-    });
-    const filtered = filterEmitidos(consulta.comprobantes, {
-      emitidas_desde: rango.desde,
-      emitidas_hasta: rango.hasta,
+    const ventana = await traerVentana(ctx, {
+      rango,
+      sucursal: a.sucursal,
+      ventana_dias: a.ventana_dias,
     });
 
     // --- ¿Quién ya había comprado ANTES? -------------------------------------
@@ -243,19 +213,19 @@ export async function handleRankingClientes(args: unknown, ctx: ToolContext): Pr
     if (a.detectar_nuevos || a.solo_nuevos) {
       const antesDesde = aIso(new Date(Date.parse(`${rango.desde}T00:00:00Z`) - a.dias_antiguedad * 86_400_000));
       const antesHasta = aIso(new Date(Date.parse(`${rango.desde}T00:00:00Z`) - 86_400_000));
-      const previa = await consultarPorPeriodo(client, { desde: antesDesde, hasta: antesHasta }, {
-        sucursal,
-        ventanaDias: a.ventana_dias,
-      });
-      const previos = filterEmitidos(previa.comprobantes, {
-        emitidas_desde: antesDesde,
-        emitidas_hasta: antesHasta,
+      const previa = await traerVentana(ctx, {
+        rango: { desde: antesDesde, hasta: antesHasta },
+        // La MISMA sucursal que la consulta principal, ya con el default de la
+        // empresa resuelto: si las dos miraran universos distintos, "es nuevo"
+        // sería una comparación entre dos cosas que no se pueden comparar.
+        sucursal: ventana.sucursal,
+        ventana_dias: a.ventana_dias,
       });
       rutsPrevios = new Set<string>();
       // `extractClienteRut`, el MISMO que usa el servicio para agrupar. Si acá
       // se sacara el RUT de otra forma, los dos conjuntos no se cruzarían y
       // todos volverían a salir nuevos — el bug de vuelta, por otra puerta.
-      for (const c of previos.list) {
+      for (const c of previa.comprobantes) {
         const rut = extractClienteRut(c.cliente);
         if (rut !== null) rutsPrevios.add(rut);
       }
@@ -274,7 +244,7 @@ export async function handleRankingClientes(args: unknown, ctx: ToolContext): Pr
     // El límite se aplica DESPUÉS del filtro por segmento: pedir "los 20
     // dormidos" y recibir "los dormidos que hay entre los 20 que más facturan"
     // es una respuesta distinta a la pregunta.
-    const resultado = rankingClientes(filtered.list, {
+    const resultado = rankingClientes(ventana.comprobantes, {
       desde: rango.desde,
       hasta: rango.hasta,
       ...(rutsPrevios !== undefined ? { ruts_previos: rutsPrevios } : {}),
@@ -315,9 +285,9 @@ export async function handleRankingClientes(args: unknown, ctx: ToolContext): Pr
       clientes_totales: resultado.clientes_totales,
       comprobantes_analizados: resultado.comprobantes_analizados,
       filtro_aplicado: filtro,
-      ventanas_consultadas: consulta.ventanas,
+      ventanas_consultadas: ventana.ventanas,
       no_convertir_moneda: true,
-      warnings: [...consulta.warnings, ...filtered.warnings, ...resultado.warnings, ...avisosNuevos],
+      warnings: [...ventana.warnings, ...resultado.warnings, ...avisosNuevos],
     });
   } catch (err) {
     return errorToolResult(err, ctx);

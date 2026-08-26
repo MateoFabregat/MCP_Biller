@@ -7,15 +7,9 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { fetchRecibidos } from "../biller/queries.js";
-import type { ComprobanteRecibido } from "../biller/types.js";
-import {
-  PERIODOS_SOPORTADOS,
-  partirEnVentanas,
-  resolverPeriodo,
-  type RangoFechas,
-} from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS } from "../services/periodo.js";
 import { rankingProveedores } from "../services/proveedores.js";
+import { resolverRango, traerVentanaRecibidos } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,
@@ -86,65 +80,20 @@ const outputShape = {
   warnings: z.array(z.string()),
 };
 
-/** Trae los recibidos del rango en ventanas, deduplicando por identidad fiscal. */
-async function traerRecibidos(
-  client: ReturnType<ToolContext["getClient"]>,
-  rango: RangoFechas,
-  ventanaDias: number | undefined,
-): Promise<{ lista: ComprobanteRecibido[]; ventanas: number; warnings: string[] }> {
-  const ventanas = partirEnVentanas(rango, ventanaDias);
-  const warnings: string[] = [];
-  const vistos = new Map<string, ComprobanteRecibido>();
-
-  for (const v of ventanas) {
-    const lote = await fetchRecibidos(client, { fecha_desde: v.desde, fecha_hasta: v.hasta });
-    for (const r of lote) {
-      // Los recibidos no traen `id`. La identidad fiscal de un CFE es
-      // emisor+tipo+serie+número.
-      const clave = `${r.rut_emisor ?? "?"}|${r.tipo ?? "?"}|${r.serie ?? "?"}|${r.numero ?? "?"}`;
-      if (!vistos.has(clave)) vistos.set(clave, r);
-    }
-  }
-
-  if (ventanas.length > 1) {
-    warnings.push(
-      `Los comprobantes recibidos se consultaron en ${ventanas.length} ventanas (la API los limita ` +
-        "a 1 req/seg y falla con rangos amplios). Se deduplicaron por emisor+tipo+serie+número.",
-    );
-  }
-  return { lista: [...vistos.values()], ventanas: ventanas.length, warnings };
-}
-
 export async function handleComprasProveedores(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   const parsed = comprasProveedoresInputSchema.safeParse(args);
   if (!parsed.success) return validationErrorResult(parsed.error, ctx);
   const a = parsed.data;
 
-  let rango: RangoFechas;
-  if (a.desde !== undefined && a.hasta !== undefined) {
-    rango = { desde: a.desde, hasta: a.hasta };
-  } else {
-    const resuelto = resolverPeriodo(a.periodo);
-    if (resuelto === null) {
-      return simpleErrorResult(
-        `No se pudo interpretar el período "${a.periodo}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
-        ctx,
-      );
-    }
-    rango = resuelto;
-  }
-
-  if (rango.desde > rango.hasta) {
-    return simpleErrorResult(
-      `El período está invertido: 'desde' (${rango.desde}) es posterior a 'hasta' (${rango.hasta}).`,
-      ctx,
-    );
-  }
+  const resuelto = resolverRango({ periodo: a.periodo, desde: a.desde, hasta: a.hasta });
+  if (!resuelto.ok) return simpleErrorResult(resuelto.error, ctx);
+  const rango = resuelto.rango;
 
   try {
-    const client = ctx.getClient();
-    const recibidos = await traerRecibidos(client, rango, a.ventana_dias);
-    const resultado = rankingProveedores(recibidos.lista, {
+    const recibidos = await traerVentanaRecibidos(ctx, rango, {
+      ventana_dias: a.ventana_dias,
+    });
+    const resultado = rankingProveedores(recibidos.comprobantes, {
       moneda: a.moneda,
       limite: a.limite,
     });

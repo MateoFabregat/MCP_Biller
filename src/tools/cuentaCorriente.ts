@@ -16,10 +16,9 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { fetchEmitidos } from "../biller/queries.js";
+import { traerPorId } from "../biller/traerDetalles.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "../services/cfeTypes.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
 import {
   ESTRATEGIAS,
   calcularCuentaCorriente,
@@ -28,8 +27,9 @@ import {
   type ReferenciaCobranza,
 } from "../services/cuentaCorriente.js";
 import { hoyComoDateUy } from "../services/fechaUy.js";
-import { aIso, consultarPorPeriodo } from "../services/periodo.js";
+import { aIso } from "../services/periodo.js";
 import { BUCKETS } from "../services/vencimientos.js";
+import { traerVentana } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
   applyLimit,
@@ -226,20 +226,30 @@ async function cargarReferencias(
     );
   }
 
-  const client = ctx.getClient();
-  for (const r of aConsultar) {
-    try {
-      const detalle = await fetchEmitidos(client, { id: String(r.id) });
-      // `referenciasDeRecibo` mira primero un campo `referencias` y después el
-      // concepto de los ítems, que es de donde salen HOY (ver cuentaCorriente.ts).
-      const refs = detalle[0] === undefined ? null : referenciasDeRecibo(detalle[0]);
-      if (refs !== null) mapa.set(r.id!, refs);
-    } catch {
-      // Un detalle que falla no invalida el resto: ese recibo cae a FIFO.
-      warnings.push(
-        `No se pudo consultar el detalle del recibo ${r.id}: se imputó por FIFO en vez de por referencias.`,
-      );
-    }
+  // En paralelo acotado, con reintento y con cache (`biller/traerDetalles.ts`).
+  // Antes era un bucle en serie: 50 recibos eran ~20 s de espera para contestar
+  // "¿quién me debe?", y un 500 transitorio mandaba ese recibo a FIFO sin
+  // haberlo intentado de nuevo.
+  const ids = aConsultar.map((r) => r.id!);
+  const { detalles, fallidos } = await traerPorId(ctx.getClient(), ids);
+
+  for (const id of ids) {
+    const detalle = detalles.get(id);
+    if (detalle === undefined) continue;
+    // `referenciasDeRecibo` mira primero un campo `referencias` y después el
+    // concepto de los ítems, que es de donde salen HOY (ver cuentaCorriente.ts).
+    const refs = referenciasDeRecibo(detalle);
+    if (refs !== null) mapa.set(id, refs);
+  }
+
+  // Un detalle que falla no invalida el resto: ese recibo cae a FIFO. Solo se
+  // avisa del ERROR: una respuesta sin contenido no es una falla, es un recibo
+  // que no declara a qué se imputó.
+  for (const fallo of fallidos) {
+    if (fallo.motivo !== "error") continue;
+    warnings.push(
+      `No se pudo consultar el detalle del recibo ${fallo.id}: se imputó por FIFO en vez de por referencias.`,
+    );
   }
 
   if (aConsultar.length > 0 && mapa.size === 0) {
@@ -274,6 +284,8 @@ export interface ResultadoCorrida {
   hoy: Date;
   hoyIso: string;
   rango: { desde: string; hasta: string };
+  /** La sucursal efectivamente consultada, con el default de la empresa ya aplicado. */
+  sucursal: string | undefined;
   ventanas: number;
   detalles_consultados: number;
   warnings: string[];
@@ -293,10 +305,6 @@ export async function correrCuentaCorriente(
   ctx: ToolContext,
   a: CorridaCuentaCorriente,
 ): Promise<ResultadoCorrida> {
-  const config = ctx.getConfig();
-  const client = ctx.getClient();
-  const sucursal = a.sucursal ?? config.defaultSucursalId;
-
   // Día uruguayo, no día del proceso: los tramos de mora ("0-30", "31-60") se
   // cuentan desde hoy, y en UTC ese "hoy" se adelanta a las 21:00 de Montevideo.
   const hoy = hoyComoDateUy();
@@ -304,18 +312,13 @@ export async function correrCuentaCorriente(
   const desde = aIso(new Date(hoy.getTime() - a.dias_atras * 86_400_000));
   const rango = { desde, hasta: hoyIso };
 
-  const consulta = await consultarPorPeriodo(client, rango, {
-    sucursal,
-    ventanaDias: a.ventana_dias,
+  // El filtro LOCAL por cliente/moneda NO se pide acá: sacar cobros antes de
+  // imputar inflaría la deuda. Se aplica sobre el resultado.
+  const ventana = await traerVentana(ctx, {
+    rango,
+    sucursal: a.sucursal,
+    ventana_dias: a.ventana_dias,
     sinCache: a.sin_cache,
-  });
-
-  // Filtro local por EMISIÓN (la API filtra por creación). El filtro por
-  // cliente/moneda NO se aplica acá: sacar cobros antes de imputar inflaría
-  // la deuda. Se aplica sobre el resultado.
-  const filtered = filterEmitidos(consulta.comprobantes, {
-    emitidas_desde: rango.desde,
-    emitidas_hasta: rango.hasta,
   });
 
   // Detalle de recibos, para imputar por referencias reales.
@@ -323,7 +326,7 @@ export async function correrCuentaCorriente(
   let detallesConsultados = 0;
   const warningsDetalle: string[] = [];
   if (a.imputar_por_referencias) {
-    const recibos = filtered.list.filter(
+    const recibos = ventana.comprobantes.filter(
       (c) => classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia).categoria === "cobranza",
     );
     if (recibos.length > 0) {
@@ -334,7 +337,7 @@ export async function correrCuentaCorriente(
     }
   }
 
-  const resultado = calcularCuentaCorriente(filtered.list, {
+  const resultado = calcularCuentaCorriente(ventana.comprobantes, {
     hoy,
     solo_aceptados: a.solo_aceptados,
     solo_a_credito: a.solo_a_credito,
@@ -348,9 +351,10 @@ export async function correrCuentaCorriente(
     hoy,
     hoyIso,
     rango,
-    ventanas: consulta.ventanas,
+    sucursal: ventana.sucursal,
+    ventanas: ventana.ventanas,
     detalles_consultados: detallesConsultados,
-    warnings: [...consulta.warnings, ...filtered.warnings, ...warningsDetalle],
+    warnings: [...ventana.warnings, ...warningsDetalle],
   };
 }
 
@@ -363,10 +367,10 @@ export async function handleCuentaCorriente(
   const a = parsed.data;
 
   try {
-    const config = ctx.getConfig();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
-    const corrida = await correrCuentaCorriente(ctx, { ...a, sucursal });
-    const { resultado, hoyIso, rango } = corrida;
+    // El default de sucursal ya no se resuelve acá: lo hace `traerVentana`, una
+    // sola vez para las quince tools que lo copiaban.
+    const corrida = await correrCuentaCorriente(ctx, a);
+    const { resultado, hoyIso, rango, sucursal } = corrida;
 
     // Filtros de presentación, ya imputado.
     const coincide = (rut: string | null, moneda: string): boolean =>

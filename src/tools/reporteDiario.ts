@@ -20,15 +20,15 @@ import { normalizarTelefono } from "../config.js";
 import { KapsoClient } from "../kapso/client.js";
 import { generarAlertas } from "../services/alertas.js";
 import { compararPeriodos } from "../services/comparacion.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
 import { calcularCuentaCorriente } from "../services/cuentaCorriente.js";
 import { construirDigest } from "../services/digest.js";
 import { hoyComoDateUy } from "../services/fechaUy.js";
-import { consultarPorPeriodo, resolverPeriodo, aIso } from "../services/periodo.js";
+import { resolverPeriodo, aIso } from "../services/periodo.js";
 import { rankingClientes } from "../services/rankingClientes.js";
 import { resumirFacturacion } from "../services/resumenFacturacion.js";
 import { detectarRiesgoPlata, type RiesgoPlataResultado } from "../services/riesgoPlata.js";
 import { analizarVencimientos } from "../services/vencimientos.js";
+import { traerVentanaAmplia } from "../services/ventana.js";
 import { periodoAnterior } from "./compararPeriodos.js";
 import {
   READ_ONLY_ANNOTATIONS,
@@ -140,7 +140,6 @@ export async function handleReporteDiario(args: unknown, ctx: ToolContext): Prom
 
   try {
     const config = ctx.getConfig();
-    const client = ctx.getClient();
     // El digest arma DOS cosas con este `hoy`: los rangos que calcula acá y el
     // que le pasa a `resolverPeriodo`, que ya resolvía en hora uruguaya. Con
     // `new Date()` crudo, después de las 21:00 de Montevideo las dos mitades del
@@ -177,14 +176,12 @@ export async function handleReporteDiario(args: unknown, ctx: ToolContext): Prom
       .sort();
     const rangoCompleto = { desde: inicios[0]!, hasta: fines[fines.length - 1]! };
 
-    const consulta = await consultarPorPeriodo(client, rangoCompleto, {
-      sucursal: config.defaultSucursalId,
-    });
-    const recorte = (r: { desde: string; hasta: string }) =>
-      filterEmitidos(consulta.comprobantes, {
-        emitidas_desde: r.desde,
-        emitidas_hasta: r.hasta,
-      }).list;
+    // `traerVentanaAmplia` porque acá el "período" son cuatro: recortar al
+    // rango completo no filtraría nada y el warning hablaría de un período que
+    // no es ninguno de ellos. La sucursal la resuelve el módulo (default de la
+    // empresa), igual que en el resto de las tools.
+    const ventana = await traerVentanaAmplia(ctx, { rango: rangoCompleto });
+    const recorte = ventana.recorte;
 
     const emitidosAlertas = recorte(rangoAlertas);
     const alertas = generarAlertas(emitidosAlertas, { hoy });

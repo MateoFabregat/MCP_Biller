@@ -54,6 +54,9 @@ export interface RangoFechas {
   hasta: string;
 }
 
+/** Milisegundos de un día UTC. Los ISO se anclan a medianoche, así que es exacto. */
+const MS_POR_DIA = 86_400_000;
+
 function pad(n: number): string {
   return String(n).padStart(2, "0");
 }
@@ -169,19 +172,55 @@ export const PERIODOS_SOPORTADOS = [
   "anio_actual",
 ];
 
-/** Parte un rango en ventanas de a lo sumo `dias` días. */
+/**
+ * Parte un rango en ventanas de a lo sumo `dias` días, ANCLADAS A UNA GRILLA
+ * GLOBAL.
+ *
+ * EL PROBLEMA QUE ESTO RESUELVE, MEDIDO
+ *
+ * Antes cada partición arrancaba en `rango.desde`. Como el rango de consulta
+ * sale de `rangoDeConsulta` (el período ± margen), CADA período empezaba en un
+ * día distinto y producía cortes distintos. Consecuencia concreta: preguntar
+ * "¿cómo viene el mes?", después "¿quién me debe?" y después "¿quién me compra
+ * más?" bajaba 75 ventanas y CERO se repetían — tres veces los mismos
+ * comprobantes, con un cache que no podía servir ni una, porque la clave
+ * incluye las fechas de la ventana.
+ *
+ * Anclando el corte a `floor(díaEpoch / dias) * dias`, dos períodos que se
+ * solapan producen exactamente las MISMAS ventanas en la zona común, así que
+ * la segunda pregunta las encuentra en memoria.
+ *
+ * POR QUÉ LAS VENTANAS DE LOS BORDES SE RECORTAN AL RANGO
+ *
+ * La ventana de la grilla que contiene a `desde` empieza antes que `desde`, y
+ * la que contiene a `hasta` termina después. Dejarlas enteras sería una clave
+ * compartida más por borde, pero cambiaría QUÉ se consulta: se estaría pidiendo
+ * un rango de fechas de CREACIÓN más ancho que el que pidió el llamador. Del
+ * lado derecho eso agrega comprobantes emitidos dentro del período y cargados
+ * tarde —que hoy el margen no alcanza a tomar—, o sea que MUEVE TOTALES.
+ *
+ * Una optimización de consulta no puede cambiar un número. Los bordes se
+ * recortan: se pierde una clave compartida por punta y se gana la garantía de
+ * que el conjunto de días consultados es idéntico al de antes. Las ventanas
+ * interiores —13 de 15 en 90 días, 52 de 54 en un año— sí comparten clave.
+ */
 export function partirEnVentanas(rango: RangoFechas, dias: number = VENTANA_DIAS): RangoFechas[] {
   const inicio = desdeIso(rango.desde);
   const fin = desdeIso(rango.hasta);
   if (inicio.getTime() > fin.getTime()) return [];
 
   const ventanas: RangoFechas[] = [];
-  let cursor = inicio;
+  // Día epoch UTC del ISO: `desdeIso` ancla a medianoche UTC, así que la
+  // división es exacta y no depende de la zona horaria del proceso.
+  const diaEpoch = Math.floor(inicio.getTime() / MS_POR_DIA);
+  let cursor = new Date(Math.floor(diaEpoch / dias) * dias * MS_POR_DIA);
+
   while (cursor.getTime() <= fin.getTime()) {
     const finVentana = sumarDias(cursor, dias - 1);
+    const desde = cursor.getTime() < inicio.getTime() ? inicio : cursor;
     const hasta = finVentana.getTime() > fin.getTime() ? fin : finVentana;
-    ventanas.push({ desde: aIso(cursor), hasta: aIso(hasta) });
-    cursor = sumarDias(hasta, 1);
+    ventanas.push({ desde: aIso(desde), hasta: aIso(hasta) });
+    cursor = sumarDias(finVentana, 1);
   }
   return ventanas;
 }
@@ -202,6 +241,14 @@ export interface ConsultaPorPeriodoResult {
   /** Rango de creación efectivamente consultado (incluye el margen). */
   rango_consultado: RangoFechas;
   ventanas: number;
+  /**
+   * Cuántas de esas ventanas salieron de memoria en vez de la API.
+   *
+   * Se devuelve —y no se deja solo en `estadisticasCache()`— porque el contador
+   * que importa es POR EMPRESA, y el cache es del proceso. Quien tiene el
+   * contexto del tenant es el llamador: ver `services/ventana.ts`.
+   */
+  desde_cache: number;
   warnings: string[];
 }
 
@@ -323,6 +370,7 @@ export async function consultarPorPeriodo(
     comprobantes: [...porId.values(), ...porContenido.values()],
     rango_consultado: rangoConsulta,
     ventanas: ventanas.length,
+    desde_cache: desdeCache,
     warnings,
   };
 }

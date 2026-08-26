@@ -43,16 +43,11 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { normalizarTelefono } from "../config.js";
-import { fetchEmitidos } from "../biller/queries.js";
+import { traerPorId } from "../biller/traerDetalles.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { KapsoClient, type InteractivoBotones } from "../kapso/client.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
-import {
-  PERIODOS_SOPORTADOS,
-  consultarPorPeriodo,
-  resolverPeriodo,
-  type RangoFechas,
-} from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS, type RangoFechas } from "../services/periodo.js";
+import { resolverRango, traerVentana } from "../services/ventana.js";
 import { rankingClientes, SIN_RECEPTOR } from "../services/rankingClientes.js";
 import { rankingProductos } from "../services/rankingProductos.js";
 import { comoSigue, resolver, type Resoluble, type Resolucion } from "../services/resolver.js";
@@ -262,40 +257,20 @@ export async function handleResolverNombre(args: unknown, ctx: ToolContext): Pro
     );
   }
 
-  let rango: RangoFechas;
-  if (a.desde !== undefined && a.hasta !== undefined) {
-    rango = { desde: a.desde, hasta: a.hasta };
-  } else {
-    const resuelto = resolverPeriodo(a.periodo);
-    if (resuelto === null) {
-      return simpleErrorResult(
-        `No se pudo interpretar el período "${a.periodo}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
-        ctx,
-      );
-    }
-    rango = resuelto;
-  }
-  if (rango.desde > rango.hasta) {
-    return simpleErrorResult(
-      `El período está invertido: 'desde' (${rango.desde}) es posterior a 'hasta' (${rango.hasta}).`,
-      ctx,
-    );
-  }
+  const resuelto = resolverRango({ periodo: a.periodo, desde: a.desde, hasta: a.hasta });
+  if (!resuelto.ok) return simpleErrorResult(resuelto.error, ctx);
+  const rango = resuelto.rango;
 
   const warnings: string[] = [];
 
   try {
     const config = ctx.getConfig();
-    const client = ctx.getClient();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
 
-    const consulta = await consultarPorPeriodo(client, rango, { sucursal });
-    const filtro = filterEmitidos(consulta.comprobantes, {
-      emitidas_desde: rango.desde,
-      emitidas_hasta: rango.hasta,
-    });
-    const filtrados = filtro.list;
-    warnings.push(...filtro.warnings);
+    const ventana = await traerVentana(ctx, { rango, sucursal: a.sucursal });
+    const filtrados = ventana.comprobantes;
+    // Solo los del recorte: a quien preguntó "¿quién es Pérez?" no le dice nada
+    // en cuántas ventanas se partió la consulta.
+    warnings.push(...ventana.warnings_recorte);
 
     let universo: Item[];
     let detallados: number | null = null;
@@ -308,21 +283,16 @@ export async function handleResolverNombre(args: unknown, ctx: ToolContext): Pro
       const seleccion = [...filtrados]
         .sort((x, y) => (y.total ?? 0) - (x.total ?? 0))
         .slice(0, MAX_DETALLE_PRODUCTOS);
-      const detalle: ComprobanteEmitido[] = [];
-      let fallidos = 0;
-      for (const c of seleccion) {
-        if (c.id === null) {
-          fallidos += 1;
-          continue;
-        }
-        try {
-          const d = await fetchEmitidos(client, { id: String(c.id) });
-          if (d[0] === undefined) fallidos += 1;
-          else detalle.push(d[0]);
-        } catch {
-          fallidos += 1;
-        }
-      }
+      // En paralelo acotado, con reintento y con cache: ver
+      // `biller/traerDetalles.ts`. El orden es el de `seleccion` (total
+      // descendente), no el de llegada.
+      const ids = seleccion.filter((c) => c.id !== null).map((c) => c.id!);
+      const sinId = seleccion.length - ids.length;
+      const traidos = await traerPorId(ctx.getClient(), ids);
+      const detalle = ids
+        .map((id) => traidos.detalles.get(id))
+        .filter((c): c is ComprobanteEmitido => c !== undefined);
+      const fallidos = sinId + traidos.fallidos.length;
       detallados = detalle.length;
       universo = universoProductos(detalle);
       if (filtrados.length > MAX_DETALLE_PRODUCTOS) {

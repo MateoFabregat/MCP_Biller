@@ -15,10 +15,10 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
 import { hoyComoDateUy } from "../services/fechaUy.js";
-import { aIso, consultarPorPeriodo } from "../services/periodo.js";
+import { aIso } from "../services/periodo.js";
 import { BUCKETS, analizarVencimientos } from "../services/vencimientos.js";
+import { traerVentana } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
   applyLimit,
@@ -167,10 +167,6 @@ export async function handleVencimientos(args: unknown, ctx: ToolContext): Promi
   const a = parsed.data;
 
   try {
-    const config = ctx.getConfig();
-    const client = ctx.getClient();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
-
     // El aging se mide contra el día URUGUAYO. Con `new Date()` crudo, un
     // proceso en UTC pasa a "mañana" a las 21:00 de Montevideo y toda factura
     // aparece un día más vencida de lo que está.
@@ -179,20 +175,15 @@ export async function handleVencimientos(args: unknown, ctx: ToolContext): Promi
     const desde = aIso(new Date(hoy.getTime() - a.dias_atras * 86_400_000));
     const rango = { desde, hasta: hoyIso };
 
-    const consulta = await consultarPorPeriodo(client, rango, {
-      sucursal,
-      ventanaDias: a.ventana_dias,
-    });
-
-    // Filtro local por fecha de EMISIÓN: la API filtra por fecha de creación.
-    const filtered = filterEmitidos(consulta.comprobantes, {
+    const ventana = await traerVentana(ctx, {
+      rango,
+      sucursal: a.sucursal,
+      ventana_dias: a.ventana_dias,
       moneda: a.moneda,
       cliente_rut: a.cliente_rut,
-      emitidas_desde: rango.desde,
-      emitidas_hasta: rango.hasta,
     });
 
-    const resultado = analizarVencimientos(filtered.list, {
+    const resultado = analizarVencimientos(ventana.comprobantes, {
       hoy,
       horizonte_dias: a.horizonte_dias,
       incluir_vencidas: a.incluir_vencidas,
@@ -212,7 +203,7 @@ export async function handleVencimientos(args: unknown, ctx: ToolContext): Promi
       },
       fuente: "biller:/v2/comprobantes/obtener",
       filtros_aplicados: {
-        sucursal: sucursal ?? null,
+        sucursal: ventana.sucursal ?? null,
         moneda: a.moneda ?? null,
         cliente_rut: a.cliente_rut ?? null,
         solo_aceptados: a.solo_aceptados,
@@ -228,11 +219,10 @@ export async function handleVencimientos(args: unknown, ctx: ToolContext): Promi
       conteo_analizados: resultado.conteo_analizados,
       conteo_incluidos: resultado.conteo_incluidos,
       excluidos: { ...resultado.excluidos },
-      ventanas_consultadas: consulta.ventanas,
+      ventanas_consultadas: ventana.ventanas,
       cobranzas_imputadas: false,
       warnings: [
-        ...consulta.warnings,
-        ...filtered.warnings,
+        ...ventana.warnings,
         ...resultado.warnings,
         ...limitado.warnings,
         `Solo se miraron comprobantes emitidos desde ${rango.desde}. Una factura más vieja que eso ` +

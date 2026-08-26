@@ -14,13 +14,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { calcularCohortes } from "../services/cohortes.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
-import {
-  PERIODOS_SOPORTADOS,
-  consultarPorPeriodo,
-  resolverPeriodo,
-  type RangoFechas,
-} from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS } from "../services/periodo.js";
+import { resolverRango, traerVentana } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,
@@ -118,42 +113,18 @@ export async function handleCohortesClientes(args: unknown, ctx: ToolContext): P
   if (!parsed.success) return validationErrorResult(parsed.error, ctx);
   const a = parsed.data;
 
-  let rango: RangoFechas;
-  if (a.desde !== undefined && a.hasta !== undefined) {
-    rango = { desde: a.desde, hasta: a.hasta };
-  } else {
-    const resuelto = resolverPeriodo(a.periodo);
-    if (resuelto === null) {
-      return simpleErrorResult(
-        `No se pudo interpretar el período "${a.periodo}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
-        ctx,
-      );
-    }
-    rango = resuelto;
-  }
-
-  if (rango.desde > rango.hasta) {
-    return simpleErrorResult(
-      `El período está invertido: 'desde' (${rango.desde}) es posterior a 'hasta' (${rango.hasta}).`,
-      ctx,
-    );
-  }
+  const resuelto = resolverRango({ periodo: a.periodo, desde: a.desde, hasta: a.hasta });
+  if (!resuelto.ok) return simpleErrorResult(resuelto.error, ctx);
+  const rango = resuelto.rango;
 
   try {
-    const config = ctx.getConfig();
-    const client = ctx.getClient();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
-
-    const consulta = await consultarPorPeriodo(client, rango, {
-      sucursal,
-      ventanaDias: a.ventana_dias,
-    });
-    const filtrado = filterEmitidos(consulta.comprobantes, {
-      emitidas_desde: rango.desde,
-      emitidas_hasta: rango.hasta,
+    const ventana = await traerVentana(ctx, {
+      rango,
+      sucursal: a.sucursal,
+      ventana_dias: a.ventana_dias,
     });
 
-    const resultado = calcularCohortes(filtrado.list, rango, {
+    const resultado = calcularCohortes(ventana.comprobantes, rango, {
       solo_aceptados: a.solo_aceptados,
       moneda: a.moneda,
       meses_de_gracia: a.meses_de_gracia,
@@ -171,13 +142,13 @@ export async function handleCohortesClientes(args: unknown, ctx: ToolContext): P
       monedas_presentes: resultado.monedas_presentes,
       clientes_totales: resultado.clientes_totales,
       comprobantes_analizados: resultado.comprobantes_analizados,
-      ventanas_consultadas: consulta.ventanas,
+      ventanas_consultadas: ventana.ventanas,
       // Bandera explícita, no decorativa: es la limitación que hace que el
       // primer mes esté inflado, y viaja en la respuesta para que el modelo no
       // la pierda entre los warnings.
       alta_es_primera_compra_del_rango: true,
       no_convertir_moneda: true,
-      warnings: [...consulta.warnings, ...filtrado.warnings, ...resultado.warnings],
+      warnings: [...ventana.warnings, ...resultado.warnings],
     });
   } catch (err) {
     return errorToolResult(err, ctx);

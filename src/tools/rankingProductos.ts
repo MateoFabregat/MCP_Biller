@@ -18,18 +18,13 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { round2 } from "../biller/coerce.js";
-import { fetchEmitidos } from "../biller/queries.js";
+import { traerPorId } from "../biller/traerDetalles.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "../services/cfeTypes.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
-import {
-  PERIODOS_SOPORTADOS,
-  consultarPorPeriodo,
-  resolverPeriodo,
-  type RangoFechas,
-} from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS } from "../services/periodo.js";
 import { UMBRAL_DISPERSION_PCT, rankingProductos } from "../services/rankingProductos.js";
 import { clasificarEstado } from "../services/resumenFacturacion.js";
+import { resolverRango, traerVentana } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,
@@ -149,33 +144,29 @@ const outputShape = {
  * Detalla por 'id' los comprobantes ya seleccionados, para leer sus `items`.
  * Un fallo individual (HTTP, o respuesta vacía) no aborta el resto: se cuenta
  * y se avisa.
+ *
+ * El N+1 corre en paralelo acotado, con reintento y con cache: ver
+ * `biller/traerDetalles.ts`. Antes era un bucle en serie, y con el tope de 500
+ * comprobantes eso son más de tres minutos de espera para una sola pregunta.
  */
 async function cargarItems(
   ctx: ToolContext,
   seleccionados: ComprobanteEmitido[],
 ): Promise<{ comprobantes: ComprobanteEmitido[]; fallidos: number }> {
-  const client = ctx.getClient();
-  const comprobantes: ComprobanteEmitido[] = [];
-  let fallidos = 0;
+  const ids = seleccionados.filter((c) => c.id !== null).map((c) => c.id!);
+  // Un comprobante sin `id` no se puede detallar: cuenta como fallido igual que
+  // antes, sin gastar una request en averiguarlo.
+  const sinId = seleccionados.length - ids.length;
 
-  for (const c of seleccionados) {
-    if (c.id === null) {
-      fallidos += 1;
-      continue;
-    }
-    try {
-      const detalle = await fetchEmitidos(client, { id: String(c.id) });
-      if (detalle[0] === undefined) {
-        fallidos += 1;
-        continue;
-      }
-      comprobantes.push(detalle[0]);
-    } catch {
-      fallidos += 1;
-    }
-  }
+  const { detalles, fallidos } = await traerPorId(ctx.getClient(), ids);
 
-  return { comprobantes, fallidos };
+  // El orden es el de `seleccionados` (total descendente), no el de llegada:
+  // dos corridas idénticas tienen que devolver el mismo ranking.
+  const comprobantes = ids
+    .map((id) => detalles.get(id))
+    .filter((c): c is ComprobanteEmitido => c !== undefined);
+
+  return { comprobantes, fallidos: sinId + fallidos.length };
 }
 
 /**
@@ -205,46 +196,22 @@ export async function handleRankingProductos(args: unknown, ctx: ToolContext): P
   if (!parsed.success) return validationErrorResult(parsed.error, ctx);
   const a = parsed.data;
 
-  let rango: RangoFechas;
-  if (a.desde !== undefined && a.hasta !== undefined) {
-    rango = { desde: a.desde, hasta: a.hasta };
-  } else {
-    const resuelto = resolverPeriodo(a.periodo);
-    if (resuelto === null) {
-      return simpleErrorResult(
-        `No se pudo interpretar el período "${a.periodo}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
-        ctx,
-      );
-    }
-    rango = resuelto;
-  }
-
-  if (rango.desde > rango.hasta) {
-    return simpleErrorResult(
-      `El período está invertido: 'desde' (${rango.desde}) es posterior a 'hasta' (${rango.hasta}).`,
-      ctx,
-    );
-  }
+  const resuelto = resolverRango({ periodo: a.periodo, desde: a.desde, hasta: a.hasta });
+  if (!resuelto.ok) return simpleErrorResult(resuelto.error, ctx);
+  const rango = resuelto.rango;
 
   try {
-    const config = ctx.getConfig();
-    const client = ctx.getClient();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
-
-    const consulta = await consultarPorPeriodo(client, rango, {
-      sucursal,
-      ventanaDias: a.ventana_dias,
-    });
-    const filtered = filterEmitidos(consulta.comprobantes, {
-      emitidas_desde: rango.desde,
-      emitidas_hasta: rango.hasta,
+    const ventana = await traerVentana(ctx, {
+      rango,
+      sucursal: a.sucursal,
+      ventana_dias: a.ventana_dias,
     });
 
     // Truncar por TOTAL descendente: si hay que recortar, priorizar los
     // comprobantes de mayor importe hace que el ranking resultante sea lo más
     // representativo posible de la facturación real. La cobertura efectiva
     // se declara más abajo, no se asume.
-    const ordenados = [...filtered.list].sort((x, y) => (y.total ?? 0) - (x.total ?? 0));
+    const ordenados = [...ventana.comprobantes].sort((x, y) => (y.total ?? 0) - (x.total ?? 0));
     const seleccionados = ordenados.slice(0, a.max_comprobantes);
 
     const { comprobantes: comprobantesConItems, fallidos } = await cargarItems(ctx, seleccionados);
@@ -256,7 +223,7 @@ export async function handleRankingProductos(args: unknown, ctx: ToolContext): P
     });
 
     // --- Cobertura -------------------------------------------------------
-    const importeTotalPeriodo = importeCalificado(filtered.list, resultado.moneda_orden, a.solo_aceptados);
+    const importeTotalPeriodo = importeCalificado(ventana.comprobantes, resultado.moneda_orden, a.solo_aceptados);
     const importeAnalizado = importeCalificado(
       comprobantesConItems,
       resultado.moneda_orden,
@@ -266,9 +233,9 @@ export async function handleRankingProductos(args: unknown, ctx: ToolContext): P
       importeTotalPeriodo !== 0 ? round2((importeAnalizado / importeTotalPeriodo) * 100) : null;
 
     const warningsExtra: string[] = [];
-    if (filtered.list.length > a.max_comprobantes) {
+    if (ventana.comprobantes.length > a.max_comprobantes) {
       warningsExtra.push(
-        `Había ${filtered.list.length} comprobante(s) en el período y se detalló el de ` +
+        `Había ${ventana.comprobantes.length} comprobante(s) en el período y se detalló el de ` +
           `${seleccionados.length} (max_comprobantes=${a.max_comprobantes}), priorizando los de mayor ` +
           `total. Cobertura de importe cubierta: ${coberturaImportePct ?? "sin base para calcularla"}% ` +
           `en ${resultado.moneda_orden}. Un ranking sobre una porción chica de la facturación no es ` +
@@ -292,13 +259,13 @@ export async function handleRankingProductos(args: unknown, ctx: ToolContext): P
       productos_totales: resultado.productos_totales,
       comprobantes_analizados: resultado.comprobantes_analizados,
       cobertura: {
-        comprobantes_del_periodo: filtered.list.length,
+        comprobantes_del_periodo: ventana.comprobantes.length,
         comprobantes_analizados: resultado.comprobantes_analizados,
         cobertura_importe_pct: coberturaImportePct,
       },
-      ventanas_consultadas: consulta.ventanas,
+      ventanas_consultadas: ventana.ventanas,
       no_convertir_moneda: true,
-      warnings: [...consulta.warnings, ...filtered.warnings, ...warningsExtra, ...resultado.warnings],
+      warnings: [...ventana.warnings, ...warningsExtra, ...resultado.warnings],
     });
   } catch (err) {
     return errorToolResult(err, ctx);

@@ -25,18 +25,17 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { compararPeriodos } from "../services/comparacion.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
 import { calcularCuentaCorriente } from "../services/cuentaCorriente.js";
 import { hoyComoDateUy } from "../services/fechaUy.js";
 import {
   PERIODOS_SOPORTADOS,
   aIso,
-  consultarPorPeriodo,
   resolverPeriodo,
   type RangoFechas,
 } from "../services/periodo.js";
 import { rankingClientes } from "../services/rankingClientes.js";
 import { detectarRiesgoPlata } from "../services/riesgoPlata.js";
+import { traerVentanaAmplia } from "../services/ventana.js";
 import { periodoAnterior } from "./compararPeriodos.js";
 import {
   READ_ONLY_ANNOTATIONS,
@@ -141,11 +140,6 @@ export async function handlePlataEnRiesgo(args: unknown, ctx: ToolContext): Prom
   const previo = periodoAnterior(rango);
 
   try {
-    const config = ctx.getConfig();
-    const client = ctx.getClient();
-    const sucursal = a.sucursal ?? config.defaultSucursalId;
-
-    // Una sola consulta sobre el rango que contiene a los tres análisis.
     const rangoDeuda: RangoFechas | null = a.incluir_deuda
       ? { desde: aIso(new Date(hoy.getTime() - a.dias_deuda * 86_400_000)), hasta: rango.hasta }
       : null;
@@ -154,17 +148,16 @@ export async function handlePlataEnRiesgo(args: unknown, ctx: ToolContext): Prom
       hasta: rango.hasta,
     };
 
-    const consulta = await consultarPorPeriodo(client, rangoCompleto, {
-      sucursal,
-      ventanaDias: a.ventana_dias,
+    // UNA sola consulta sobre el rango que contiene a los tres análisis, y
+    // después recortes locales. `traerVentanaAmplia` no recorta al rango
+    // completo: acá el "período" son tres, y `recorte` es el que ubica cada uno.
+    const ventana = await traerVentanaAmplia(ctx, {
+      rango: rangoCompleto,
+      sucursal: a.sucursal,
+      ventana_dias: a.ventana_dias,
     });
-    const warnings = [...consulta.warnings];
-
-    const recorte = (r: RangoFechas) =>
-      filterEmitidos(consulta.comprobantes, {
-        emitidas_desde: r.desde,
-        emitidas_hasta: r.hasta,
-      }).list;
+    const warnings = [...ventana.warnings];
+    const recorte = ventana.recorte;
 
     const actuales = recorte(rango);
     const anteriores = recorte(previo);
@@ -207,8 +200,8 @@ export async function handlePlataEnRiesgo(args: unknown, ctx: ToolContext): Prom
       alertas: riesgo.alertas,
       conteo_por_severidad: riesgo.conteo_por_severidad,
       cobertura: riesgo.cobertura,
-      comprobantes_analizados: consulta.comprobantes.length,
-      ventanas_consultadas: consulta.ventanas,
+      comprobantes_analizados: ventana.comprobantes.length,
+      ventanas_consultadas: ventana.ventanas,
       warnings: [...warnings, ...riesgo.warnings],
       no_convertir_moneda: true,
     });

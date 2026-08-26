@@ -14,13 +14,8 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { filterEmitidos } from "../services/comprobanteFilters.js";
-import {
-  PERIODOS_SOPORTADOS,
-  consultarPorPeriodo,
-  resolverPeriodo,
-  type RangoFechas,
-} from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS, resolverPeriodo, type RangoFechas } from "../services/periodo.js";
+import { resolverRango, traerVentana } from "../services/ventana.js";
 import { SALTO_PARTICIPACION_PP, rankingSucursales } from "../services/sucursales.js";
 import { periodoAnterior } from "./compararPeriodos.js";
 import {
@@ -127,26 +122,9 @@ export async function handleRankingSucursales(args: unknown, ctx: ToolContext): 
   if (!parsed.success) return validationErrorResult(parsed.error, ctx);
   const a = parsed.data;
 
-  let rango: RangoFechas;
-  if (a.desde !== undefined && a.hasta !== undefined) {
-    rango = { desde: a.desde, hasta: a.hasta };
-  } else {
-    const resuelto = resolverPeriodo(a.periodo);
-    if (resuelto === null) {
-      return simpleErrorResult(
-        `No se pudo interpretar el período "${a.periodo}". Valores aceptados: ${PERIODOS_SOPORTADOS.join(", ")}.`,
-        ctx,
-      );
-    }
-    rango = resuelto;
-  }
-
-  if (rango.desde > rango.hasta) {
-    return simpleErrorResult(
-      `El período está invertido: 'desde' (${rango.desde}) es posterior a 'hasta' (${rango.hasta}).`,
-      ctx,
-    );
-  }
+  const resuelto = resolverRango({ periodo: a.periodo, desde: a.desde, hasta: a.hasta });
+  if (!resuelto.ok) return simpleErrorResult(resuelto.error, ctx);
+  const rango = resuelto.rango;
 
   let rangoPrevio: RangoFechas | null = null;
   if (a.comparar) {
@@ -166,31 +144,17 @@ export async function handleRankingSucursales(args: unknown, ctx: ToolContext): 
 
   try {
     const config = ctx.getConfig();
-    const client = ctx.getClient();
-    // Sin `sucursal`: ver el encabezado. Un ranking filtrado a un local no es un
-    // ranking.
-    const opts = { ventanaDias: a.ventana_dias };
+    // `sucursal: null` es explícito y no una omisión: le dice a `traerVentana`
+    // que NO aplique el default de la empresa. Ver el encabezado — un ranking
+    // filtrado a un local es un ranking de un elemento con participación 100%.
+    const opts = { sucursal: null, ventana_dias: a.ventana_dias };
 
-    const [consulta, consultaPrevia] = await Promise.all([
-      consultarPorPeriodo(client, rango, opts),
-      rangoPrevio === null
-        ? Promise.resolve(null)
-        : consultarPorPeriodo(client, rangoPrevio, opts),
+    const [ventana, ventanaPrevia] = await Promise.all([
+      traerVentana(ctx, { ...opts, rango }),
+      rangoPrevio === null ? Promise.resolve(null) : traerVentana(ctx, { ...opts, rango: rangoPrevio }),
     ]);
 
-    const filtrado = filterEmitidos(consulta.comprobantes, {
-      emitidas_desde: rango.desde,
-      emitidas_hasta: rango.hasta,
-    });
-    const filtradoPrevio =
-      consultaPrevia === null || rangoPrevio === null
-        ? null
-        : filterEmitidos(consultaPrevia.comprobantes, {
-            emitidas_desde: rangoPrevio.desde,
-            emitidas_hasta: rangoPrevio.hasta,
-          });
-
-    const resultado = rankingSucursales(filtrado.list, filtradoPrevio?.list ?? null, {
+    const resultado = rankingSucursales(ventana.comprobantes, ventanaPrevia?.comprobantes ?? null, {
       nombres: config.sucursales,
       moneda: a.moneda,
       solo_aceptados: a.solo_aceptados,
@@ -209,13 +173,11 @@ export async function handleRankingSucursales(args: unknown, ctx: ToolContext): 
       sucursales_totales: resultado.sucursales_totales,
       comprobantes_analizados: resultado.comprobantes_analizados,
       movimientos_relevantes: resultado.movimientos_relevantes,
-      ventanas_consultadas: consulta.ventanas + (consultaPrevia?.ventanas ?? 0),
+      ventanas_consultadas: ventana.ventanas + (ventanaPrevia?.ventanas ?? 0),
       no_convertir_moneda: true,
       warnings: [
-        ...consulta.warnings,
-        ...(consultaPrevia?.warnings ?? []),
-        ...filtrado.warnings,
-        ...(filtradoPrevio?.warnings ?? []),
+        ...ventana.warnings,
+        ...(ventanaPrevia?.warnings ?? []),
         ...resultado.warnings,
       ],
     });
