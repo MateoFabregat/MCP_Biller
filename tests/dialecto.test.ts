@@ -56,3 +56,22 @@ describe("los schemas salen sin dialecto draft-07", () => {
     await server.close();
   });
 });
+
+describe("wire liviano (BILLER_WIRE_LIVIANO)", () => {
+  it("con quitarOutputSchema, ninguna tool lleva outputSchema y la lista pesa mucho menos", async () => {
+    // El caso Kapso: 34 tools con outputSchema pesaban 159 KB y el Agent Node
+    // las descartaba TODAS sin error visible — el agente quedaba con sus 3
+    // tools built-in e improvisaba menús. outputSchema es opcional en MCP.
+    const ctx = createToolContext({});
+    const server = crearServidorMcp(ctx, "read_only");
+    const [cliente, servidor] = InMemoryTransport.createLinkedPair();
+    await server.connect(conDialectoLimpio(servidor, { quitarOutputSchema: true }));
+    const client = new Client({ name: "t", version: "0" });
+    await client.connect(cliente);
+    const { tools } = await client.listTools();
+    expect(tools.length).toBeGreaterThan(20);
+    for (const t of tools) expect(t.outputSchema, t.name).toBeUndefined();
+    await client.close();
+    await server.close();
+  });
+});

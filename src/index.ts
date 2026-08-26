@@ -130,7 +130,9 @@ async function main(): Promise<void> {
   }
 
   const server = crearServidorMcp(ctx, inspection.capabilityMode);
-  await server.connect(conDialectoLimpio(new StdioServerTransport()));
+  await server.connect(
+    conDialectoLimpio(new StdioServerTransport(), { quitarOutputSchema: inspection.wireLiviano }),
+  );
 
   logger.info("biller-mcp-server listo (stdio).", {
     capability_mode: inspection.capabilityMode,

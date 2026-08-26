@@ -124,6 +124,15 @@ export interface BillerConfig {
    * cuando hay varias instancias y el proceso no dura lo que la conversación.
    */
   borradorStorePath?: string;
+  /**
+   * true = el `tools/list` sale SIN los outputSchema.
+   *
+   * Existe por el Agent Node de Kapso: con la lista completa (159 KB) el agente
+   * quedaba configurado con cero tools nuestras, sin error visible. Los
+   * outputSchema son opcionales en MCP y un agente conversacional no los usa;
+   * un cliente estricto (Claude Code) sí, por eso es opt-in y no default.
+   */
+  wireLiviano: boolean;
   /** Topes de monto por operación y por moneda (BILLER_MAX_MONTO_UYU, …). */
   maxMontos: LimitesMonto;
   /**
@@ -365,6 +374,8 @@ export interface ConfigInspection {
   idempotencyLogPath: string | null;
   /** Ruta del store persistente de borradores de emisión (null = solo memoria). */
   borradorStorePath: string | null;
+  /** true = tools/list sale sin outputSchema (para clientes que se ahogan con la lista completa). */
+  wireLiviano: boolean;
   /** Topes de monto configurados, por moneda. */
   maxMontos: LimitesMonto;
   /** Valor de la UI configurado (null = se usa el de referencia). */
@@ -446,6 +457,7 @@ export function loadConfig(env: Env = process.env): BillerConfig {
     enableIvaEstimado: parseBool(env.BILLER_ENABLE_IVA_ESTIMADO),
     idempotencyLogPath: trimOrUndefined(env.BILLER_IDEMPOTENCY_LOG_PATH),
     borradorStorePath: trimOrUndefined(env.BILLER_BORRADOR_STORE_PATH),
+    wireLiviano: parseBool(env.BILLER_WIRE_LIVIANO),
     maxMontos: parseLimitesMonto(env),
     valorUi: parseNumeroPositivo(env.BILLER_VALOR_UI),
     valorUiFecha: trimOrUndefined(env.BILLER_VALOR_UI_FECHA),
@@ -520,6 +532,7 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     enableIvaEstimado: parseBool(env.BILLER_ENABLE_IVA_ESTIMADO),
     idempotencyLogPath: trimOrUndefined(env.BILLER_IDEMPOTENCY_LOG_PATH) ?? null,
     borradorStorePath: trimOrUndefined(env.BILLER_BORRADOR_STORE_PATH) ?? null,
+    wireLiviano: parseBool(env.BILLER_WIRE_LIVIANO),
     maxMontos: parseLimitesMonto(env),
     valorUi: parseNumeroPositivo(env.BILLER_VALOR_UI) ?? null,
     valorUiFecha: trimOrUndefined(env.BILLER_VALOR_UI_FECHA) ?? null,

@@ -146,6 +146,6 @@ export async function manejarRequestServerless(
     void server.close();
   });
 
-  await server.connect(conDialectoLimpio(transport));
+  await server.connect(conDialectoLimpio(transport, { quitarOutputSchema: config.wireLiviano }));
   await transport.handleRequest(req, res, parsedBody);
 }

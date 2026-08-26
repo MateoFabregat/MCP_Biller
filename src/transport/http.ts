@@ -314,7 +314,9 @@ export async function iniciarTransporteHttp(
           });
 
           const server = crearServidorMcp(auth.tenant);
-          await server.connect(conDialectoLimpio(transport));
+          await server.connect(
+            conDialectoLimpio(transport, { quitarOutputSchema: config.wireLiviano }),
+          );
         }
 
         await transport.handleRequest(req, res);

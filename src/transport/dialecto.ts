@@ -32,15 +32,34 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 const DIALECTO_VIEJO = "http://json-schema.org/draft-07/schema#";
 
-/** Borra `$schema: draft-07` de los schemas de una lista de tools. */
-function limpiarListaDeTools(result: unknown): void {
+export interface OpcionesDialecto {
+  /**
+   * Además del dialecto, quitar el `outputSchema` entero de cada tool.
+   *
+   * POR QUÉ EXISTE: el Agent Node de Kapso abría la sesión, pedía `tools/list`,
+   * recibía 200… y configuraba el agente con CERO tools nuestras, sin error en
+   * ningún lado. La lista pesaba 159 KB, y casi la mitad eran los
+   * `outputSchema` — que para un agente conversacional no aportan nada: el
+   * modelo lee `structuredContent` igual, con o sin schema declarado.
+   *
+   * `outputSchema` es OPCIONAL en la spec de MCP, así que quitarlo del wire es
+   * legal y no cambia ninguna respuesta. Es opt-in (BILLER_WIRE_LIVIANO) porque
+   * un cliente estricto como Claude Code sí lo aprovecha para validar.
+   */
+  quitarOutputSchema?: boolean;
+}
+
+/** Limpia los schemas de una lista de tools según las opciones. */
+function limpiarListaDeTools(result: unknown, opciones: OpcionesDialecto): void {
   if (typeof result !== "object" || result === null) return;
   const tools = (result as { tools?: unknown }).tools;
   if (!Array.isArray(tools)) return;
   for (const tool of tools) {
     if (typeof tool !== "object" || tool === null) continue;
+    const t = tool as Record<string, unknown>;
+    if (opciones.quitarOutputSchema === true) delete t["outputSchema"];
     for (const clave of ["inputSchema", "outputSchema"] as const) {
-      const schema = (tool as Record<string, unknown>)[clave];
+      const schema = t[clave];
       if (typeof schema === "object" && schema !== null) {
         const s = schema as Record<string, unknown>;
         if (s["$schema"] === DIALECTO_VIEJO) delete s["$schema"];
@@ -50,16 +69,19 @@ function limpiarListaDeTools(result: unknown): void {
 }
 
 /**
- * Envuelve `transport.send` para limpiar el dialecto de todo `tools/list` que
- * salga. Devuelve el mismo transporte, para usarlo inline en el `connect`.
+ * Envuelve `transport.send` para limpiar todo `tools/list` que salga.
+ * Devuelve el mismo transporte, para usarlo inline en el `connect`.
  */
-export function conDialectoLimpio<T extends Transport>(transport: T): T {
+export function conDialectoLimpio<T extends Transport>(
+  transport: T,
+  opciones: OpcionesDialecto = {},
+): T {
   const enviarOriginal = transport.send.bind(transport);
-  transport.send = (mensaje, opciones) => {
+  transport.send = (mensaje, opcionesEnvio) => {
     if (typeof mensaje === "object" && mensaje !== null && "result" in mensaje) {
-      limpiarListaDeTools((mensaje as { result?: unknown }).result);
+      limpiarListaDeTools((mensaje as { result?: unknown }).result, opciones);
     }
-    return enviarOriginal(mensaje, opciones);
+    return enviarOriginal(mensaje, opcionesEnvio);
   };
   return transport;
 }
