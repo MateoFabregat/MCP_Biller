@@ -31,7 +31,7 @@ import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
 import { clasificarEstado } from "./resumenFacturacion.js";
 import type { RangoFechas } from "./periodo.js";
-import { hoyIsoUy } from "./fechaUy.js";
+import { hoyComoDateUy, hoyIsoUy } from "./fechaUy.js";
 
 /** Moneda local: no genera exposición cambiaria. */
 export const MONEDA_LOCAL = "UYU";
@@ -325,7 +325,7 @@ export function compararPeriodos(
   opciones: ComparacionOptions = {},
 ): ComparacionResultado {
   const soloAceptados = opciones.solo_aceptados ?? true;
-  const hoy = opciones.hoy ?? new Date();
+  const hoy = opciones.hoy ?? hoyComoDateUy();
   const warnings: string[] = [];
 
   const act = totalizar(actualComprobantes, soloAceptados);

@@ -22,6 +22,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { fetchCertificadoDgi } from "../biller/queries.js";
 import { CAE_DIAS_ADVERTENCIA, CAE_DIAS_CRITICO, generarAlertas, type Alerta } from "../services/alertas.js";
 import { filterEmitidos } from "../services/comprobanteFilters.js";
+import { hoyIsoUy } from "../services/fechaUy.js";
 import {
   PERIODOS_SOPORTADOS,
   aIso,
@@ -427,7 +428,9 @@ async function evaluarCertificadoDgi(
     };
   }
 
-  const dias = diasEntre(aIso(new Date()), vencimiento.fecha);
+  // `hoyIsoUy` y no `aIso(new Date())`: los umbrales del certificado son días
+  // enteros, y en UTC el conteo se corre uno después de las 21:00 de Montevideo.
+  const dias = diasEntre(hoyIsoUy(), vencimiento.fecha);
   resultado.dias_para_expirar = dias;
 
   const vencido = dias < 0;

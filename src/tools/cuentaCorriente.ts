@@ -27,6 +27,7 @@ import {
   type CuentaCorrienteResultado,
   type ReferenciaCobranza,
 } from "../services/cuentaCorriente.js";
+import { hoyComoDateUy } from "../services/fechaUy.js";
 import { aIso, consultarPorPeriodo } from "../services/periodo.js";
 import { BUCKETS } from "../services/vencimientos.js";
 import {
@@ -296,7 +297,9 @@ export async function correrCuentaCorriente(
   const client = ctx.getClient();
   const sucursal = a.sucursal ?? config.defaultSucursalId;
 
-  const hoy = new Date();
+  // Día uruguayo, no día del proceso: los tramos de mora ("0-30", "31-60") se
+  // cuentan desde hoy, y en UTC ese "hoy" se adelanta a las 21:00 de Montevideo.
+  const hoy = hoyComoDateUy();
   const hoyIso = aIso(hoy);
   const desde = aIso(new Date(hoy.getTime() - a.dias_atras * 86_400_000));
   const rango = { desde, hasta: hoyIso };

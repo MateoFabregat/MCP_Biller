@@ -516,7 +516,7 @@ function reglasObligatorias(body: Record<string, unknown>, ctx: z.RefinementCtx)
           path: ["fecha_emision"],
         });
       }
-      const limite = new Date();
+      const limite = new Date(); // fecha-uy:allow es un techo de DOS MESES a futuro; tres horas de desfasaje no mueven la validación
       limite.setUTCMonth(limite.getUTCMonth() + 2);
       if (d.getTime() > limite.getTime()) {
         ctx.addIssue({

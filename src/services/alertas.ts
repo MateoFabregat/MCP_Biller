@@ -35,6 +35,7 @@
 import { asRecord, toNumberOrNull, toStringOrNull } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
+import { hoyComoDateUy } from "./fechaUy.js";
 import { aIso } from "./periodo.js";
 import { clasificarEstado } from "./resumenFacturacion.js";
 import { diasEntre } from "./vencimientos.js";
@@ -232,7 +233,7 @@ export function analizarCae(
   comprobantes: ComprobanteEmitido[],
   opciones: { hoy?: Date } = {},
 ): CaeSerie[] {
-  const hoyIso = aIso(opciones.hoy ?? new Date());
+  const hoyIso = aIso(opciones.hoy ?? hoyComoDateUy());
   const series = new Map<string, CaeSerie>();
 
   for (const c of comprobantes) {
@@ -444,7 +445,7 @@ export function detectarRachaSinFacturar(
   comprobantes: ComprobanteEmitido[],
   opciones: RachaSinFacturarOptions = {},
 ): RachaSinFacturarResultado | null {
-  const hoyIso = aIso(opciones.hoy ?? new Date());
+  const hoyIso = aIso(opciones.hoy ?? hoyComoDateUy());
   const factor = opciones.factor ?? RACHA_FACTOR_ANOMALIA;
   const minimoDias = opciones.minimoDias ?? RACHA_MINIMO_DIAS;
 

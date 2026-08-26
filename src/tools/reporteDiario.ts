@@ -23,6 +23,7 @@ import { compararPeriodos } from "../services/comparacion.js";
 import { filterEmitidos } from "../services/comprobanteFilters.js";
 import { calcularCuentaCorriente } from "../services/cuentaCorriente.js";
 import { construirDigest } from "../services/digest.js";
+import { hoyComoDateUy } from "../services/fechaUy.js";
 import { consultarPorPeriodo, resolverPeriodo, aIso } from "../services/periodo.js";
 import { rankingClientes } from "../services/rankingClientes.js";
 import { resumirFacturacion } from "../services/resumenFacturacion.js";
@@ -140,7 +141,11 @@ export async function handleReporteDiario(args: unknown, ctx: ToolContext): Prom
   try {
     const config = ctx.getConfig();
     const client = ctx.getClient();
-    const hoy = new Date();
+    // El digest arma DOS cosas con este `hoy`: los rangos que calcula acá y el
+    // que le pasa a `resolverPeriodo`, que ya resolvía en hora uruguaya. Con
+    // `new Date()` crudo, después de las 21:00 de Montevideo las dos mitades del
+    // mismo mensaje quedaban en días distintos.
+    const hoy = hoyComoDateUy();
     const fecha = aIso(hoy);
     const warnings: string[] = [];
 

@@ -27,6 +27,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { compararPeriodos } from "../services/comparacion.js";
 import { filterEmitidos } from "../services/comprobanteFilters.js";
 import { calcularCuentaCorriente } from "../services/cuentaCorriente.js";
+import { hoyComoDateUy } from "../services/fechaUy.js";
 import {
   PERIODOS_SOPORTADOS,
   aIso,
@@ -126,7 +127,10 @@ export async function handlePlataEnRiesgo(args: unknown, ctx: ToolContext): Prom
   if (!parsed.success) return validationErrorResult(parsed.error, ctx);
   const a = parsed.data;
 
-  const hoy = new Date();
+  // `resolverPeriodo` ya convertía a día uruguayo por dentro, pero el mismo
+  // `hoy` se usa más abajo para restar días a mano: si viene en UTC, el rango
+  // del período y el de la deuda arrancan en días distintos.
+  const hoy = hoyComoDateUy();
   const rango = resolverPeriodo(a.periodo, hoy);
   if (rango === null) {
     return simpleErrorResult(

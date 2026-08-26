@@ -22,6 +22,7 @@ import { extractClienteNombre, extractClienteRut } from "../biller/normalize.js"
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
 import { SIN_RECEPTOR } from "./rankingClientes.js";
+import { hoyComoDateUy } from "./fechaUy.js";
 import { aIso } from "./periodo.js";
 import { estaAceptado } from "./resumenFacturacion.js";
 
@@ -177,7 +178,7 @@ export function analizarVencimientos(
   comprobantes: ComprobanteEmitido[],
   options: VencimientosOptions,
 ): VencimientosResultado {
-  const hoyIso = aIso(options.hoy ?? new Date());
+  const hoyIso = aIso(options.hoy ?? hoyComoDateUy());
   const incluirVencidas = options.incluir_vencidas ?? true;
   const soloAceptados = options.solo_aceptados ?? true;
   const soloACredito = options.solo_a_credito ?? true;

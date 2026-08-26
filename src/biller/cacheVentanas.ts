@@ -84,7 +84,7 @@ export interface CacheStats {
  * Cuánto vive una ventana según cuán vieja sea.
  * `hoy` se inyecta para poder testear sin depender del reloj.
  */
-export function ttlPara(hasta: string, hoy: Date = new Date()): number {
+export function ttlPara(hasta: string, hoy: Date = new Date()): number { // fecha-uy:allow mide una DURACIÓN contra un instante, no "qué día es": anclar al mediodía uruguayo metería un error de doce horas
   const finVentana = Date.parse(`${hasta}T23:59:59Z`);
   if (Number.isNaN(finVentana)) return TTL_RECIENTE_MS;
   const diasAtras = (hoy.getTime() - finVentana) / 86_400_000;
@@ -125,7 +125,7 @@ export class CacheVentanas {
     return [...entrada.datos];
   }
 
-  set(c: ClaveVentana, datos: ComprobanteEmitido[], hoy: Date = new Date()): void {
+  set(c: ClaveVentana, datos: ComprobanteEmitido[], hoy: Date = new Date()): void { // fecha-uy:allow solo se lo pasa a ttlPara, que mide duración; ver el allow de ahí
     if (!this.habilitada) return;
     // Desalojo simple: la entrada más vieja primero. Un LRU de verdad no cambia
     // nada acá — las ventanas se piden en ráfagas y el techo casi nunca se toca.

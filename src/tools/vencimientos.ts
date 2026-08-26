@@ -16,6 +16,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { filterEmitidos } from "../services/comprobanteFilters.js";
+import { hoyComoDateUy } from "../services/fechaUy.js";
 import { aIso, consultarPorPeriodo } from "../services/periodo.js";
 import { BUCKETS, analizarVencimientos } from "../services/vencimientos.js";
 import {
@@ -170,7 +171,10 @@ export async function handleVencimientos(args: unknown, ctx: ToolContext): Promi
     const client = ctx.getClient();
     const sucursal = a.sucursal ?? config.defaultSucursalId;
 
-    const hoy = new Date();
+    // El aging se mide contra el día URUGUAYO. Con `new Date()` crudo, un
+    // proceso en UTC pasa a "mañana" a las 21:00 de Montevideo y toda factura
+    // aparece un día más vencida de lo que está.
+    const hoy = hoyComoDateUy();
     const hoyIso = aIso(hoy);
     const desde = aIso(new Date(hoy.getTime() - a.dias_atras * 86_400_000));
     const rango = { desde, hasta: hoyIso };

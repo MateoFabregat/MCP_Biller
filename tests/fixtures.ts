@@ -25,6 +25,7 @@ export function makeConfig(overrides: Partial<BillerConfig> = {}): BillerConfig 
     // Sin Kapso, la barrera de entrada no exige remitente: el default de los
     // tests es el server de escritorio, no el canal de WhatsApp.
     remitentesAutorizados: [],
+    wireLiviano: false,
     ...overrides,
   };
   return {
