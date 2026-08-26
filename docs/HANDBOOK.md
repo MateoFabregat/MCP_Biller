@@ -73,11 +73,16 @@ llega:
 
 | Lo hace el modelo | Lo hace TypeScript |
 |---|---|
-| Entender *"che, y los que me deben?"* | Qué opciones existen ([`kapso/menu.ts`](../src/kapso/menu.ts)) |
+| Entender *"che, y los que me deben?"* | Qué opciones existen ([`kapso/intenciones.ts`](../src/kapso/intenciones.ts)) |
 | Elegir qué tool llamar | Qué tipo de CFE corresponde ([`kapso/emision.ts`](../src/kapso/emision.ts)) |
 | Redactar la respuesta | **Todos** los importes ([`CALCULOS.md`](CALCULOS.md)) |
-| Llevar el hilo de la conversación | Qué paso sigue, y a quién se le factura |
+| **Transportar** el texto del usuario, tal cual | Leer los números de ese texto ([`kapso/extraerPedido.ts`](../src/kapso/extraerPedido.ts)) |
+| Llevar el hilo de la conversación | Qué paso sigue, y qué se acuerda entre mensajes ([`kapso/borradorStore.ts`](../src/kapso/borradorStore.ts)) |
+| Preguntar cuando hay dudas | Cuándo hay dudas ([`services/resolver.ts`](../src/services/resolver.ts)) |
 | Copiar el texto libre del usuario | A qué número sale un mensaje (allowlist) |
+
+El renglón del medio es el más nuevo y el que más cuesta si se invierte: el
+modelo **transporta** el mensaje, no lo interpreta. `Number("6.500")` es 6,5.
 
 Si te encontrás escribiendo un prompt para que el modelo decida algo de la
 columna derecha, parate: esa decisión va en código, se testea, y no cambia de
@@ -194,6 +199,17 @@ campo `estado` sí cambia (Pendiente DGI → Aceptado DGI), y los totales se
 calculan solo sobre "Aceptado DGI". 120 s para lo reciente, 30 min para lo que
 ya se asentó. Ver [`biller/cacheVentanas.ts`](../src/biller/cacheVentanas.ts).
 
+⚠️ **La grilla de ventanas es GLOBAL, no por período.** Antes cada período
+generaba sus propias claves, así que `mes_actual`, `ultimos_30` y `ultimos_90`
+—que se superponen casi enteros— tenían **cero aciertos entre sí**: la segunda
+pregunta de una conversación volvía a pedir los mismos días. Con una grilla
+común comparten claves, y el hit/miss se cuenta **por empresa**.
+
+Todo eso entra por una sola puerta: [`services/ventana.ts`](../src/services/ventana.ts).
+Si estás escribiendo `consultarPorPeriodo` + filtro por emisión + warnings a
+mano, esa función ya lo hace, y hacerlo aparte es cómo se separan los números de
+dos tools que deberían coincidir.
+
 ⚠️ **La clave del cache incluye la credencial** (`BillerClient.cacheId`, un hash).
 Un cliente sin identidad **no se cachea**. Eso no es paranoia: con multi-empresa,
 una clave compartida le sirve a una empresa los comprobantes de otra, y los
@@ -209,10 +225,16 @@ números se ven perfectamente normales.
 2. Escribí la tool en `src/tools/`, con `inputShape` y `outputShape` de Zod.
 3. Registrala en [`tools/register.ts`](../src/tools/register.ts): el `register*`
    en `registerAllTools` **y** el nombre en `READ_TOOL_NAMES`.
-4. Preguntate: **¿alguna frase del usuario llega a esta tool?** Si no, agregala
-   como intención oculta en `OPCIONES_MENU` ([`kapso/menu.ts`](../src/kapso/menu.ts)).
-   Hubo tres tools registradas y andando a las que ninguna frase podía llegar.
-5. Actualizá el README (los conteos de `registry.test.ts` se derivan solos).
+4. Si necesita traer comprobantes de un período, usá
+   [`services/ventana.ts`](../src/services/ventana.ts) en vez de repetir el
+   preámbulo (período → sucursal → consulta → recorte → warnings). Ese preámbulo
+   estaba copiado en quince tools.
+5. Preguntate: **¿alguna frase del usuario llega a esta tool?** Si no, agregala
+   como intención oculta en `OPCIONES_MENU`
+   ([`kapso/intenciones.ts`](../src/kapso/intenciones.ts)). Hubo tres tools
+   registradas y andando a las que ninguna frase podía llegar.
+6. Actualizá el README (los conteos de `registry.test.ts` se derivan solos, y
+   `tests/conteosDoc.test.ts` vigila que ningún doc afirme un conteo falso).
 
 Las barreras ya te cubren: no hay que hacer nada para eso.
 
@@ -232,7 +254,13 @@ empresa cambiando un string.
 
 ### Tocar el enrutador de WhatsApp
 
-Tres invariantes que ya costaron bugs silenciosos:
+Primero: **el enrutador ya no es un archivo.** Una intención nueva se agrega en
+[`kapso/intenciones.ts`](../src/kapso/intenciones.ts) y **nada más**; el
+matching vive en `enrutador.ts`, los mensajes en `render.ts` y los prefijos de
+id en `protocolo.ts`. `menu.ts` es la fachada que re-exporta todo, así que
+seguís importando de ahí.
+
+Cinco invariantes que ya costaron bugs silenciosos:
 
 1. **Los prefijos propios (`menu:`, `emitir:`, `emision:`, `resolver:`) se
    resuelven ANTES que cualquier heurística.** Los botones que mandamos vuelven
@@ -241,11 +269,39 @@ Tres invariantes que ya costaron bugs silenciosos:
 2. **Un sinónimo de una sola palabra solo matchea como palabra completa**, y uno
    que se reduce a un solo token no puntúa por tokens. Sin la segunda, "me
    pagaron la factura 1234" matcheaba "mandar el PDF" al 100%.
-3. **Ningún mensaje puede quedar sin respuesta.** Hay un test que recorre
+3. **La inclusión ordena por longitud**, así que un sinónimo corto le roba
+   mensajes a una intención más específica. Cuando dos intenciones compiten, la
+   defensa es una frase **más larga que contenga a la otra** ("me equivoqué con
+   el recibo" vs. "me equivoqué"): así gana sin producir un empate.
+4. **El extractor de pedidos va ÚLTIMO.** Cualquier coincidencia del catálogo le
+   gana, y también la rama del flujo abierto. No compite con el enrutador: se
+   queda con lo que iba a caer en "no entendí".
+5. **Ningún mensaje puede quedar sin respuesta.** Hay un test que recorre
    mensajes arbitrarios y exige que siempre haya opción, menú o respuesta.
 
-Antes de escribir tests, corré el corpus. Mirá los `desconocido` tanto como los
-ruteos mal.
+Antes de escribir tests, corré el corpus (`npm run evals`). Mirá los
+`desconocido` tanto como los ruteos mal. Y si el cambio es un refactor que no
+debería cambiar ninguna decisión, comparalo por **diferencial** contra HEAD
+sobre el corpus entero: es lo que permitió partir `menu.ts` en cinco archivos
+sabiendo que no se movió un solo ruteo.
+
+### Tocar la emisión guiada
+
+Cuatro reglas que sostienen todo lo demás:
+
+1. **`siguientePaso` es pura.** Los dos datos del mundo que necesita —qué día es
+   hoy y el perfil de la casa— entran por parámetro. Si le agregás una lectura
+   del reloj o de la red, el test de los 64 estados parciales deja de significar
+   algo.
+2. **Los defaults se aplican en una COPIA, nunca en el borrador guardado.** En
+   lo persistido, `forma_pago: undefined` significa "no me dijeron nada" y `1`
+   significa "el usuario dijo contado". Si el default se escribiera ahí, los dos
+   casos quedarían indistinguibles y una corrección posterior tendría que
+   discutirle a un dato de su misma jerarquía.
+3. **Todo default sale escrito en el preview.** Un default que el usuario no ve
+   no es un default: es una suposición nuestra impresa en un documento fiscal.
+4. **La jerarquía es una sola y no se invierte:** lo que dijo el usuario > lo
+   leído de su texto > el perfil de la casa > el default duro.
 
 ### Tocar los números
 
@@ -274,6 +330,9 @@ Están acá para que no los repitas. Cada uno costó horas.
 | `Number("6.500")` | Es 6.5. En Uruguay son seis mil quinientos. El CFE queda bien formado y la factura dice seis pesos con cincuenta. | Los importes escritos por una persona los parsea [`services/importe.ts`](../src/services/importe.ts). Los que devuelve la API, `normalize.ts`. **Son dos convenciones opuestas y no se unifican.** |
 | Comparar nombres con distancia de edición sobre la cadena entera | "Distribuidora Peres" resolvía a "Distribuidora **Sur** SA": trece letras de prefijo compartido le ganaban al Pérez correcto. | En nombres de varias palabras, el typo se perdona token a token. |
 | Ordenar el menú por frecuencia de consulta | Facturar quedaba abajo. Es la única opción que tiene a alguien esperando del otro lado del mostrador. | El menú se ordena por **urgencia de la acción**, no por volumen. |
+| Pedirle al modelo que se acuerde de un booleano | `en_flujo` había que mandarlo en cada llamada. Olvidarlo hacía que "pará, eran 3 no 2" cayera en `desconocido` y el webhook contestara el menú entero: la carga a medio hacer, a la basura. | Si el dato ya existe del lado del server (había o no un borrador vivo), **se deriva**. Un parámetro que el modelo tiene que recordar es un parámetro que a veces no llega. |
+| Esconder la función más rápida del producto | "Lo de siempre" —dos mensajes hasta un CFE— estaba como intención oculta. Solo llegaba el que ya sabía la fórmula. | Una función que hay que adivinar no existe para el 90% de la gente. Lo oculto es para lo que se pregunta con palabras, no para lo que se usa todos los días. |
+| Dejar la lógica compartida adentro de una tool | `biller_recordatorio_cobro` importaba la corrida de cuenta corriente desde `tools/cuentaCorriente.ts`. El número que ve el dueño y el que se le manda al cliente dependían de que nadie tocara la primera. | Lo que calcula vive en `services/`. Ninguna tool importa a otra. |
 
 ---
 
@@ -323,10 +382,34 @@ Dicho en voz alta para que nadie lo prometa:
 ```
 src/
 ├── biller/          Cliente HTTP, schemas, normalizadores, cache de ventanas
+│   ├── traerVentanas.ts   ventanas de 7 días en paralelo acotado, con reintento
+│   ├── traerDetalles.ts   el detalle por id (el listado NO trae items), con cache
+│   └── cacheVentanas.ts   TTL doble: 120 s lo reciente, 30 min lo asentado
 ├── security/        Las dos barreras: entrada (quién) y salida (qué)
 ├── services/        Lógica pura: agregación, reglas, resolvedor, parser de plata
-├── tools/           Las 27 tools de lectura + write/ (7 de escritura)
-├── kapso/           WhatsApp: menú, enrutador, emisión guiada, cliente
+│   ├── ventana.ts             LA COSTURA DE LECTURA: período → sucursal →
+│   │                          consulta → recorte por emisión → warnings.
+│   │                          La usan 15 tools; antes cada una la copiaba.
+│   ├── calcularTotales.ts     los totales del CFE y el TEXTO del preview
+│   │                          (ítems, desglose de IVA, TOTAL, supuestos)
+│   ├── repetirUltima.ts       "lo de siempre" + derivarPerfilCasa
+│   ├── corridaCuentaCorriente.ts  orquestadora declarada: hace red a propósito
+│   ├── certificadoDgi.ts      el certificado viene PLANO, sin la envoltura
+│   ├── periodo.ts             ventaneo, periodoAnterior, "hoy" uruguayo vía fechaUy
+│   └── fechaUy.ts             la ÚNICA respuesta válida a "¿qué día es?" (§4.6)
+├── tools/           Las 27 tools de lectura + write/ (7 de escritura).
+│                    Ninguna importa a otra: lo compartido vive en services/.
+├── kapso/           WhatsApp. Nueve archivos, dependencias en una dirección:
+│   ├── menu.ts            fachada: re-exporta todo lo de abajo
+│   ├── intenciones.ts     DATOS: opciones, ids, tools, ~400 sinónimos, léxicos
+│   ├── enrutador.ts       MATCHING: normaliza, puntúa, decide el `via`
+│   ├── render.ts          los mensajes de WhatsApp (menú, listas, preview)
+│   ├── protocolo.ts       los prefijos de id propios; corren ANTES del matching
+│   ├── extraerPedido.ts   "2 bolsas a 6.500" → campos, leído por TypeScript
+│   ├── emision.ts         qué paso sigue, los submenús, aplicarDefaults
+│   ├── borradorStore.ts   el estado de la emisión, del lado del server
+│   ├── webhook.ts         entrada de Kapso: firma, allowlist, ruteo
+│   └── client.ts          los DOS únicos POST fuera de write/ (allowlist)
 ├── tenants/         Multi-empresa: registro, acceso, contextos
 ├── transport/       stdio, HTTP, serverless
 ├── write/           TODO lo que hace POST vive acá. Nada más.

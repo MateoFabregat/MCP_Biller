@@ -388,6 +388,16 @@ total es un piso, no el número final).
 **Verificado:** $12.000 + 22% = **$14.640**, y el CFE emitido volvió con
 `total: 14640.00`.
 
+**El TEXTO del preview lo arma el mismo módulo que calcula el total**, y no el
+modelo: las líneas con su cantidad, el desglose de IVA por tasa, el TOTAL y una
+línea de supuestos (fecha · forma de pago · criterio de IVA). Esa línea se
+construye desde el **mismo payload que se hashea** en el `confirmation_token`,
+así que no hay forma de que el mensaje diga "contado" y se emita a crédito. Es
+la contrapartida de que el flujo de emisión dejó de preguntar la fecha, la
+moneda, la forma de pago y la cantidad: un default que el usuario no ve no es un
+default, es una suposición nuestra impresa en un documento fiscal. El mensaje
+exacto está en [`FLUJO_WHATSAPP.md`](FLUJO_WHATSAPP.md) §3.0.3.
+
 ### 11.2. La regla de las 5.000 UI 🟡
 
 ```
@@ -457,7 +467,19 @@ y no como certeza.
 | Sumar, convertir con la tasa del comprobante, calcular ratios | ⚙️ código |
 | Redactar "facturaste $106.340 en 5 comprobantes" | 🤖 modelo |
 
+Y en el sentido de entrada, la misma frontera:
+
+| Etapa | Quién |
+|---|---|
+| Entender que "facturale a Pérez 2 bolsas a 6.500" es un pedido de emisión | 🤖 modelo |
+| **Leer** el 6.500 de ese texto (`Number("6.500")` es 6,5) | ⚙️ código |
+| Elegir a qué cliente corresponde "Pérez", o preguntar si hay dos | ⚙️ código |
+| Decidir qué tipo de CFE, qué falta preguntar y qué se defaultea | ⚙️ código |
+| Escribir el preview que el usuario aprueba | ⚙️ código |
+
 La frontera es nítida: **el modelo nunca produce una cifra, solo la transporta.**
+Y desde agosto de 2026 tampoco la *lee*: el texto libre del usuario lo vuelve a
+parsear el server con las reglas escritas de `importe.ts`.
 
 Y una barrera que va en el otro sentido: el texto libre de un comprobante
 —`adenda`, `concepto`, razón social— lo escribe un tercero. Todo eso sale envuelto

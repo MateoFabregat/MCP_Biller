@@ -21,6 +21,7 @@ flowchart TB
     subgraph transporte["Transporte"]
         STDIO["stdio<br/><i>default</i>"]
         HTTP["HTTP + Bearer propio<br/><i>BILLER_HTTP_AUTH_TOKEN</i>"]
+        WH["/kapso/webhook<br/><i>firma HMAC · sin secreto, 404</i>"]
     end
 
     subgraph server["Servidor MCP"]
@@ -29,9 +30,21 @@ flowchart TB
         PROMPTS["4 prompts<br/><i>rutinas guiadas</i>"]
     end
 
+    subgraph conversacion["kapso/ — la capa conversacional"]
+        MENU["menu.ts<br/><i>fachada</i>"]
+        INTENC["intenciones.ts<br/><i>catálogo: qué se pide</i>"]
+        ENRUT["enrutador.ts<br/><i>matching: qué quiso decir</i>"]
+        RENDER["render.ts<br/><i>mensajes de WhatsApp</i>"]
+        PROTO["protocolo.ts<br/><i>prefijos de id</i>"]
+        EXTRAE["extraerPedido.ts<br/><i>la plata la lee TS</i>"]
+        EMIS["emision.ts<br/><i>qué paso sigue</i>"]
+        BORR["borradorStore.ts<br/><i>el estado, del lado del server</i>"]
+    end
+
     subgraph logica["Lógica de negocio (pura, testeable sin red)"]
         SERV["services/<br/><i>agregación y reglas</i>"]
-        SCHEMA["biller/<br/><i>schemas, normalizadores</i>"]
+        VENT["services/ventana.ts<br/><i>la costura de lectura</i>"]
+        SCHEMA["biller/<br/><i>schemas, normalizadores, cache</i>"]
     end
 
     subgraph salida["Salidas"]
@@ -42,33 +55,56 @@ flowchart TB
 
     CD --> STDIO
     WA --> HTTP
+    WA --> WH
     STDIO --> HARDEN
     HTTP --> HARDEN
+    WH -- "interpreta y delega,<br/>NO ejecuta" --> ENRUT
+    WH --> BORR
     HARDEN --> TOOLS
     TOOLS --> PROMPTS
-    TOOLS --> SERV
+    TOOLS --> MENU
+    MENU --> INTENC
+    MENU --> ENRUT
+    MENU --> RENDER
+    ENRUT --> PROTO
+    ENRUT --> EXTRAE
+    TOOLS --> EMIS
+    TOOLS --> BORR
+    TOOLS --> VENT
+    VENT --> SERV
     SERV --> SCHEMA
     SCHEMA --> GET
     TOOLS -- "gate de escritura" --> POST
-    TOOLS --> KAPSO
+    RENDER --> KAPSO
 
     style HARDEN fill:#fde68a,stroke:#b45309,color:#000
     style POST fill:#fecaca,stroke:#b91c1c,color:#000
     style KAPSO fill:#fecaca,stroke:#b91c1c,color:#000
 ```
 
-**Las tres cosas que importan de este dibujo:**
+**Las cuatro cosas que importan de este dibujo:**
 
 1. **Toda salida pasa por `hardenServer()`.** No es una convención, es
    estructural: intercepta `server.registerTool`, así que cualquier tool —presente
    o futura— pasa su resultado por el sanitizador sin que nadie tenga que
    acordarse.
 2. **La lógica de negocio no toca la red.** `services/` recibe comprobantes ya
-   normalizados y devuelve números. Por eso los 1054 tests corren en segundos
-   sin un solo mock de HTTP en la capa de cálculo.
+   normalizados y devuelve números. Por eso los tests corren en segundos sin un
+   solo mock de HTTP en la capa de cálculo.
 3. **Hay dos salidas peligrosas y tienen barreras opuestas.** El POST a Biller
    necesita autenticar la *intención* (dry-run → token → confirm). El POST a Kapso
    necesita restringir el *destino* (allowlist). Ver §5.
+4. **`kapso/` tiene una sola dirección de dependencias, y `menu.ts` es la
+   fachada.** El enrutador no importa el render; el render no importa el
+   enrutador; los dos dependen del catálogo, y el catálogo no depende de nadie.
+   `menu.ts` re-exporta todo, así que partir el módulo en cinco no cambió ni un
+   importador. Ver §2.1.
+
+**Y una que se ve mejor en el dibujo que en una lista:** el webhook y las tools
+**convergen en el mismo `borradorStore`**. Por eso `en_flujo` —"¿hay una emisión
+a medio cargar en esta conversación?"— dejó de ser un booleano que el modelo
+tenía que recordar y pasó a ser algo que el server *sabe*: lo lee del store, por
+los dos caminos, con la misma clave. Ver [`KAPSO.md`](KAPSO.md) §1.0.
 
 ---
 
@@ -77,38 +113,111 @@ flowchart TB
 ```mermaid
 flowchart LR
     A["tools/<br/><small>schema de entrada,<br/>forma de la respuesta</small>"]
+    K["kapso/<br/><small>catálogo, ruteo,<br/>mensajes, borrador</small>"]
     B["services/<br/><small>agregación, reglas,<br/>umbrales</small>"]
     C["biller/<br/><small>normalización,<br/>schemas de la API</small>"]
     D["write/<br/><small>gate, idempotencia,<br/>auditoría</small>"]
 
+    A --> K
     A --> B --> C
     A -- "solo las 7 de escritura" --> D --> C
 
     style D fill:#fecaca,stroke:#b91c1c,color:#000
 ```
 
-| Capa | Puede | **No puede** | Verificado por |
-|---|---|---|---|
-| `tools/` | Definir entrada/salida, orquestar | Calcular reglas de negocio | revisión |
-| `services/` | Agregar, aplicar umbrales | Llamar a la red (salvo las que orquestan por diseño) | tests sin mocks |
-| `biller/` | Hablar con la API por **GET** | Hacer POST | `npm run check:readonly` |
-| `write/` | Hacer POST con gate | Ser importada desde `services/` | revisión + guard |
+| Capa | Puede | **No puede** | Por qué la regla | Verificado por |
+|---|---|---|---|---|
+| `tools/` | Definir entrada/salida, orquestar | Calcular reglas de negocio · **importar otra tool** | una tool importando a otra deja la regla viviendo en la que llamó primero: el número que ve el dueño y el que se le manda al cliente tienen que salir del mismo lugar | revisión (hoy solo `register.ts` importa tools) |
+| `kapso/` | Decidir qué se pide y cómo se dibuja | Calcular importes · consultar Biller | el catálogo y el ruteo tienen que ser testeables con 3.000 frases de corrido, y eso solo se puede si son puros | tests sin mocks |
+| `services/` | Agregar, aplicar umbrales | Llamar a la red (salvo las que **orquestan por diseño**, declarado en su encabezado) | un cálculo que hace red no se puede testear con fixtures, y es donde vive todo número que termina en una respuesta | tests sin mocks |
+| `biller/` | Hablar con la API por **GET** | Hacer POST | la superficie de lectura no puede escribir aunque alguien se equivoque | `npm run check:readonly` |
+| `write/` | Hacer POST con gate | Ser importada desde `services/` | si un cálculo pudiera llamar al gate, el gate dejaría de ser el único camino | revisión + guard |
 
 **`check:readonly` es un guard estático** que recorre `src/` buscando cualquier
 POST/PUT/PATCH/DELETE fuera de `write/` y `kapso/`. Acepta excepciones por línea
 con `// check-readonly:allow <motivo>`, y hay un test que exige que el motivo esté
 escrito.
 
-Hoy hay 11 excepciones declaradas, pero solo **dos son de método HTTP**: los dos
-POST a Kapso en `src/kapso/client.ts` (mandar el mensaje y subir el media), cuya
-barrera no es el gate fiscal sino la allowlist de destinatarios. Las otras nueve
-son `Map.delete` sobre estructuras en memoria —cache de ventanas, borradores,
-sesiones HTTP— que el guard marca solo porque busca la palabra `delete`. La lista
-completa, con su motivo, la imprime `node scripts/check-readonly.mjs`.
+Desde agosto de 2026 el script **exporta `analizarSrc()`** y el test la importa,
+en vez de duplicar el recorrido, los patrones y el marcador. No es prolijidad:
+al unificar las dos copias aparecieron **tres divergencias reales** entre ellas,
+resueltas hacia el lado estricto. Un guard con dos implementaciones es un guard
+que pasa en CI y falla en el commit.
+
+Las excepciones de **método HTTP** están además pineadas a los dos POST de
+`src/kapso/client.ts` (mandar el mensaje y subir el media), cuya barrera no es
+el gate fiscal sino la allowlist de destinatarios: **una tercera pone el CI en
+rojo** y exige una decisión explícita en vez de aparecer sola. Las demás
+excepciones declaradas son `Map.delete` sobre estructuras en memoria —cache de
+ventanas, borradores, sesiones HTTP— que el guard marca solo porque busca la
+palabra `delete`. La lista completa, con su motivo, la imprime
+`node scripts/check-readonly.mjs`.
 
 Por eso `services/dedupe.ts` —que consulta si un `numero_interno` ya existe antes
 de emitir— vive en `services/` y no en `tools/write/`: hace GET, y queriéndolo
 dentro del alcance del guard, si algún día alguien mete un POST ahí, salta.
+
+### 2.1. `kapso/`: nueve archivos y una fachada
+
+`menu.ts` tenía 1.555 líneas y cuatro responsabilidades. Hoy son cinco archivos
+—más los cuatro del flujo de emisión— y `menu.ts` quedó como **fachada que
+re-exporta todo**: cero importadores cambiados.
+
+| Archivo | Qué es | Por qué está separado |
+|---|---|---|
+| `intenciones.ts` | **Datos**: las opciones, sus ids, sus tools, ~400 sinónimos, los léxicos | agregar una intención toca este archivo y **nada más**; y al revés, un cambio en el matching no puede cambiar sin querer qué opciones existen |
+| `enrutador.ts` | **Matching**: normaliza, puntúa, tolera typos, decide el `via` | es lo único que *adivina*, y lo que hay que poder correr contra un corpus entero sin red |
+| `render.ts` | **Los mensajes de WhatsApp**: menú, listas, botones, preview | el cuerpo del preview se arma con números ya calculados, y eso solo se sostiene si el lugar donde se escribe el texto no tiene lógica de negocio adentro |
+| `protocolo.ts` | **Los prefijos de id** que mandamos nosotros y vuelven tal cual | acá **no hay nada que adivinar**: un id o es nuestro o no lo es. Por eso sus lectores corren *antes* que cualquier heurística del enrutador |
+| `menu.ts` | La fachada | mantener un punto de importación estable valió más que renombrar 30 imports |
+| `extraerPedido.ts` | Lee "facturale a Pérez 2 bolsas a 6.500" con una gramática | `Number("6.500")` es 6,5: **la plata la lee TypeScript**, no el modelo |
+| `emision.ts` | La máquina de pasos: qué preguntar ahora, y los submenús | es una decisión **fiscal** (qué CFE, qué IVA); un modelo que improvisa produce un comprobante que hay que anular |
+| `borradorStore.ts` | El estado de la emisión, del lado del server | el flujo más caro del producto no puede apoyarse en el contexto de un modelo |
+| `webhook.ts` | La entrada de Kapso: firma HMAC, allowlist, decisión de ruteo | **no ejecuta nada que toque plata**: interpreta y delega |
+
+Las dependencias van en **una sola dirección** y sin ciclos: `enrutador` y
+`render` dependen de `intenciones` y de `protocolo`, nunca al revés. De paso, el
+índice de sinónimos se precomputa al cargar el módulo en vez de re-normalizar
+~400 frases por mensaje: **3,8× más rápido**, con la conducta verificada por
+diferencial (22.435 comparaciones sobre 3.202 frases, cero diferencias).
+
+### 2.2. `services/ventana.ts`: una sola costura para traer comprobantes
+
+Quince tools repetían el mismo preámbulo: resolver el período → resolver la
+sucursal → consultar → recortar por fecha de emisión → juntar los warnings del
+recorte. Cinco pasos, copiados quince veces, y cada copia una chance de que un
+arreglo llegue a catorce lugares.
+
+`traerVentana(ctx, { rango, sucursal })` los absorbió: **−377 líneas netas** y el
+comportamiento en un solo lugar. Dos consecuencias que no eran obvias:
+
+- **La grilla de ventanas pasó a ser global.** Antes cada período generaba sus
+  propias claves de cache, así que `mes_actual`, `ultimos_30` y `ultimos_90`
+  —que se superponen casi enteros— tenían **cero aciertos entre sí**. Con una
+  grilla común, la segunda pregunta de una conversación reusa lo que trajo la
+  primera.
+- **El hit/miss de cache se cuenta por empresa**, que es la única forma de saber
+  si el cache sirve sin mirar el log de una sola.
+
+`biller/traerDetalles.ts` hace lo mismo con el otro patrón repetido: el listado
+no trae `items`, así que hay que pedir el detalle por id. Ahora eso va en
+paralelo acotado, con reintento y con cache compartido, en vez de una vez por
+tool.
+
+### 2.3. Lo que calcula vive en `services/` — tres mudanzas
+
+Tres cálculos vivían adentro de una tool y **otra tool los importaba desde
+ahí**. Eso funciona hasta que alguien cambia la primera y no se entera de que
+tenía un segundo consumidor:
+
+| Se mudó | De | A | Por qué importaba |
+|---|---|---|---|
+| `extraerVencimientoCertificado` | `tools/alertas.ts` | `services/certificadoDgi.ts` | el certificado DGI viene **plano**, sin la envoltura documentada, y esa lectura la necesita más de una tool |
+| `periodoAnterior` | `tools/compararPeriodos.ts` | `services/periodo.ts` | "el mes pasado" tiene que significar lo mismo en todas las respuestas |
+| `correrCuentaCorriente` | `tools/cuentaCorriente.ts` | `services/corridaCuentaCorriente.ts` | **el número que ve el dueño y el que se le manda al cliente tienen que ser el mismo**: `biller_recordatorio_cobro` importaba el saldo desde la tool de consulta |
+
+La tercera es una **orquestadora declarada**: hace red, y su encabezado lo dice.
+Es la excepción prevista en la tabla de §2, no un agujero.
 
 ---
 
@@ -168,7 +277,7 @@ Las **27 tools de lectura** se registran siempre (la lista viva es
 | `biller_metricas` | los indicadores del negocio en un solo lugar |
 | `biller_compras_proveedores` | ¿a quién le compro? |
 | `biller_reporte_diario` | el digest, listo para WhatsApp |
-| `biller_emision_guiada` | ¿cuál es la próxima pregunta para poder emitir? |
+| `biller_emision_guiada` | ¿cuál es la próxima pregunta para poder emitir? (y con `sesion`, guarda el borrador) |
 | `biller_resolver_nombre` | "Pérez" ¿cuál de todos? |
 | `biller_menu_whatsapp` · `biller_enviar_comprobante_whatsapp` · `biller_recordatorio_cobro` | el canal de WhatsApp (leen por GET; su barrera es la allowlist de destinatarios) |
 | `biller_listar_comprobantes_emitidos` · `_recibidos` · `biller_obtener_comprobante` · `biller_obtener_pdf` · `biller_buscar_cliente_por_rut` | acceso directo |
@@ -191,28 +300,34 @@ sequenceDiagram
     participant M as MCP
     participant B as Biller / DGI
 
-    U->>K: "hacele una factura a Carbonell por 12.000"
-    K->>M: biller_requisitos_comprobante(111)
-    M-->>K: falta cliente, items… siguiente_pregunta
-    K->>U: "¿RUT, dirección y ciudad del cliente?"
-    U->>K: los datos
-    K->>M: biller_requisitos_comprobante(111, datos_conocidos)
+    U->>K: "facturale a Carbonell 2 bolsas de portland a 6.500"
+    K->>M: biller_resolver_nombre("Carbonell", tipo:"cliente")
+    M-->>K: único → su RUT
+    K->>M: biller_emision_guiada(mensaje:<texto crudo>, sesion:<teléfono>)
+    Note over M: extraerPedido lee los campos.<br/>derivarPerfilCasa mira las últimas 5 facturas.<br/>El borrador queda guardado en el server.
+    M-->>K: listo_para_requisitos · comprobante_borrador
+    K->>M: biller_requisitos_comprobante(borrador)
     M-->>K: listo_para_emitir: true
 
     rect rgb(255, 247, 237)
     Note over K,B: Gate de escritura — el humano lee en el medio
-    K->>M: biller_emitir_comprobante (dry-run)
-    M-->>K: total $14.640 · advertencias · confirmation_token
-    K->>U: "Son $14.640 con IVA. ¿Confirmo?"
-    U->>K: "dale"
+    K->>M: biller_emitir_comprobante (dry-run, sesion)
+    M-->>K: preview con ítems, IVA, TOTAL y supuestos · confirmation_token
+    M->>U: 🔘 [✅ Emitir] [➕ Otro ítem] [✖️ Cancelar]
+    U->>K: toca ✅ → "emitir:si:<token>"
     K->>M: emitir(confirm, token)
     M->>B: POST /v3/comprobantes/emitir
     B-->>M: 201 · id 388294 · MF-559251
     end
 
-    M-->>K: emitido
-    K->>U: "Listo: MF-559251 por $14.640"
+    M-->>K: emitido · el borrador de esa sesión se descarta
+    K->>U: "Listo: MF-559251 por $13.000"
 ```
+
+**Dónde está el modelo en ese dibujo, exactamente:** elige la tool, transporta
+el texto que escribió el usuario, y redacta la frase final. No lee el número, no
+arma el preview, no decide el tipo de CFE y no elige el cliente. El detalle
+mensaje por mensaje está en [`FLUJO_WHATSAPP.md`](FLUJO_WHATSAPP.md) §3.
 
 **Por qué el dry-run no es opcional.** El preview calcula el total **antes** de
 tocar la red y devuelve las advertencias que la API no daría hasta después del

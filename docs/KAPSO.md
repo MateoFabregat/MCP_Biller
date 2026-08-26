@@ -29,6 +29,65 @@ Eso significa que **todas las tools que ya existen funcionan por WhatsApp sin
 escribir una línea de lógica nueva**: el mismo código que contesta en Claude
 Desktop contesta en el celular del dueño de la PyME.
 
+### 1.0. La conversación tiene estado, y lo guarda el server
+
+Hay **dos caminos de entrada** y los dos convergen en el mismo store:
+
+```mermaid
+flowchart TB
+    WA["Mensaje de WhatsApp"]
+    AN["Agent Node<br/><i>flow_agent_mcp_servers</i>"]
+    WH["POST /kapso/webhook<br/><i>firma HMAC + allowlist</i>"]
+    TOOL["biller_menu_whatsapp<br/><i>sesion = teléfono</i>"]
+    STORE[("borradorStore<br/><i>clave = hash del teléfono</i>")]
+    ROUTE["interpretarMensaje(texto, { en_flujo })"]
+
+    WA --> AN --> TOOL --> STORE
+    WA --> WH --> STORE
+    STORE -- "¿hay borrador vivo?" --> ROUTE
+    TOOL --> ROUTE
+    WH --> ROUTE
+
+    style STORE fill:#fde68a,stroke:#b45309,color:#000
+```
+
+**`sesion` es el parámetro que hace que el flujo no dependa del contexto del
+modelo.** Se pasa en cada llamada a `biller_menu_whatsapp` y a
+`biller_emision_guiada`, con el número del remitente:
+
+| Con `sesion` | Sin `sesion` |
+|---|---|
+| El borrador de la emisión se **guarda y se fusiona**: la próxima llamada manda solo el dato nuevo | Vale el contrato viejo: "mandá TODO lo que sabés en cada llamada" |
+| El server **deduce `en_flujo`** mirando si hay un borrador vivo | El agente tiene que acordarse de mandar `en_flujo`, y olvidarlo pierde la carga |
+| Los conceptos de los ítems los completa el server al emitir | El agente tiene que copiarlos del historial de la conversación |
+| El borrador se **descarta al emitir** (pasando `sesion` a `biller_emitir_comprobante`) | El borrador viejo sigue vivo 24 h y le mete su cliente a la próxima factura |
+
+**El número no se guarda: se guarda un hash** (`claveSesion`). La sesión natural
+es la conversación de WhatsApp, o sea el número — pero el número es un dato
+personal de un tercero, y terminaría en un archivo en disco y en cada log de
+error que mencione la clave. El hash es igual de estable entre mensajes, que es
+lo único que se necesita.
+
+**`en_flujo` derivado, y por qué dejó de ser un parámetro del agente.** Era un
+booleano que el modelo tenía que recordar, y el modo de falla era silencioso:
+en medio de una emisión, *"pará, eran 3 no 2"* con `en_flujo` olvidado cae en
+`desconocido`, el webhook **autorresponde** el menú, y la carga a medio hacer se
+pierde. Hoy lo leen del store tanto la tool como el webhook, y viene marcado en
+la respuesta como `en_flujo_derivado: true`. El booleano explícito quedó como
+override para el llamador que sepa algo que el store no.
+
+**Que el webhook lea el store no viola su propia regla** (§2 de su encabezado:
+"no ejecuta nada que toque plata"). Lo que no puede hacer es ejecutar algo que
+mueva plata o que necesite un dato de Biller; mirar un borrador que este mismo
+server guardó no es ni una cosa ni la otra.
+
+⚠️ El store es **memoria por default**. El archivo
+(`BILLER_BORRADOR_STORE_PATH`) es opt-in porque su contenido es información
+comercial —qué se vendió, a quién, la adenda— y eso en disco es una decisión, no
+una optimización. Los borradores vencen a las **24 h**: es la ventana de
+servicio de WhatsApp, y una conversación más vieja que eso no se está
+continuando, se está empezando de nuevo.
+
 ### 1.1. El bloqueante y cómo se resolvió
 
 Kapso rechaza URLs que resuelven a **localhost** (protección SSRF), y el server
@@ -124,6 +183,13 @@ Tres consecuencias reales:
    filesystem es de solo lectura. El audit igual sale por stderr y Vercel lo
    captura en sus logs.
 
+4. **El store de borradores en memoria no sirve** (§1.0). Un contexto nuevo por
+   request significa que cada mensaje del usuario arrancaría de cero: `sesion`
+   no recuperaría nada y el flujo de emisión volvería al contrato viejo, justo
+   donde más se nota. El archivo tampoco alcanza —`/tmp` no se comparte entre
+   instancias—. **Para el flujo de emisión por WhatsApp, el transporte que
+   corresponde hoy es el HTTP largo.**
+
 `/api/healthz` responde sin autenticación y devuelve solo booleanos de
 configuración — nunca valores.
 
@@ -141,14 +207,25 @@ curl -s -X POST http://127.0.0.1:8848/mcp -H "authorization: Bearer $BILLER_HTTP
 
 ## 2. Outbound — que el sistema avise solo
 
-Cuatro salidas, todas con la misma barrera (allowlist de destinatarios):
+**Siete tools** mandan mensajes, todas con la misma barrera (allowlist de
+destinatarios):
 
 | Qué manda | Tool | Tipo de mensaje |
 |---|---|---|
 | El digest operativo | `biller_reporte_diario` (`enviar=true`) | texto |
 | El menú de opciones | `biller_menu_whatsapp` (`enviar=true`) | interactivo (lista) |
-| El preview de una emisión | `biller_emitir_comprobante` (`confirmar_por_whatsapp`) | interactivo (botones) |
+| Los botones de desambiguación de un empate | `biller_menu_whatsapp` (`enviar=true`, `via="ambiguo"`) | interactivo (botones) |
+| La pregunta del paso actual de la emisión | `biller_emision_guiada` (`enviar=true`) | interactivo (botones o lista de clientes) |
+| "¿Cuál de estos clientes?" | `biller_resolver_nombre` (`enviar=true`, resultado ambiguo) | interactivo (botones) |
+| El preview de una emisión | `biller_emitir_comprobante` (`confirmar_por_whatsapp`) | interactivo (3 botones) |
 | El PDF de un CFE | `biller_enviar_comprobante_whatsapp` | documento adjunto |
+| El reclamo de una deuda | `biller_recordatorio_cobro` | texto, con ciclo dry-run → token → confirm **y** allowlist |
+
+**Todos estos mensajes los arma el server, no el modelo.** Es la misma razón en
+los siete casos: el cuerpo lleva importes, y un mensaje redactado por el modelo
+podría decir un número distinto del que se calculó sin que nadie lo note. El
+agente pide que se manden; no los escribe. Ver
+[`FLUJO_WHATSAPP.md`](FLUJO_WHATSAPP.md) §3.0.3.
 
 `biller_reporte_diario` arma el digest (urgente → cobranzas → facturación) y
 puede enviarlo por WhatsApp.
@@ -192,6 +269,9 @@ digest que llega todos los días sin novedad se deja de leer a la segunda semana
 | Transporte HTTP: initialize → sesión → `tools/list` → `tools/call` | ✅ verificado contra el server real |
 | Rechazo sin token / con token inválido / sin token configurado | ✅ 401 / 401 / 403 |
 | `/healthz` sin auth y sin datos del negocio | ✅ |
+| Webhook: firma HMAC en tiempo constante, allowlist antes de interpretar, 200 siempre | ✅ `tests/kapso.test.ts` |
+| `en_flujo` derivado del borrador vivo, en la tool **y** en el webhook | ✅ `tests/revisionMostrador.test.ts` |
+| El borrador se fusiona, se recupera lo que no vino y se descarta al emitir | ✅ `tests/emisionGuiada.test.ts` |
 | Allowlist de destinatarios (incluye "no genera tráfico de red") | ✅ `tests/kapso.test.ts` |
 | Armado del digest y su límite de tamaño | ✅ |
 | Interactivos, subida de media y documento adjunto | ✅ `tests/kapso.test.ts` y `tests/whatsappFlujo.test.ts` — ver [`FLUJO_WHATSAPP.md`](FLUJO_WHATSAPP.md) §7 |

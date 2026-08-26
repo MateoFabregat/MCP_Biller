@@ -45,7 +45,7 @@ flowchart TB
     end
 
     subgraph decision["DECISIÓN (todo TypeScript, cero modelo) — src/services/ · src/kapso/"]
-        MENU["kapso/menu.ts<br/><i>enrutador: 30+ intenciones,<br/>sinónimos, en_flujo, Levenshtein</i>"]
+        MENU["kapso/enrutador.ts<br/><i>26 intenciones (10 visibles + 16 ocultas),<br/>sinónimos, en_flujo, Levenshtein, extractor</i>"]
         EMI["kapso/emision.ts<br/><i>siguientePaso(): puro,<br/>no se puede trancar</i>"]
         STORE["kapso/borradorStore.ts<br/><i>el borrador vive en el SERVER,<br/>clave = hash de la sesión, TTL 24h</i>"]
         CALC["services/*<br/><i>cada número del producto:<br/>totales, aging, FIFO, HHI, cohortes,<br/>run-rate por día de semana, fechaUy</i>"]
