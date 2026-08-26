@@ -18,8 +18,11 @@ export type BillerEnvironment = "test" | "production";
 
 /**
  * Modo operativo central del servidor MCP.
- * - `read_only`    : solo se registran las 6 tools de lectura (default seguro).
- * - `write_enabled`: se registran también las 6 tools de escritura (con barreras).
+ * - `read_only`    : solo se registran las tools de `READ_TOOL_NAMES` (default seguro).
+ * - `write_enabled`: se registran además las de `WRITE_TOOL_NAMES` (con barreras).
+ *
+ * Los conteos no se escriben acá a propósito: las listas son la única fuente
+ * de verdad y un número copiado envejece sin que nada falle.
  *
  * Controlado por la variable de entorno `BILLER_CAPABILITY_MODE`.
  * Default: `read_only`.

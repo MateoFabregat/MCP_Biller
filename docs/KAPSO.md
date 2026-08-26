@@ -192,9 +192,9 @@ digest que llega todos los días sin novedad se deja de leer a la segunda semana
 | Transporte HTTP: initialize → sesión → `tools/list` → `tools/call` | ✅ verificado contra el server real |
 | Rechazo sin token / con token inválido / sin token configurado | ✅ 401 / 401 / 403 |
 | `/healthz` sin auth y sin datos del negocio | ✅ |
-| Allowlist de destinatarios (incluye "no genera tráfico de red") | ✅ 19 tests |
+| Allowlist de destinatarios (incluye "no genera tráfico de red") | ✅ `tests/kapso.test.ts` |
 | Armado del digest y su límite de tamaño | ✅ |
-| Interactivos, subida de media y documento adjunto | ✅ 42 tests — ver [`FLUJO_WHATSAPP.md`](FLUJO_WHATSAPP.md) §7 |
+| Interactivos, subida de media y documento adjunto | ✅ `tests/kapso.test.ts` y `tests/whatsappFlujo.test.ts` — ver [`FLUJO_WHATSAPP.md`](FLUJO_WHATSAPP.md) §7 |
 | Cliente de Kapso contra la API **real** | ✅ texto, lista interactiva, botones y documento (sandbox, 28/07) |
 | Agent Node de Kapso conectado a este MCP | ❌ **no probado** — ver §5 |
 

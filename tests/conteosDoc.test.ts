@@ -30,8 +30,28 @@ const leer = (p: string): string => readFileSync(join(RAIZ, p), "utf8");
 const LECTURA = READ_TOOL_NAMES.length;
 const ESCRITURA = WRITE_TOOL_NAMES.length;
 
+/**
+ * Los archivos barridos.
+ *
+ * `docs/ARQUITECTURA.md` y `docs/EQUIPO.md` entraron después: una segunda
+ * revisión los encontró diciendo "19 tools de lectura" cuando ya eran 27 —el
+ * mismo error que este test había venido a impedir, en documentos que nadie
+ * había puesto bajo la red—. El criterio ahora es: si un documento afirma el
+ * conteo, se vigila.
+ *
+ * OJO al agregar uno: el barrido es sobre el TEXTO CRUDO del archivo, así que
+ * también entra a los bloques ```mermaid. Un nodo del diagrama que diga
+ * "27 tools de lectura" queda vigilado igual que un párrafo.
+ */
+const DOCS_CON_CONTEOS = [
+  "README.md",
+  "docs/HANDBOOK.md",
+  "docs/ARQUITECTURA.md",
+  "docs/EQUIPO.md",
+] as const;
+
 describe("los documentos no afirman conteos falsos", () => {
-  it.each(["README.md", "docs/HANDBOOK.md", "src/tools/register.ts"])(
+  it.each([...DOCS_CON_CONTEOS, "src/tools/register.ts"])(
     "%s no menciona un conteo de tools de lectura distinto del real",
     (archivo) => {
       const texto = leer(archivo);
@@ -43,7 +63,7 @@ describe("los documentos no afirman conteos falsos", () => {
     },
   );
 
-  it.each(["README.md", "docs/HANDBOOK.md"])(
+  it.each(DOCS_CON_CONTEOS)(
     "%s no menciona un conteo de tools de escritura distinto del real",
     (archivo) => {
       const encontrados = [...leer(archivo).matchAll(/(\d+)\s+tools?\s+de\s+escritura/gi)].map((m) =>
@@ -52,6 +72,15 @@ describe("los documentos no afirman conteos falsos", () => {
       for (const n of encontrados) expect(n).toBe(ESCRITURA);
     },
   );
+
+  // El conteo total (34, o 35 con la opt-in) es el que más se copia a mano.
+  it.each(DOCS_CON_CONTEOS)("%s no afirma un total de tools registradas falso", (archivo) => {
+    const total = LECTURA + ESCRITURA;
+    const encontrados = [...leer(archivo).matchAll(/(\d+)\s+tools?\s+registradas/gi)].map((m) =>
+      Number(m[1]),
+    );
+    for (const n of encontrados) expect([total, total + 1]).toContain(n);
+  });
 
   it("READ_TOOL_NAMES y WRITE_TOOL_NAMES no se pisan", () => {
     // Una tool en las dos listas se registraría dos veces en write_enabled.

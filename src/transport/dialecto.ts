@@ -20,12 +20,25 @@
 // (definitions→$defs, etc.) sería código para casos que estos schemas no
 // producen.
 //
-// La salida de fondo es migrar los schemas a Zod v4, cuyo conversor nativo ya
-// emite 2020-12; ese día este módulo se borra y nadie lo extraña.
+// MIGRAR A ZOD v4 NO ALCANZA (verificado contra el SDK 1.29.0)
+//
+// Es tentador pensar que el módulo se borra el día que los schemas pasen a Zod
+// v4, porque el conversor nativo de v4 sabe emitir 2020-12. No: el SDK llama a
+// `toJsonSchemaCompat(obj, { strictUnions, pipeStrategy })` sin pasar `target`
+// (server/mcp.js, donde arma `inputSchema` y `outputSchema`), y adentro
+// `mapMiniTarget(undefined)` devuelve `'draft-7'`. O sea que la rama v4 estampa
+// el MISMO `$schema` de draft-07 que la v3:
+//
+//     z4mini.toJSONSchema(s, { target: 'draft-7' }).$schema
+//       === "http://json-schema.org/draft-07/schema#"
+//
+// Lo que tendría que cambiar es upstream: que el SDK pase `target: 'draft-2020-12'`
+// (o deje de estampar `$schema`). Hasta que eso pase —con Zod v3 o v4— este
+// módulo sigue haciendo falta.
 //
 // VIVE EN EL TRANSPORTE porque es el único lugar que ven los tres runtimes
-// (stdio, HTTP largo, serverless): envolver 38 tools o parchear el SDK serían
-// 38 lugares o uno ajeno.
+// (stdio, HTTP largo, serverless): envolver tool por tool sería tantos lugares
+// como tools registradas, y parchear el SDK sería un lugar ajeno.
 // =============================================================================
 
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";

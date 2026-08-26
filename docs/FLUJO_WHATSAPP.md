@@ -7,8 +7,10 @@
 > (transporte HTTP, tokens, allowlist, despliegue). Este documento explica
 > **qué conversación ocurre** una vez conectado.
 >
-> Estado: implementado y cubierto por 42 tests. Lo que falta validar contra la
-> API real de Kapso está en §7.
+> Estado: implementado y cubierto por `tests/whatsappFlujo.test.ts`,
+> `tests/kapso.test.ts`, `tests/emisionGuiada.test.ts` y
+> `tests/enrutadorRegresion.test.ts` (no ponemos el número de tests acá: envejece
+> solo). Lo que falta validar contra la API real de Kapso está en §7.
 
 ---
 
@@ -615,14 +617,14 @@ teléfono del usuario.
 | **Lista interactiva** contra la API real | ✅ 2026-07-28, `wamid.HBgLNTk4…NkMwNkYA` |
 | **Documento adjunto** contra la API real (subida multipart + envío) | ✅ 2026-07-28, PDF de 41.796 bytes, `media_id 1069914619024782` |
 | **Botones de confirmación** contra la API real | ✅ 2026-07-28, desde un dry-run que no emitió nada |
-| Emisión guiada: derivación del tipo, 64 estados parciales, ida y vuelta de ids | ✅ 20 tests |
+| Emisión guiada: derivación del tipo, 64 estados parciales, ida y vuelta de ids | ✅ `tests/emisionGuiada.test.ts` |
 | El borrador no sale envuelto por la barrera | ✅ test que pasa por `sanitizeToolResult` |
 | Enrutado de "cómo dieron el mes", "qué más podés hacer", "gracias" | ✅ tests de regresión |
 | ✖️ Cancelar no reabre la emisión; ✅ devuelve el token limpio | ✅ tests |
 | Un paso de la emisión guiada no cae en el menú | ✅ tests |
 | Empate → botones de desambiguación (y no una opción al azar) | ✅ tests |
-| Las 7 intenciones ocultas llegan a su tool, y esa tool está registrada | ✅ tests |
-| El MCP contestando por HTTP como lo llama Kapso (29 tools, `write_enabled`) | ✅ 2026-07-28, contra el server real |
+| Las 13 intenciones ocultas (`oculta: true`) llegan a su tool, y esa tool está registrada | ✅ tests |
+| El MCP contestando por HTTP como lo llama Kapso (todas las de `write_enabled`, hoy 34) | ✅ 2026-07-28, contra el server real |
 | Agent Node de Kapso conectado a este MCP | ⏳ script listo, falta la URL pública |
 
 ### 7.1. Lo que se probó el 28/07 y qué demostró

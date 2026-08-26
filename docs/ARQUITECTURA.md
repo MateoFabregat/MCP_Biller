@@ -25,7 +25,7 @@ flowchart TB
 
     subgraph server["Servidor MCP"]
         HARDEN["hardenServer()<br/><b>barrera de salida</b>"]
-        TOOLS["19 tools de lectura<br/>+ 7 de escritura"]
+        TOOLS["27 tools de lectura<br/>+ 7 tools de escritura"]
         PROMPTS["4 prompts<br/><i>rutinas guiadas</i>"]
     end
 
@@ -64,8 +64,8 @@ flowchart TB
    o futura— pasa su resultado por el sanitizador sin que nadie tenga que
    acordarse.
 2. **La lógica de negocio no toca la red.** `services/` recibe comprobantes ya
-   normalizados y devuelve números. Por eso hay 507 tests que corren en 1,7
-   segundos sin un solo mock de HTTP en la capa de cálculo.
+   normalizados y devuelve números. Por eso los 1054 tests corren en segundos
+   sin un solo mock de HTTP en la capa de cálculo.
 3. **Hay dos salidas peligrosas y tienen barreras opuestas.** El POST a Biller
    necesita autenticar la *intención* (dry-run → token → confirm). El POST a Kapso
    necesita restringir el *destino* (allowlist). Ver §5.
@@ -97,7 +97,14 @@ flowchart LR
 **`check:readonly` es un guard estático** que recorre `src/` buscando cualquier
 POST/PUT/PATCH/DELETE fuera de `write/` y `kapso/`. Acepta excepciones por línea
 con `// check-readonly:allow <motivo>`, y hay un test que exige que el motivo esté
-escrito. Hoy hay exactamente **dos** excepciones declaradas.
+escrito.
+
+Hoy hay 11 excepciones declaradas, pero solo **dos son de método HTTP**: los dos
+POST a Kapso en `src/kapso/client.ts` (mandar el mensaje y subir el media), cuya
+barrera no es el gate fiscal sino la allowlist de destinatarios. Las otras nueve
+son `Map.delete` sobre estructuras en memoria —cache de ventanas, borradores,
+sesiones HTTP— que el guard marca solo porque busca la palabra `delete`. La lista
+completa, con su motivo, la imprime `node scripts/check-readonly.mjs`.
 
 Por eso `services/dedupe.ts` —que consulta si un `numero_interno` ya existe antes
 de emitir— vive en `services/` y no en `tools/write/`: hace GET, y queriéndolo
@@ -139,7 +146,8 @@ mindmap
 
 ### Inventario de tools
 
-**Lectura (19)** — se registran siempre:
+Las **27 tools de lectura** se registran siempre (la lista viva es
+`READ_TOOL_NAMES` en `src/tools/register.ts`):
 
 | Tool | Contesta |
 |---|---|
@@ -155,15 +163,22 @@ mindmap
 | `biller_alertas_operativas` | ¿qué se está por romper? |
 | `biller_ranking_clientes` | ¿quiénes son mis mejores clientes? |
 | `biller_ranking_productos` | ¿qué vendo más? ¿a quién le doy más descuento? |
+| `biller_ranking_sucursales` | ¿qué local rinde? |
+| `biller_cohortes_clientes` | ¿los clientes vuelven? |
+| `biller_metricas` | los indicadores del negocio en un solo lugar |
 | `biller_compras_proveedores` | ¿a quién le compro? |
 | `biller_reporte_diario` | el digest, listo para WhatsApp |
+| `biller_emision_guiada` | ¿cuál es la próxima pregunta para poder emitir? |
+| `biller_resolver_nombre` | "Pérez" ¿cuál de todos? |
+| `biller_menu_whatsapp` · `biller_enviar_comprobante_whatsapp` · `biller_recordatorio_cobro` | el canal de WhatsApp (leen por GET; su barrera es la allowlist de destinatarios) |
 | `biller_listar_comprobantes_emitidos` · `_recibidos` · `biller_obtener_comprobante` · `biller_obtener_pdf` · `biller_buscar_cliente_por_rut` | acceso directo |
 
 **Opt-in (1):** `biller_posicion_iva` — el cálculo es correcto, el riesgo es de
-**uso**: se parece a una declaración jurada sin serlo.
+**uso**: se parece a una declaración jurada sin serlo. Con la opt-in habilitada
+son 35 tools registradas en vez de 34.
 
-**Escritura (7):** emitir, anular, crear cliente/producto/recibo/pago, cancelar
-recibo. Solo con `BILLER_CAPABILITY_MODE=write_enabled`.
+Las **7 tools de escritura** (emitir, anular, crear cliente/producto/recibo/pago,
+cancelar recibo) solo se registran con `BILLER_CAPABILITY_MODE=write_enabled`.
 
 ---
 
