@@ -11,10 +11,20 @@ export function makeConfig(overrides: Partial<BillerConfig> = {}): BillerConfig 
   const base = {
     apiBaseUrl: "https://test.biller.uy",
     apiToken: TEST_TOKEN,
+    sucursales: {},
     timeoutMs: 30_000,
     logLevel: "error",
     writeEnabled: false,
     allowProductionWrites: false,
+    capabilityMode: "read_only" as const,
+    enableIvaEstimado: false,
+    maxMontos: {},
+    httpPort: 8848,
+    httpHost: "127.0.0.1",
+    httpAllowedHosts: [],
+    // Sin Kapso, la barrera de entrada no exige remitente: el default de los
+    // tests es el server de escritorio, no el canal de WhatsApp.
+    remitentesAutorizados: [],
     ...overrides,
   };
   return {
