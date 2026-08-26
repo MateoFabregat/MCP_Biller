@@ -9,28 +9,71 @@
 // =============================================================================
 
 import { z } from "zod";
+import { formatearTotales, type TotalesEstimados } from "../../services/calcularTotales.js";
 import type { RateLimitClass } from "../../utils/rateLimit.js";
 import { BillerConfirmationError } from "../../utils/errors.js";
-import { computeConfirmationToken, verifyConfirmationToken } from "../../write/confirm.js";
+import { checkConfirmationToken, computeConfirmationToken } from "../../write/confirm.js";
 import { executeWrite } from "../../write/execute.js";
 import { evaluateWriteGate } from "../../write/gate.js";
 import { generateIdempotencyKey } from "../../write/idempotency.js";
 import { errorToolResult, jsonResult, type ToolContext, type ToolResult } from "../shared.js";
 
+// El preview existe para que un humano verifique A QUIÉN le está facturando.
+// Ocultar del todo el receptor (documento/razón social) hacía que confirmar una
+// e-Factura fuera imposible de auditar: se podía aprobar una factura al cliente
+// equivocado sin forma de notarlo. Por eso se ENMASCARA parcialmente en vez de
+// redactar: queda suficiente para reconocer al cliente, no para copiarlo entero.
+//
 // tipo_documento es un código de categoría numérico (2=RUT, 3=CI): no es PII por
-// sí mismo, así que no se redacta (redactarlo dificulta verificar el preview).
-const PII_FIELDS = new Set([
-  "rut", "documento", "razon_social", "nombre_fantasia",
-  "email", "telefono", "direccion", "domicilio",
+// sí mismo, así que no se toca.
+const CAMPOS_ENMASCARADOS = new Set([
+  "rut", "documento", "email", "telefono", "direccion", "domicilio",
 ]);
 
-function redactPayloadPreview(value: unknown): unknown {
+/** Deja visible el inicio del valor y enmascara la cola: "2149874400**". */
+function enmascarar(value: unknown): unknown {
+  if (typeof value !== "string" || value.length === 0) return value;
+  if (value.includes("@")) {
+    // Email: usuario visible en parte + dominio completo (sirve para verificar).
+    const [usuario, dominio] = value.split("@");
+    const visible = usuario.slice(0, Math.min(3, usuario.length));
+    return `${visible}${"*".repeat(Math.max(1, usuario.length - visible.length))}@${dominio}`;
+  }
+  if (value.length <= 4) return value;
+  const visibles = Math.max(4, Math.ceil(value.length * 0.7));
+  return value.slice(0, visibles) + "*".repeat(value.length - visibles);
+}
+
+function maskPayloadPreview(value: unknown): unknown {
   if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(redactPayloadPreview);
+  if (Array.isArray(value)) return value.map(maskPayloadPreview);
   const obj = value as Record<string, unknown>;
   return Object.fromEntries(
-    Object.entries(obj).map(([k, v]) => [k, PII_FIELDS.has(k) ? "[REDACTED]" : redactPayloadPreview(v)]),
+    Object.entries(obj).map(([k, v]) => [
+      k,
+      CAMPOS_ENMASCARADOS.has(k) ? enmascarar(v) : maskPayloadPreview(v),
+    ]),
   );
+}
+
+/**
+ * Completa `sucursal` con BILLER_DEFAULT_SUCURSAL_ID si el cuerpo no la trae.
+ * Tolera que la config no exista: en ese caso `runWriteOperation` es quien
+ * devuelve el error de configuración, con un mensaje mejor que el que daríamos acá.
+ */
+export function aplicarSucursalPorDefecto(
+  payload: { sucursal?: number },
+  ctx: ToolContext,
+): void {
+  if (payload.sucursal !== undefined) return;
+  try {
+    const raw = ctx.getConfig().defaultSucursalId;
+    if (raw === undefined) return;
+    const n = Number(raw);
+    if (Number.isFinite(n)) payload.sucursal = n;
+  } catch {
+    /* config inválida: el error lo reporta runWriteOperation */
+  }
 }
 
 /** Campos de control comunes a todas las tools de escritura. */
@@ -55,6 +98,19 @@ export const writeControlShape = {
     .describe(
       "Doble confirmación para PRODUCCIÓN. Junto con BILLER_ALLOW_PRODUCTION_WRITES=true habilita el POST contra biller.uy.",
     ),
+  /**
+   * El mismo `remitente` que agrega la barrera de entrada, declarado también acá.
+   *
+   * La barrera lo inyecta en el input de TODA tool y lo verifica antes del
+   * handler, pero cada tool parsea sus args con su propio `z.object`, que
+   * descarta las claves que no declara. Sin esta línea el valor llega al server,
+   * se valida, y se pierde antes de que el audit log pueda escribirlo — o sea:
+   * se sabe quién pidió la emisión justo hasta el momento de anotarlo.
+   */
+  remitente: z
+    .string()
+    .optional()
+    .describe("Teléfono de quien pide la operación. Queda enmascarado en el audit log."),
 };
 
 export const writeOutputShape = {
@@ -80,6 +136,12 @@ export const writeOutputShape = {
   http_status: z.number().optional(),
   response: z.unknown().optional(),
   audit_id: z.string().optional(),
+  /** Totales calculados localmente en el dry-run de una emisión. */
+  totales_estimados: z.unknown().optional(),
+  /** Línea legible con el total, para la confirmación humana. */
+  resumen: z.string().optional(),
+  /** Resultado de haber mandado el preview como botones de WhatsApp (ver emitirComprobante). */
+  confirmacion_whatsapp: z.unknown().optional(),
   warnings: z.array(z.string()),
 };
 
@@ -96,6 +158,18 @@ export interface RunWriteParams {
   allowProduction: boolean;
   rateLimitClass?: RateLimitClass;
   warnings?: string[];
+  /**
+   * Totales calculados localmente, a mostrar SOLO en el dry-run. No entran en el
+   * hash del token: son derivados del payload, no parte de lo que se envía.
+   */
+  totalesEstimados?: TotalesEstimados;
+  /**
+   * Quién pidió la operación. Va al audit log enmascarado y NO entra en el hash
+   * del confirmation_token: si entrara, un dry-run pedido desde un teléfono y
+   * confirmado desde otro daría "el payload cambió", que es un diagnóstico falso
+   * para un caso legítimo (el dueño arranca la factura y la confirma el encargado).
+   */
+  remitente?: string;
 }
 
 export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> {
@@ -141,25 +215,32 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
           reason: gate.reason ?? null,
           requires_allow_production: environment === "production",
         },
-        payload_preview: redactPayloadPreview(payload),
+        payload_preview: maskPayloadPreview(payload),
         query_preview: p.query ?? null,
         confirmation_token: token,
         idempotency_key: p.idempotencyKey ?? null,
         next_step:
           `Para EJECUTAR, volvé a llamar ${tool} con confirm=true y confirmation_token="${token}"` +
           (environment === "production" ? " y allow_production=true." : ".") +
-          " Los campos sensibles están redactados en este preview.",
+          " Los documentos y contactos están parcialmente enmascarados en este preview.",
         no_network_call: true,
+        ...(p.totalesEstimados !== undefined
+          ? {
+              totales_estimados: p.totalesEstimados,
+              resumen: formatearTotales(p.totalesEstimados),
+            }
+          : {}),
         warnings,
       });
     }
 
     // --- Fase EJECUCIÓN ---
-    if (!verifyConfirmationToken(p.confirmationToken, endpoint, environment, subject)) {
-      throw new BillerConfirmationError(
-        "El confirmation_token no coincide con el payload/endpoint/ambiente actuales. " +
-          "Hacé primero un dry-run (confirm=false) y reenviá el confirmation_token EXACTO devuelto.",
-      );
+    // El chequeo distingue el motivo: "vencido" se arregla repitiendo el
+    // dry-run, "no coincide" significa que el payload cambió. Devolver el mismo
+    // mensaje para los dos hace que el modelo reintente lo que no debe.
+    const check = checkConfirmationToken(p.confirmationToken, endpoint, environment, subject);
+    if (!check.ok) {
+      throw new BillerConfirmationError(check.mensaje);
     }
 
     const idempotencyKey = p.idempotencyKey ?? generateIdempotencyKey();
@@ -171,6 +252,7 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
       idempotencyKey,
       allowProduction: p.allowProduction,
       rateLimitClass: p.rateLimitClass,
+      remitente: p.remitente,
     });
 
     return jsonResult({

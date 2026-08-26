@@ -52,7 +52,7 @@ describe("BillerWriteClient (gate en el borde de red)", () => {
 
     expect(out.status).toBe(201);
     expect((out.data as Record<string, unknown>).id).toBe(1);
-    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://test.biller.uy/v2/comprobantes/crear");
     expect(init.method).toBe("POST");
     const headers = init.headers as Record<string, string>;

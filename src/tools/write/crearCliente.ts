@@ -4,21 +4,18 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ClienteCrearSchema, validarClienteCrear } from "../../biller/operacionesSchema.js";
+import { WRITE_PATHS } from "../../constants.js";
 import { WRITE_ANNOTATIONS, validationErrorResult, type ToolContext, type ToolResult } from "../shared.js";
 import { runWriteOperation, writeControlShape, writeOutputShape } from "./shared.js";
 
-const ENDPOINT = "/v2/clientes/crear";
+const ENDPOINT = WRITE_PATHS.clientesCrear;
 
 const inputShape = {
-  cliente: z
-    .object({
-      tipo_documento: z.number().int().describe("Tipo de documento (ej: 2=RUT, 3=CI)."),
-      documento: z.string().min(1).describe("Número de documento/RUT."),
-    })
-    .passthrough()
-    .describe(
-      "Datos del cliente: razon_social o nombre_fantasia, direccion, ciudad, departamento, pais, etc.",
-    ),
+  cliente: ClienteCrearSchema.describe(
+    "Datos del cliente en un ÚNICO objeto plano (no anidado como en la emisión de CFE): " +
+      "tipo_documento, documento, razon_social o nombre_fantasia según el tipo, direccion, ciudad, departamento, pais.",
+  ),
   ...writeControlShape,
 };
 
@@ -30,10 +27,7 @@ export async function handleCrearCliente(args: unknown, ctx: ToolContext): Promi
   const a = parsed.data;
 
   const payload: Record<string, unknown> = { ...a.cliente };
-  const warnings: string[] = [];
-  if (payload.razon_social === undefined && payload.nombre_fantasia === undefined) {
-    warnings.push("El cliente no incluye razon_social ni nombre_fantasia: confirmá los datos antes de ejecutar.");
-  }
+  const warnings = validarClienteCrear(a.cliente);
 
   return runWriteOperation({
     ctx,
@@ -44,6 +38,7 @@ export async function handleCrearCliente(args: unknown, ctx: ToolContext): Promi
     confirmationToken: a.confirmation_token,
     idempotencyKey: a.idempotency_key,
     allowProduction: a.allow_production,
+    remitente: a.remitente,
     rateLimitClass: "default",
     warnings,
   });

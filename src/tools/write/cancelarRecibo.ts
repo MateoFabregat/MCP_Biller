@@ -34,6 +34,7 @@ export async function handleCancelarRecibo(args: unknown, ctx: ToolContext): Pro
     confirmationToken: a.confirmation_token,
     idempotencyKey: a.idempotency_key,
     allowProduction: a.allow_production,
+    remitente: a.remitente,
     rateLimitClass: "dgi",
   });
 }

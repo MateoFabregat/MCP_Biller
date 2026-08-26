@@ -14,6 +14,17 @@ const FORBIDDEN: Array<{ re: RegExp; label: string }> = [
 /** La escritura está aislada en directorios `write/`. */
 const isWritePath = (file: string): boolean => file.split(sep).includes("write");
 
+/**
+ * Excepción explícita por línea, misma convención que scripts/check-readonly.mjs:
+ *
+ *     mapa.delete(k); // check-readonly:allow Map.delete, no es HTTP
+ *
+ * Existe porque `.delete(` también matchea Map/Set. Aflojar el patrón para
+ * evitar esos falsos positivos abriría la puerta a que se cuele un DELETE HTTP
+ * real; una excepción marcada queda escrita en el código y se revisa en el diff.
+ */
+const ALLOW_MARKER = /\/\/\s*check-readonly:allow\b(.*)$/;
+
 function walk(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -34,11 +45,30 @@ describe("write-isolation guard estático sobre src/", () => {
       const lines = readFileSync(file, "utf8").split("\n");
       lines.forEach((line, i) => {
         for (const { re, label } of FORBIDDEN) {
-          if (re.test(line)) violations.push(`${file}:${i + 1} [${label}] ${line.trim()}`);
+          if (!re.test(line)) continue;
+          if (ALLOW_MARKER.test(line)) continue;
+          violations.push(`${file}:${i + 1} [${label}] ${line.trim()}`);
         }
       });
     }
     expect(violations).toEqual([]);
+  });
+
+  it("toda excepción declarada trae un motivo escrito", () => {
+    // Una excepción sin motivo es una excepción que nadie va a poder revisar
+    // dentro de seis meses. El guard las tolera; este test las obliga a
+    // explicarse.
+    const sinMotivo: string[] = [];
+    for (const file of walk(SRC_DIR)) {
+      const lines = readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, i) => {
+        const m = ALLOW_MARKER.exec(line);
+        if (m !== null && m[1]!.trim().length < 10) {
+          sinMotivo.push(`${file}:${i + 1}`);
+        }
+      });
+    }
+    expect(sinMotivo).toEqual([]);
   });
 
   it("la escritura está efectivamente aislada en write/ (writeClient hace POST)", () => {

@@ -24,6 +24,18 @@ export interface AuditEntry {
   payload_sha256: string;
   http_status?: number;
   outcome?: string;
+  /**
+   * Quién pidió la operación, ENMASCARADO (últimos 4 dígitos del teléfono).
+   *
+   * Un CFE emitido es un hecho fiscal con nombre y apellido: la pregunta que se
+   * hace después de una emisión rara no es "qué se emitió" —eso está en Biller—
+   * sino "quién la pidió". Sin esto, el audit log contesta la mitad.
+   *
+   * Va enmascarado porque este archivo se lee, se copia y se manda por mail para
+   * diagnosticar: el número completo es un dato personal y los últimos cuatro
+   * dígitos alcanzan para distinguir entre los pocos teléfonos de una allowlist.
+   */
+  remitente?: string;
 }
 
 export interface AuditInput {
@@ -35,6 +47,8 @@ export interface AuditInput {
   idempotencyKey?: string;
   httpStatus?: number;
   outcome?: string;
+  /** Teléfono del solicitante YA enmascarado (ver AuditEntry.remitente). */
+  remitente?: string;
 }
 
 export interface AuditSink {
@@ -68,6 +82,7 @@ export class Auditor implements AuditSink {
       payload_sha256: input.payloadSha256,
       http_status: input.httpStatus,
       outcome: input.outcome,
+      remitente: input.remitente,
     };
 
     // Siempre a stderr (vía logger), nunca a stdout.

@@ -50,7 +50,7 @@ describe("emitir_comprobante — dry-run / confirm", () => {
     expect(fx.postMock).not.toHaveBeenCalled();
     expect(fx.auditEntries).toHaveLength(0);
     // endpoint correcto en el preview
-    expect(sc(dry).endpoint).toBe("/v2/comprobantes/crear");
+    expect(sc(dry).endpoint).toBe("/v3/comprobantes/emitir");
   });
 
   it("bloquea la ejecución si la escritura está deshabilitada", async () => {
@@ -73,7 +73,7 @@ describe("emitir_comprobante — dry-run / confirm", () => {
     expect((sc(exec).response as Record<string, unknown>).id).toBe(43574);
     expect(fx.postMock).toHaveBeenCalledOnce();
     const opts = fx.postMock.mock.calls[0]![0];
-    expect(opts.endpoint).toBe("/v2/comprobantes/crear");
+    expect(opts.endpoint).toBe("/v3/comprobantes/emitir");
     expect(opts.rateLimitClass).toBe("dgi");
     expect(opts.body.tipo_comprobante).toBe(101);
     expect(fx.auditEntries.some((e) => e.phase === "executed")).toBe(true);
@@ -213,8 +213,16 @@ describe("anular_comprobante — validación", () => {
 });
 
 describe("crear_cliente — dry-run / confirm", () => {
-  const CLIENTE_CON_RAZON = { tipo_documento: 2, documento: "217832560011", razon_social: "Empresa Test SRL" };
-  const CLIENTE_SIN_NOMBRE = { tipo_documento: 2, documento: "217832560011" };
+  // El endpoint recibe un objeto PLANO (no anidado como en la emisión de CFE).
+  const CLIENTE_CON_RAZON = {
+    tipo_documento: 2,
+    documento: "217832560011",
+    razon_social: "Empresa Test SRL",
+    direccion: "Los Arces 7635",
+    ciudad: "Montevideo",
+    departamento: "Montevideo",
+    pais: "UY",
+  };
 
   it("dry-run retorna endpoint correcto /v2/clientes/crear", async () => {
     const fx = makeCtx();
@@ -238,25 +246,67 @@ describe("crear_cliente — dry-run / confirm", () => {
     expect(fx.postMock).not.toHaveBeenCalled();
   });
 
-  it("warning cuando falta razon_social y nombre_fantasia", async () => {
+  // El schema oficial solo exige tipo_documento, documento y pais. El "nombre
+  // principal" según el tipo de documento se avisa, no se bloquea.
+  it("avisa (sin bloquear) cuando un RUT no trae razon_social", async () => {
     const fx = makeCtx();
-    const res = await handleCrearCliente({ cliente: CLIENTE_SIN_NOMBRE }, fx.ctx);
+    const res = await handleCrearCliente(
+      { cliente: { ...CLIENTE_CON_RAZON, razon_social: undefined } },
+      fx.ctx,
+    );
+    expect(res.isError).toBeUndefined();
     expect((sc(res).warnings as string[]).some((w) => w.includes("razon_social"))).toBe(true);
   });
 
-  it("sin warning cuando se provee razon_social", async () => {
-    const fx = makeCtx();
-    const res = await handleCrearCliente({ cliente: CLIENTE_CON_RAZON }, fx.ctx);
-    expect((sc(res).warnings as string[]).some((w) => w.includes("razon_social"))).toBe(false);
-  });
-
-  it("sin warning cuando se provee nombre_fantasia", async () => {
+  it("avisa cuando un RUT usa nombre_fantasia como nombre principal", async () => {
     const fx = makeCtx();
     const res = await handleCrearCliente(
-      { cliente: { tipo_documento: 2, documento: "217832560011", nombre_fantasia: "Mi Negocio" } },
+      {
+        cliente: { ...CLIENTE_CON_RAZON, razon_social: undefined, nombre_fantasia: "Mi Negocio" },
+      },
       fx.ctx,
     );
-    expect((sc(res).warnings as string[]).some((w) => w.includes("razon_social"))).toBe(false);
+    expect(res.isError).toBeUndefined();
+    expect((sc(res).warnings as string[]).some((w) => w.includes("razon_social"))).toBe(true);
+  });
+
+  // Estos SÍ son `required` en el schema oficial.
+  it("rechaza un cliente sin pais", async () => {
+    const fx = makeCtx();
+    const res = await handleCrearCliente(
+      { cliente: { ...CLIENTE_CON_RAZON, pais: undefined } },
+      fx.ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(errorOf(res).message).toContain("pais");
+  });
+
+  it("rechaza un cliente sin documento", async () => {
+    const fx = makeCtx();
+    const res = await handleCrearCliente(
+      { cliente: { ...CLIENTE_CON_RAZON, documento: undefined } },
+      fx.ctx,
+    );
+    expect(res.isError).toBe(true);
+  });
+
+  it("acepta una CI identificada con nombre_fantasia", async () => {
+    const fx = makeCtx();
+    const res = await handleCrearCliente(
+      {
+        cliente: {
+          tipo_documento: 3,
+          documento: "47348269",
+          nombre_fantasia: "Martín Perez",
+          direccion: "18 de Julio esquina Ejido",
+          ciudad: "Montevideo",
+          pais: "UY",
+        },
+      },
+      fx.ctx,
+    );
+    expect(res.isError).toBeUndefined();
+    expect(sc(res).mode).toBe("dry_run");
   });
 });
 
@@ -304,8 +354,41 @@ describe("cargar_producto — dry-run / confirm", () => {
 });
 
 describe("crear_recibo — dry-run / confirm", () => {
-  const RECIBO = { tipo_comprobante: 101, forma_pago: 1, sucursal: 6, moneda: "UYU" };
+  // La doc exige `cliente` (con documento y dirección) y `pago`.
+  const RECIBO = {
+    tipo_comprobante: 101,
+    forma_pago: 1,
+    sucursal: 6,
+    moneda: "UYU",
+    cliente: {
+      tipo_documento: 3,
+      documento: "52165030",
+      nombre_fantasia: "Juan Pérez",
+      sucursal: { pais: "UY", ciudad: "Montevideo", direccion: "Sarandí 420" },
+    },
+    referencias: [{ padre: 150448, total: 1830 }],
+    pago: { fecha: "2021-05-27", monto: 1830, referencia: "Transferencia Itaú 2185" },
+  };
   const RECIBO_RESPONSE = { id: 99, serie: "X", numero: "100" };
+
+  it("rechaza un recibo sin cliente (Biller responde 422 cliente required)", async () => {
+    const fx = makeCtx();
+    const res = await handleCrearRecibo(
+      { recibo: { ...RECIBO, cliente: undefined } },
+      fx.ctx,
+    );
+    expect(res.isError).toBe(true);
+  });
+
+  it("avisa cuando el pago supera la suma de las referencias (Adelanto)", async () => {
+    const fx = makeCtx();
+    const res = await handleCrearRecibo(
+      { recibo: { ...RECIBO, pago: { ...RECIBO.pago, monto: 2000 } } },
+      fx.ctx,
+    );
+    expect(res.isError).toBeUndefined();
+    expect((sc(res).warnings as string[]).some((w) => w.includes("Adelanto"))).toBe(true);
+  });
 
   it("dry-run retorna endpoint correcto /v2/recibos/crear", async () => {
     const fx = makeCtx();

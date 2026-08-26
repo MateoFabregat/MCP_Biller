@@ -30,6 +30,16 @@ const FORBIDDEN = [
   /\.\s*(?:post|put|patch|delete)\s*\(/i,
 ];
 
+// El patrón `.delete(` también matchea Map.delete()/Set.delete(), que no tienen
+// nada que ver con HTTP. En vez de aflojar el patrón —lo que abriría la puerta
+// a que se cuele un .delete() real— se permite una excepción EXPLÍCITA por
+// línea, que queda escrita en el código y se reporta al final para que no
+// crezcan en silencio:
+//
+//     sesiones.delete(id); // check-readonly:allow Map.delete, no es HTTP
+//
+const ALLOW_MARKER = /\/\/\s*check-readonly:allow\b(.*)$/;
+
 function walk(dir) {
   const out = [];
   for (const entry of readdirSync(dir)) {
@@ -44,16 +54,21 @@ function walk(dir) {
 }
 
 let violations = 0;
+const exemptions = [];
 for (const file of walk(SRC_DIR)) {
   if (isWritePath(file)) continue; // capa de escritura auditada: POST permitido acá
   const text = readFileSync(file, "utf8");
   const lines = text.split("\n");
   lines.forEach((line, i) => {
     for (const re of FORBIDDEN) {
-      if (re.test(line)) {
-        console.error(`WRITE-ISOLATION VIOLATION: ${file}:${i + 1}\n  ${line.trim()}`);
-        violations += 1;
+      if (!re.test(line)) continue;
+      const allow = ALLOW_MARKER.exec(line);
+      if (allow) {
+        exemptions.push(`${file}:${i + 1} —${allow[1].trim() || " (sin motivo declarado)"}`);
+        continue;
       }
+      console.error(`WRITE-ISOLATION VIOLATION: ${file}:${i + 1}\n  ${line.trim()}`);
+      violations += 1;
     }
   });
 }
@@ -63,6 +78,11 @@ if (violations > 0) {
     `\n✗ check:readonly falló: ${violations} llamada(s) de escritura fuera de la capa write/.`,
   );
   process.exit(1);
+}
+
+if (exemptions.length > 0) {
+  console.log(`Excepciones declaradas (${exemptions.length}):`);
+  for (const e of exemptions) console.log(`  · ${e}`);
 }
 
 console.log(
