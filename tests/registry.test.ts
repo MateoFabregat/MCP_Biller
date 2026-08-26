@@ -23,12 +23,15 @@ function makeRecordingServer(): { server: McpServer; names: string[] } {
 }
 
 describe("modo read_only (default)", () => {
-  it("registra solo las 6 tools de lectura", () => {
+  // Los conteos se derivan de las constantes en vez de hardcodearse: lo que
+  // este test tiene que fijar es que en read_only NO se registre nada de
+  // escritura, no cuántas tools de lectura existen hoy.
+  it("registra exactamente las tools de lectura y ninguna de escritura", () => {
     const { server, names } = makeRecordingServer();
     registerAllTools(server, createToolContext(), "read_only");
 
     expect(names.sort()).toEqual([...READ_TOOL_NAMES].sort());
-    expect(names).toHaveLength(6);
+    expect(names).toHaveLength(READ_TOOL_NAMES.length);
     for (const w of WRITE_TOOL_NAMES) expect(names).not.toContain(w);
   });
 
@@ -47,14 +50,15 @@ describe("modo read_only (default)", () => {
 });
 
 describe("modo write_enabled", () => {
-  it("registra las 12 tools (6 lectura + 6 escritura)", () => {
+  it("registra las tools de lectura MÁS las de escritura", () => {
     const { server, names } = makeRecordingServer();
     registerAllTools(server, createToolContext(), "write_enabled");
 
     expect(names.sort()).toEqual([...REGISTERED_TOOL_NAMES].sort());
-    expect(names).toHaveLength(12);
-    expect(READ_TOOL_NAMES).toHaveLength(6);
-    expect(WRITE_TOOL_NAMES).toHaveLength(6);
+    expect(names).toHaveLength(READ_TOOL_NAMES.length + WRITE_TOOL_NAMES.length);
+    // La superficie de escritura sí está fijada: que aparezca una tool POST
+    // nueva sin que nadie lo note es exactamente lo que hay que evitar.
+    expect(WRITE_TOOL_NAMES).toHaveLength(7);
     for (const w of WRITE_TOOL_NAMES) expect(names).toContain(w);
     expect(names).toContain("biller_emitir_comprobante");
     expect(names).toContain("biller_health_check");
@@ -78,7 +82,7 @@ describe("default sin pasar modo", () => {
     const { server, names } = makeRecordingServer();
     registerAllTools(server, createToolContext());
 
-    expect(names).toHaveLength(6);
+    expect(names).toHaveLength(READ_TOOL_NAMES.length);
     for (const w of WRITE_TOOL_NAMES) expect(names).not.toContain(w);
   });
 });

@@ -5,6 +5,8 @@
 import { z, type ZodError } from "zod";
 import type { BillerClient } from "../biller/client.js";
 import type { BillerConfig } from "../config.js";
+import type { BorradorStore } from "../kapso/borradorStore.js";
+import type { Metricas } from "../observabilidad/metricas.js";
 import { redactSecrets, toSafeError } from "../utils/errors.js";
 import type { WriteExecContext } from "../write/execute.js";
 
@@ -26,6 +28,28 @@ export interface ToolContext {
   getClient: () => BillerClient;
   /** Contexto de escritura (writeClient + auditor + idempotencia). Lanza si la config es inválida. */
   getWriteContext: () => WriteExecContext;
+  /**
+   * Métricas de uso de ESTA empresa.
+   *
+   * Va en el contexto y no en un singleton por el mismo motivo que el store de
+   * idempotencia: el contexto ya es por tenant. Un registro global haría que la
+   * tool de métricas de una empresa mostrara cuánto usa el sistema la otra, que
+   * es información comercial de un tercero.
+   *
+   * Nunca es `undefined`: cuando no hay que medir, es `METRICAS_NULAS`. Un
+   * `if (metricas)` repetido en quince lugares es la forma más segura de que en
+   * el dieciseisavo falte.
+   */
+  metricas: Metricas;
+  /**
+   * Borradores de emisión a medio cargar de ESTA empresa.
+   *
+   * Por tenant por el mismo motivo que las métricas y la idempotencia, pero acá
+   * el motivo es más duro: un store compartido dejaría que una empresa leyera,
+   * con solo adivinar una clave de sesión, qué está por facturarle otra y a
+   * quién. Es el dato comercial más sensible que maneja el server.
+   */
+  getBorradorStore: () => BorradorStore;
 }
 
 export const WRITE_ANNOTATIONS = {

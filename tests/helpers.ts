@@ -1,9 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { vi } from "vitest";
 import type { BillerClient, BillerGetOptions } from "../src/biller/client.js";
 import type { BillerConfig } from "../src/config.js";
 import type { ToolContext } from "../src/tools/shared.js";
 import type { AuditEntry, AuditInput, AuditSink } from "../src/write/audit.js";
-import { IdempotencyStore } from "../src/write/idempotency.js";
+import { BorradorStoreMemoria } from "../src/kapso/borradorStore.js";
+import { RegistroMetricas, METRICAS_NULAS } from "../src/observabilidad/metricas.js";
+import { InMemoryIdempotencyStore, type IdempotencyStore } from "../src/write/idempotency.js";
 import type { PostOptions, PostResult } from "../src/write/writeClient.js";
 import type { BillerWriteClient } from "../src/write/writeClient.js";
 import { makeConfig } from "./fixtures.js";
@@ -28,13 +31,19 @@ export interface FakeCtx {
   config: BillerConfig;
   auditEntries: AuditEntry[];
   idempotency: IdempotencyStore;
+  metricas: RegistroMetricas;
+  borradores: BorradorStoreMemoria;
 }
 
 export function makeCtx(opts: FakeCtxOptions = {}): FakeCtx {
   const getMock = vi.fn(async (o: BillerGetOptions) =>
     opts.impl ? await opts.impl(o) : opts.response,
   );
-  const client = { get: getMock } as unknown as BillerClient;
+  // `cacheId` ÚNICO por contexto. El cache de ventanas se saltea a los clientes
+  // sin identidad, así que sin esto los tests no ejercitarían el cache; y con un
+  // id COMPARTIDO se filtrarían datos de un test a otro — que es el mismo
+  // síntoma que tendría una fuga entre empresas en producción.
+  const client = { get: getMock, cacheId: `test-${randomUUID()}` } as unknown as BillerClient;
 
   const postMock = vi.fn(async (o: PostOptions): Promise<PostResult> => {
     if (opts.postImpl) return opts.postImpl(o);
@@ -57,20 +66,27 @@ export function makeCtx(opts: FakeCtxOptions = {}): FakeCtx {
         payload_sha256: input.payloadSha256,
         http_status: input.httpStatus,
         outcome: input.outcome,
+        remitente: input.remitente,
       };
       auditEntries.push(entry);
       return entry;
     },
   };
-  const idempotency = new IdempotencyStore();
+  const idempotency = new InMemoryIdempotencyStore();
+  // `emitirLog: false` — un test no tiene por qué escupir una línea de métrica
+  // por cada invocación. Los contadores igual funcionan y se pueden assertar.
+  const metricas = new RegistroMetricas({ emitirLog: false });
+  const borradores = new BorradorStoreMemoria();
 
   const ctx: ToolContext = {
     getConfig: () => config,
     getClient: () => client,
     getWriteContext: () => ({ config, writeClient, auditor, idempotency }),
+    metricas,
+    getBorradorStore: () => borradores,
   };
 
-  return { ctx, getMock, postMock, config, auditEntries, idempotency };
+  return { ctx, getMock, postMock, config, auditEntries, idempotency, metricas, borradores };
 }
 
 /** Extrae el error de un ToolResult (los errores van como JSON en content text). */
@@ -93,5 +109,9 @@ export function makeUnconfiguredCtx(): ToolContext {
     getConfig: fail,
     getClient: fail,
     getWriteContext: fail,
+    // Sin config no hay nada que medir, pero el campo no puede faltar: es lo
+    // que garantiza que ningún llamador tenga que chequear si existe.
+    metricas: METRICAS_NULAS,
+    getBorradorStore: () => new BorradorStoreMemoria(),
   };
 }
