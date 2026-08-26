@@ -2,7 +2,7 @@
   "name": "biller-mcp-server",
   "version": "0.1.0",
   "private": true,
-  "description": "MCP server local, read-only, para la API REST de Biller (facturación electrónica de Uruguay). Solo llamadas HTTP GET.",
+  "description": "MCP server local, read-only, para la API REST de Biller (facturaci\u00f3n electr\u00f3nica de Uruguay). Solo llamadas HTTP GET.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -16,13 +16,14 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "check:readonly": "node scripts/check-readonly.mjs",
-    "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js"
+    "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js",
+    "evals": "npm run build && node scripts/evals-enrutador.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

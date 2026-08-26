@@ -1,0 +1,27 @@
+// =============================================================================
+// Typecheck de los TESTS. No compila nada: solo chequea.
+//
+// POR QUÉ VA APARTE Y NO EN tsconfig.json
+//
+// El tsconfig de build tiene `rootDir: "src"` y `outDir: "dist"`. Meter
+// `tests/` ahí cambiaría la raíz común y el compilado saldría en
+// `dist/src/…` + `dist/tests/…`, rompiendo el `bin` del paquete y los imports
+// de `api/*.mjs`, que apuntan a `dist/transport/…`.
+//
+// QUÉ AGUJERO CIERRA
+//
+// Hasta acá los tests NO se typecheckeaban. No es teórico: al agregar el campo
+// `metricas` a `ToolContext`, el contexto falso de `tests/helpers.ts` quedó
+// incompleto y NADIE avisó —ni tsc, porque no los miraba, ni los tests, porque
+// casi ninguno construye el server entero—. Un helper de tests desalineado con
+// el tipo real es un test que pasa probando algo que ya no existe.
+// =============================================================================
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}
