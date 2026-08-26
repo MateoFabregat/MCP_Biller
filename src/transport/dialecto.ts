@@ -45,22 +45,6 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 const DIALECTO_VIEJO = "http://json-schema.org/draft-07/schema#";
 
-/**
- * A cuánto se recortan las descripciones de parámetros en modo liviano.
- *
- * 160 caracteres es aproximadamente una oración: alcanza para el qué —"el
- * período, formato AAAA-MM"— y corta antes del por qué. UNA sola definición
- * para los tres transportes, porque el tamaño del wire es una propiedad del
- * server, no de cómo se lo esté sirviendo.
- */
-export const MAX_CHARS_DESCRIPCION_LIVIANO = 160;
-
-/** Las opciones del modo liviano, para no repetirlas en los tres transportes. */
-export function opcionesLivianas(wireLiviano: boolean): OpcionesDialecto {
-  return wireLiviano
-    ? { quitarOutputSchema: true, maxCharsDescripcion: MAX_CHARS_DESCRIPCION_LIVIANO }
-    : {};
-}
 
 export interface OpcionesDialecto {
   /**
@@ -76,58 +60,21 @@ export interface OpcionesDialecto {
    * legal y no cambia ninguna respuesta. Es opt-in (BILLER_WIRE_LIVIANO) porque
    * un cliente estricto como Claude Code sí lo aprovecha para validar.
    *
-   * NO ALCANZÓ. Medido el 2026-08-26 contra el server real: sin los
-   * `outputSchema`, `tools/list` bajó de 159 KB a 92 KB — y Kapso seguía
-   * configurando el agente con CERO tools. Los 92 KB restantes son 69 KB de
-   * `inputSchema` y 13 KB de descripciones de tools; el grueso son las
-   * descripciones de CADA PARÁMETRO, que en este proyecto se escriben largas y
-   * explicativas. Por eso existe `maxCharsDescripcion`.
+   * Y NO ERA EL TAMAÑO. Medido el 2026-08-26 contra el server real: sin los
+   * `outputSchema`, `tools/list` bajó de 159 KB a 92 KB y Kapso seguía dando
+   * CERO tools; sirviendo 3 tools y 4,8 KB desde un server de juguete, también
+   * cero. La causa era un `$ref` — ver `inlinearRefs`.
+   *
+   * QUEDA ANOTADO PARA QUE NADIE LO REINVENTE: persiguiendo esa hipótesis se
+   * llegó a recortar las descripciones de cada parámetro a 160 caracteres.
+   * Bajaba de 92 KB a 82 KB, no arreglaba nada, y le sacaba al modelo el texto
+   * con el que decide qué mandar en cada campo. Se borró. Si algún día un
+   * cliente se ahoga de verdad con el tamaño, primero medir cuál es su límite.
    */
   quitarOutputSchema?: boolean;
 
-  /**
-   * Recorta a N caracteres cada `description` que viva DENTRO de un schema.
-   *
-   * POR QUÉ RECORTAR Y NO BORRAR. La descripción de un parámetro es cómo el
-   * modelo sabe que `periodo` acepta "2026-08" y no un rango, o que `confirm`
-   * no va solo. Borrarlas achica el wire y empeora las llamadas. Recortarlas
-   * conserva la primera oración —que es donde este proyecto pone el qué— y tira
-   * el resto, que es el por qué y está para quien lee el código.
-   *
-   * No toca la `description` de la tool en sí: son 13 KB en total y es lo que el
-   * agente lee para ELEGIR la tool, que es la decisión que más cuesta si sale
-   * mal.
-   *
-   * `undefined` = no recortar nada.
-   */
-  maxCharsDescripcion?: number;
 }
 
-/**
- * Recorta in situ las `description` de un schema, a cualquier profundidad.
- *
- * Recursivo porque los parámetros anidados —`comprobante.items[].descripcion`—
- * son justamente los más pesados: el schema de `biller_emitir_comprobante` solo
- * ya son 7,4 KB, y ninguno de esos textos está en el primer nivel.
- */
-function recortarDescripciones(nodo: unknown, max: number): void {
-  if (Array.isArray(nodo)) {
-    for (const hijo of nodo) recortarDescripciones(hijo, max);
-    return;
-  }
-  if (typeof nodo !== "object" || nodo === null) return;
-
-  const obj = nodo as Record<string, unknown>;
-  for (const [clave, valor] of Object.entries(obj)) {
-    if (clave === "description" && typeof valor === "string" && valor.length > max) {
-      // El "…" avisa que hay más, para que nadie lea el corte como el texto
-      // completo cuando esté mirando el wire para depurar.
-      obj[clave] = `${valor.slice(0, max).trimEnd()}…`;
-    } else {
-      recortarDescripciones(valor, max);
-    }
-  }
-}
 
 
 /**
@@ -227,9 +174,6 @@ function limpiarListaDeTools(result: unknown, opciones: OpcionesDialecto): void 
         const s = schema as Record<string, unknown>;
         if (s["$schema"] === DIALECTO_VIEJO) delete s["$schema"];
         inlinearRefs(s);
-        if (opciones.maxCharsDescripcion !== undefined) {
-          recortarDescripciones(s, opciones.maxCharsDescripcion);
-        }
       }
     }
   }

@@ -586,10 +586,26 @@ export const SALUDOS = [
  */
 export const AFIRMACIONES = [
   "si", "si dale", "dale si", "confirmo", "correcto", "exacto", "asi es",
-  "emitila", "emitilo", "emiti", "mandala", "mandalo", "asi esta bien", "esta bien",
+  "mandala", "mandalo", "asi esta bien", "esta bien",
   "ok emitila", "dale emitila", "si por favor", "afirmativo", "sip", "sisi", "obvio",
   "adelante", "procede", "hacelo",
 ];
+
+/**
+ * Afirmaciones que SOLO valen como "sí" si hay un flujo abierto.
+ *
+ * "emitila" está en dos lugares a la vez, y con razón: en medio de una emisión
+ * confirma el preview, y en frío quiere decir "emitime una". Cuando estaban
+ * todas juntas en `AFIRMACIONES` ganaba siempre el "sí" —el enrutador las mira
+ * antes que a los sinónimos—, así que el almacenero que arrancaba escribiendo
+ * "emitila" recibía un acuse de recibo de una pregunta que nadie le había
+ * hecho, y ahí se terminaba la conversación.
+ *
+ * Separadas, en frío caen donde tienen que caer: son sinónimos de
+ * `menu:emitir`. Lo encontró el simulador probando los 382 sinónimos del
+ * catálogo, no los tres primeros de cada opción.
+ */
+export const AFIRMACIONES_EN_FLUJO = ["emitila", "emitilo", "emiti"];
 
 /**
  * "Pará, no lo emitas". Cancelaciones escritas.

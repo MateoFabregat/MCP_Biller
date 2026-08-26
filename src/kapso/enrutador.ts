@@ -21,6 +21,7 @@ import { PREFIJO_PASO } from "./emision.js";
 import { esPedidoDeEmision, extraerPedidoEmision } from "./extraerPedido.js";
 import {
   AFIRMACIONES,
+  AFIRMACIONES_EN_FLUJO,
   ASENTIMIENTOS,
   CANCELACIONES,
   CORTESIAS,
@@ -543,7 +544,13 @@ export function interpretarMensaje(raw: string, opciones: MenuOpciones = {}): In
   //
   //     Van ANTES de los sinónimos: "dale" y "pará" no significan nada para el
   //     menú, pero lo significan todo para el paso que estaba pendiente.
-  if (AFIRMACIONES.includes(norm) || ASENTIMIENTOS.includes(norm)) {
+  //     Y las que solo son "sí" ADENTRO de un flujo van aparte: en frío,
+  //     "emitila" es un pedido de emitir, no la confirmación de nada.
+  const afirmacion =
+    AFIRMACIONES.includes(norm) ||
+    ASENTIMIENTOS.includes(norm) ||
+    (opciones.en_flujo === true && AFIRMACIONES_EN_FLUJO.includes(norm));
+  if (afirmacion) {
     return {
       opcion: null,
       via: "afirmacion",

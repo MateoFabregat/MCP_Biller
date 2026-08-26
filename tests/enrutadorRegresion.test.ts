@@ -103,7 +103,7 @@ describe("A6 · los ids ocultos no mienten sobre el modo del server", () => {
 // --- B3: "sí" y "pará" escritos --------------------------------------------
 
 describe("B3 · se puede aceptar y frenar escribiendo, no solo tocando", () => {
-  it.each(["si", "dale si", "confirmo", "emitila", "asi esta bien"])(
+  it.each(["si", "dale si", "confirmo", "asi esta bien"])(
     '"%s" es una afirmación y NO devuelve el menú',
     (mensaje) => {
       // `no` estaba en CORTESIAS desde el principio; `si` no estaba en ningún
@@ -113,6 +113,25 @@ describe("B3 · se puede aceptar y frenar escribiendo, no solo tocando", () => {
       expect(r.mostrar_menu).toBe(false);
     },
   );
+
+  // "emitila" es las dos cosas según dónde caiga, y el contexto decide.
+  //
+  // Este caso vivía con los de arriba, en frío, y por eso el enrutador trataba
+  // "emitila" como un "sí" SIEMPRE: el que arrancaba la conversación pidiendo
+  // "emitila" recibía el acuse de una pregunta que nadie le había hecho. Que la
+  // afirmación exija `en_flujo` es lo que dice el escenario B3 —aceptar lo que
+  // está pendiente— y en frío la palabra vuelve a significar lo que significa.
+  it.each(["emitila", "emitilo", "emiti"])('"%s" es afirmación SOLO dentro del flujo', (mensaje) => {
+    const enFlujo = interpretarMensaje(mensaje, { ...W, en_flujo: true });
+    expect(enFlujo.via).toBe("afirmacion");
+    expect(enFlujo.mostrar_menu).toBe(false);
+  });
+
+  it.each(["emitila", "emitilo"])('"%s" en frío es un pedido de emitir', (mensaje) => {
+    const enFrio = interpretarMensaje(mensaje, W);
+    expect(enFrio.via).not.toBe("afirmacion");
+    expect(enFrio.opcion?.id).toBe("menu:emitir");
+  });
 
   it.each(["cancelalo", "para para", "no lo emitas", "mejor no", "frena"])(
     '"%s" es una cancelación y NO devuelve el menú',

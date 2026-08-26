@@ -38,8 +38,9 @@
 
 import { ClienteMcp } from "./mcpCliente.mjs";
 import { OPCIONES_MENU, interpretarMensaje } from "../dist/kapso/menu.js";
-
-const API_KAPSO = "https://api.kapso.ai/platform/v1";
+import { hoyIsoUy } from "../dist/services/fechaUy.js";
+import { WRITE_TOOL_NAMES } from "../dist/tools/register.js";
+import { env, kapso, remitentePrincipal, urlMcpConfigurada, workflowActivo } from "./kapsoCliente.mjs";
 
 // --- Argumentos --------------------------------------------------------------
 const argv = process.argv.slice(2);
@@ -69,27 +70,9 @@ function titulo(n, texto) {
   console.log(`\n${NEGRITA(`${n}. ${texto}`)}`);
 }
 
-function env(clave) {
-  return (process.env[clave] ?? "").trim();
-}
-
 // =============================================================================
 // FASE 1 — Kapso
 // =============================================================================
-async function kapso(ruta) {
-  const res = await fetch(`${API_KAPSO}${ruta}`, {
-    headers: { "X-API-Key": env("KAPSO_API_KEY") },
-  });
-  const crudo = await res.text();
-  let datos;
-  try {
-    datos = JSON.parse(crudo);
-  } catch {
-    datos = null;
-  }
-  return { status: res.status, datos };
-}
-
 /**
  * Mira el estado del canal en Kapso y devuelve la url del MCP que tiene
  * guardada, que es la ÚNICA que importa: la que está en el .env es la que vos
@@ -103,15 +86,15 @@ async function faseKapso() {
     return null;
   }
 
-  const ws = await kapso("/workflows");
+  const ws = await kapso("GET", "/workflows");
   if (ws.status !== 200) {
     anotar("kapso", "mal", `GET /workflows devolvió HTTP ${ws.status}. ¿La API key es de este proyecto?`);
     return null;
   }
 
   const flows = ws.datos?.data ?? [];
-  const activo = flows.find((w) => w.status === "active");
-  if (activo === undefined) {
+  const activo = await workflowActivo();
+  if (activo === null) {
     anotar(
       "kapso",
       "mal",
@@ -121,7 +104,7 @@ async function faseKapso() {
   }
   anotar("kapso", "ok", `Workflow "${activo.name}" activo (${activo.execution_count ?? 0} ejecuciones).`);
 
-  const trs = await kapso(`/workflows/${activo.id}/triggers`);
+  const trs = await kapso("GET", `/workflows/${activo.id}/triggers`);
   const inbound = (trs.datos?.data ?? []).find(
     (t) => t.trigger_type === "inbound_message" && t.active === true,
   );
@@ -149,7 +132,7 @@ async function faseKapso() {
   // se entregan y no vuelve ninguno. Es exactamente el síntoma "le escribo hola
   // y ni me contesta", y NO se arregla arreglando el MCP: la conversación
   // trabada sigue trabada aunque las tools vuelvan.
-  const ex = await kapso(`/workflows/${activo.id}/executions`);
+  const ex = await kapso("GET", `/workflows/${activo.id}/executions`);
   const trabadas = (ex.datos?.data ?? []).filter((e) => e.status === "handoff");
   if (trabadas.length > 0) {
     anotar(
@@ -158,7 +141,7 @@ async function faseKapso() {
       `${trabadas.length} conversación(es) EN HANDOFF: Kapso dejó de contestarlas y no avisa. Mientras sigan así, ese chat no responde ni a "hola".`,
     );
     for (const t of trabadas) {
-      const evs = await kapso(`/workflow_executions/${t.id}/events`);
+      const evs = await kapso("GET", `/workflow_executions/${t.id}/events`);
       const cambio = (evs.datos?.data ?? []).find(
         (e) => e.event_type === "status_changed" && e.payload?.to === "handoff",
       );
@@ -170,10 +153,8 @@ async function faseKapso() {
     anotar("kapso", "ok", "Ninguna conversación trabada en handoff.");
   }
 
-  const def = await kapso(`/workflows/${activo.id}/definition`);
-  const agente = (def.datos?.data?.definition?.nodes ?? []).find((n) => n.data?.node_type === "agent");
-  const mcp = (agente?.data?.config?.flow_agent_mcp_servers ?? [])[0];
-  if (mcp === undefined) {
+  const mcp = await urlMcpConfigurada(activo.id);
+  if (mcp === null) {
     anotar("kapso", "mal", "El Agent Node NO tiene ningún MCP server configurado: el agente no tiene con qué contestar.");
     return { workflowId: activo.id, url: null };
   }
@@ -281,12 +262,18 @@ function faseEnrutador() {
   let bien = 0;
   let mal = 0;
   const fallos = [];
+  const flojos = [];
 
   for (const o of OPCIONES_MENU) {
     const entradas = [
       { que: "botón", texto: o.id },
       { que: "título", texto: o.titulo },
-      ...o.sinonimos.slice(0, 3).map((s) => ({ que: "frase", texto: s })),
+      // TODOS los sinónimos, no los tres primeros. Es TypeScript puro y sin
+      // red: probar una muestra no ahorra nada medible y deja la mayoría del
+      // vocabulario sin verificar. Las dos colisiones que encontró la primera
+      // corrida de este script estaban justamente en el vocabulario, no en la
+      // maquinaria.
+      ...o.sinonimos.map((s) => ({ que: "frase", texto: s })),
     ];
     for (const e of entradas) {
       const r = interpretarMensaje(e.texto, { capabilityMode: modo });
@@ -295,8 +282,15 @@ function faseEnrutador() {
       const acerto =
         r.opcion?.id === o.id ||
         (r.via === "no_disponible" && o.requiereEscritura === true && modo === "read_only");
-      if (acerto) bien++;
-      else {
+      // Llegar por `aproximado` es llegar por parecido, no por certeza: el
+      // enrutador mismo marca esa vía como "se le pareció". Cuenta como acierto
+      // —el usuario termina donde quería— pero se lista aparte, porque un
+      // sinónimo que solo se alcanza por typo es un sinónimo que conviene
+      // escribir bien en el catálogo.
+      if (acerto) {
+        bien++;
+        if (r.via === "aproximado") flojos.push(`${o.id}: "${e.texto}" llega solo por parecido`);
+      } else {
         mal++;
         fallos.push(`${o.id}: ${e.que} "${e.texto}" → via=${r.via} opcion=${r.opcion?.id ?? "null"}`);
       }
@@ -307,6 +301,11 @@ function faseEnrutador() {
   else {
     anotar("enrutador", "mal", `${mal} de ${bien + mal} entradas NO llegaron a su opción:`);
     for (const f of fallos.slice(0, 20)) console.log(`      · ${f}`);
+  }
+
+  if (flojos.length > 0) {
+    anotar("enrutador", "ojo", `${flojos.length} entradas llegan solo por parecido:`);
+    for (const f of flojos.slice(0, 8)) console.log(`      · ${f}`);
   }
 
   // Los casos que no son opciones del menú y que igual tienen que tener una
@@ -338,8 +337,14 @@ function faseEnrutador() {
  * contesta "no autorizado" y el simulador reportaría un canal roto que en
  * realidad está bien cerrado.
  */
-function argumentos(nombre, remitente) {
-  const hoy = new Date().toISOString().slice(0, 10);
+function argumentos(nombre, remitente, idComprobante) {
+  // `hoyIsoUy`, no `toISOString()`: el HANDBOOK §4.6 dice que es la única
+  // respuesta válida a "¿qué día es?", y acá no es cosmético. Corriendo esto a
+  // las 21:30 de Montevideo, UTC ya está en mañana: el simulador pediría un día
+  // que todavía no pasó y —el 1º a la mañana— un período de otro mes. Reportar
+  // cero ventas por la zona horaria es exactamente la falla inventada contra la
+  // que este script existe para no cometer.
+  const hoy = hoyIsoUy();
   const porTool = {
     biller_menu_whatsapp: { mensaje: "hola", enviar: false },
     biller_emision_guiada: { mensaje: "hola", enviar: false },
@@ -350,19 +355,64 @@ function argumentos(nombre, remitente) {
     biller_reporte_diario: { enviar: false },
     biller_resumen_facturacion_periodo: { periodo: hoy.slice(0, 7) },
     biller_plan_anulacion: { tipo_comprobante: 101, serie: "A", numero: 1 },
+    // Estas dos NO se pueden probar con un id inventado: necesitan uno que
+    // exista. Se las llama solo si `idComprobante` vino de la lista real.
+    biller_obtener_comprobante: { id: idComprobante },
+    biller_obtener_pdf: { id: idComprobante, incluir_base64: false },
   };
   return { remitente, ...(porTool[nombre] ?? {}) };
 }
 
-/** Tools que NO se llaman ni en broma: emiten, anulan, o le escriben a un tercero. */
+/** Tools que no se pueden probar sin un comprobante que exista de verdad. */
+const NECESITAN_COMPROBANTE = new Set(["biller_obtener_comprobante", "biller_obtener_pdf"]);
+
+/**
+ * Busca un comprobante real para poder probar las que piden un id.
+ *
+ * Sin esto, `biller_obtener_comprobante` y `biller_obtener_pdf` se llamaban con
+ * un id inventado y el simulador reportaba dos fallas que eran suyas. Y si la
+ * empresa no tiene comprobantes en la ventana, la respuesta honesta no es un
+ * error: es "no hay con qué probar esto".
+ */
+async function buscarUnComprobante(cliente, remitente) {
+  const r = await cliente.llamar("biller_listar_comprobantes_emitidos", { remitente, limit: 1 });
+  if (!r.ok) return null;
+  try {
+    const lista = JSON.parse(r.texto ?? "{}").comprobantes ?? [];
+    return lista[0]?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ¿El error lo causó el simulador al armar los argumentos, o la tool al correr?
+ *
+ * Un `-32602 Input validation error` significa que los argumentos ni siquiera
+ * pasaron el schema: es un bug de `argumentos()`, no de la tool. Marcarlo igual
+ * que "no hay comprobantes en ese período" hacía que el veredicto cerrara en
+ * verde con el diagnosticador roto — que es la peor falla posible para esto.
+ */
+function esCulpaDelSimulador(texto) {
+  const t = texto ?? "";
+  return t.includes("Input validation error") || t.includes('"kind":"validation"');
+}
+
+/**
+ * Tools que NO se llaman ni en broma: emiten, anulan, o le escriben a un tercero.
+ *
+ * LAS DE ESCRITURA SALEN DE `WRITE_TOOL_NAMES`, no de una lista escrita acá.
+ * Copiadas a mano, el día que se registre una tool de escritura nueva nadie se
+ * va a acordar de agregarla —es un archivo que se toca por otra razón— y este
+ * script la va a LLAMAR. O sea: un script de diagnóstico emitiendo un CFE real
+ * porque una lista quedó vieja. Es el mismo accidente que esta misma rama
+ * arregla en `ORIGENES_IMPUTACION`, pero con consecuencia fiscal.
+ *
+ * Las dos que se suman son de lectura y no tocan plata, pero le mandan un
+ * WhatsApp a un tercero —al cliente que le debe— y eso no se hace para probar.
+ */
 const INTOCABLES = new Set([
-  "biller_emitir_comprobante",
-  "biller_anular_comprobante",
-  "biller_crear_cliente",
-  "biller_cargar_producto",
-  "biller_crear_recibo",
-  "biller_cancelar_recibo",
-  "biller_crear_pago",
+  ...WRITE_TOOL_NAMES,
   "biller_enviar_comprobante_whatsapp",
   "biller_recordatorio_cobro",
 ]);
@@ -370,37 +420,65 @@ const INTOCABLES = new Set([
 async function faseEjecucion(cliente, nombres) {
   titulo(5, "EJECUCIÓN — las tools de lectura, contra Biller de verdad");
 
-  const remitente = (env("BILLER_REMITENTES_AUTORIZADOS").split(",")[0] ?? "").trim();
+  const remitente = remitentePrincipal();
   if (remitente === "") {
     anotar("ejecucion", "mal", "No hay BILLER_REMITENTES_AUTORIZADOS: la barrera de entrada va a rechazar todo.");
     return;
   }
 
-  const yaVistas = new Set();
+  // De quién es cada tool, para poder decir "esto es la opción 4 del menú".
+  const duenio = new Map();
   for (const o of OPCIONES_MENU) {
-    const leibles = o.tools.filter((t) => !INTOCABLES.has(t) && nombres.has(t) && !yaVistas.has(t));
-    if (leibles.length === 0) {
-      const saltadas = o.tools.filter((t) => INTOCABLES.has(t));
-      if (saltadas.length > 0) {
-        console.log(`  ${marcador.ojo} ${o.id.padEnd(22)} salteada (escribe: ${saltadas.join(", ")})`);
-      }
+    for (const t of o.tools) if (!duenio.has(t)) duenio.set(t, o.id);
+  }
+
+  /**
+   * SE RECORREN TODAS LAS TOOLS DE LECTURA, no solo las que alcanza el menú.
+   *
+   * Recorrer `OPCIONES_MENU` parecía lo correcto —la spec pedía "cada botón"—
+   * y dejaba afuera justo la más importante: `biller_menu_whatsapp` no figura
+   * en los `tools` de ninguna opción, porque es la que INTERPRETA el mensaje,
+   * no la que contesta una. O sea que la tool que responde "hola" —el síntoma
+   * que originó todo esto— era la única que el simulador nunca ejecutaba.
+   * Igual `biller_health_check` y `biller_posicion_iva`.
+   *
+   * El catálogo del wire es la lista honesta de lo que hay que probar. El menú
+   * solo sirve para etiquetar.
+   */
+  const aProbar = [...nombres].filter((t) => !INTOCABLES.has(t)).sort((a, b) => {
+    const da = duenio.get(a) ?? "zzz";
+    const db = duenio.get(b) ?? "zzz";
+    return da === db ? a.localeCompare(b) : da.localeCompare(db);
+  });
+
+  const idComprobante = await buscarUnComprobante(cliente, remitente);
+
+  for (const t of aProbar) {
+    const etiqueta = (duenio.get(t) ?? "(fuera del menú)").padEnd(22);
+    if (NECESITAN_COMPROBANTE.has(t) && idComprobante === null) {
+      anotar("ejecucion", "ojo", `${etiqueta} ${t.padEnd(38)} sin probar: la empresa no tiene ningún comprobante emitido.`);
       continue;
     }
-    for (const t of leibles) {
-      yaVistas.add(t);
-      const r = await cliente.llamar(t, argumentos(t, remitente));
-      const muestra = (r.texto ?? "").replace(/\s+/g, " ").slice(0, 88);
-      if (r.ok) {
-        anotar("ejecucion", "ok", `${o.id.padEnd(22)} ${t.padEnd(38)} ${muestra}`);
-      } else if (r.capa === "tool") {
-        // La tool contestó un error de negocio. Viajó y se ejecutó: el canal
-        // anda. Va en amarillo, no en rojo.
-        anotar("ejecucion", "ojo", `${o.id.padEnd(22)} ${t.padEnd(38)} ${muestra}`);
-      } else {
-        anotar("ejecucion", "mal", `${o.id.padEnd(22)} ${t.padEnd(38)} [${r.capa}] ${r.detalle}`);
-      }
+    const r = await cliente.llamar(t, argumentos(t, remitente, idComprobante));
+    const muestra = (r.texto ?? "").replace(/\s+/g, " ").slice(0, 84);
+    if (r.ok) {
+      anotar("ejecucion", "ok", `${etiqueta} ${t.padEnd(38)} ${muestra}`);
+    } else if (r.capa === "tool" && esCulpaDelSimulador(r.texto)) {
+      // NO es lo mismo "la tool contestó que no hay datos" que "la llamé mal".
+      // Lo segundo es un bug DE ACÁ, y en amarillo se lee como si la tool
+      // anduviera: el veredicto salía 0 con el simulador roto.
+      anotar("ejecucion", "mal", `${etiqueta} ${t.padEnd(38)} el simulador la llamó mal: ${muestra}`);
+    } else if (r.capa === "tool") {
+      // Error de negocio: viajó, se ejecutó y contestó. El canal anda.
+      anotar("ejecucion", "ojo", `${etiqueta} ${t.padEnd(38)} ${muestra}`);
+    } else {
+      anotar("ejecucion", "mal", `${etiqueta} ${t.padEnd(38)} [${r.capa}] ${r.detalle}`);
     }
   }
+
+  const salteadas = [...nombres].filter((t) => INTOCABLES.has(t));
+  console.log(`  ${marcador.ojo} ${salteadas.length} tools sin probar porque escriben o le mandan a un tercero:`);
+  console.log(`      ${salteadas.join(", ")}`);
 }
 
 // =============================================================================
@@ -408,10 +486,19 @@ async function faseEjecucion(cliente, nombres) {
 // =============================================================================
 console.log(NEGRITA("Simulador del canal de WhatsApp") + " — recorre las cinco capas y dice cuál falla.");
 
+// La URL se resuelve SIEMPRE, corra o no la fase 1.
+//
+// Antes se leía solo dentro de `faseKapso`, así que `--solo ejecucion` se
+// quedaba sin URL y reportaba "TRANSPORTE: mal — no sé a qué URL apunta Kapso"
+// con el canal perfectamente sano. Un diagnosticador que inventa una falla
+// cuando lo corrés en modo parcial enseña a desconfiar de todo lo que dice.
 let url = URL_FORZADA;
 if (corre("kapso")) {
   const r = await faseKapso();
   if (url === undefined) url = r?.url ?? undefined;
+} else if (url === undefined && env("KAPSO_API_KEY") !== "") {
+  const w = await workflowActivo();
+  if (w !== null) url = (await urlMcpConfigurada(w.id))?.url;
 }
 
 if (corre("enrutador")) faseEnrutador();

@@ -35,7 +35,7 @@ import { crearServidorMcp } from "../server.js";
 import { autenticarConTenants } from "../tenants/acceso.js";
 import { cargarTenants, entornoDe } from "../tenants/registry.js";
 import { createToolContext } from "../tools/register.js";
-import { conDialectoLimpio, opcionesLivianas } from "./dialecto.js";
+import { conDialectoLimpio } from "./dialecto.js";
 
 /**
  * Decide el modo de capacidades en serverless.
@@ -146,6 +146,6 @@ export async function manejarRequestServerless(
     void server.close();
   });
 
-  await server.connect(conDialectoLimpio(transport, opcionesLivianas(config.wireLiviano)));
+  await server.connect(conDialectoLimpio(transport, { quitarOutputSchema: config.wireLiviano }));
   await transport.handleRequest(req, res, parsedBody);
 }

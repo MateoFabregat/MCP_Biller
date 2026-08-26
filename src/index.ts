@@ -24,7 +24,7 @@ import { cargarTenants, entornoDe } from "./tenants/registry.js";
 import { MCP_PATH, iniciarTransporteHttp } from "./transport/http.js";
 import { validarTokenDeArranque } from "./transport/httpAuth.js";
 import { createToolContext, getRegisteredToolNames } from "./tools/register.js";
-import { conDialectoLimpio, opcionesLivianas } from "./transport/dialecto.js";
+import { conDialectoLimpio } from "./transport/dialecto.js";
 
 type Transporte = "stdio" | "http";
 
@@ -136,7 +136,7 @@ async function main(): Promise<void> {
 
   const server = crearServidorMcp(ctx, inspection.capabilityMode);
   await server.connect(
-    conDialectoLimpio(new StdioServerTransport(), opcionesLivianas(inspection.wireLiviano)),
+    conDialectoLimpio(new StdioServerTransport(), { quitarOutputSchema: inspection.wireLiviano }),
   );
 
   logger.info("biller-mcp-server listo (stdio).", {

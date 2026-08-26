@@ -50,6 +50,23 @@ Después, los tres comandos que vas a usar todo el tiempo:
 npm run typecheck && npm test && npm run check:readonly
 ```
 
+Y cuando lo que falla es **el WhatsApp** —el usuario escribe y no le contesta
+nadie— hay dos comandos más, porque ese síntoma no deja rastro en ningún lado:
+
+```bash
+npm run diagnostico    # las cinco capas por separado; la primera que falla explica el resto
+npm run conversar -- --guion   # conversaciones reales contra el agente de Kapso
+```
+
+`diagnostico` recorre Kapso (workflow, trigger, conversaciones trabadas en
+handoff), el transporte MCP **contra la URL que Kapso tiene guardada** —no
+contra localhost—, el catálogo de tools, el enrutador entero (los 382 sinónimos)
+y la ejecución real de cada tool de lectura. No emite, no anula y no manda
+WhatsApps: lo que escribe se lista y se saltea.
+
+`conversar` sí manda mensajes reales al número de la allowlist. Úsalo cuando
+`diagnostico` da todo verde y querés ver qué hace el agente con una frase.
+
 El tercero es el menos obvio y el más importante: verifica **estáticamente** que
 fuera de `src/write/` no exista ningún POST. Es lo que garantiza que agregar una
 tool de lectura no pueda emitir un comprobante por accidente.

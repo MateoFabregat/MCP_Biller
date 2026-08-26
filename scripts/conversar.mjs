@@ -10,7 +10,7 @@
 //
 // Este script arranca ejecuciones reales del workflow y lee la traza de eventos
 // que deja Kapso: qué tools se le configuraron al agente, cuáles llamó, qué
-// contestó. Es la misma conversación que tendría el usuario, pero观 observable.
+// contestó. Es la misma conversación que tendría el usuario, pero observable.
 //
 // OJO: LOS MENSAJES SON REALES. El agente contesta por WhatsApp al número de la
 // conversación. Esto no es un dry-run: es la conversación de verdad, mirada
@@ -22,34 +22,13 @@
 //   node --env-file=.env scripts/conversar.mjs --guion
 // =============================================================================
 
-const API = "https://api.kapso.ai/platform/v1";
-
-function env(clave) {
-  return (process.env[clave] ?? "").trim();
-}
-
-async function kapso(metodo, ruta, cuerpo) {
-  const res = await fetch(`${API}${ruta}`, {
-    method: metodo,
-    headers: { "X-API-Key": env("KAPSO_API_KEY"), "content-type": "application/json" },
-    ...(cuerpo === undefined ? {} : { body: JSON.stringify(cuerpo) }),
-  });
-  const crudo = await res.text();
-  let datos;
-  try {
-    datos = JSON.parse(crudo);
-  } catch {
-    datos = { crudo: crudo.slice(0, 300) };
-  }
-  return { status: res.status, datos, ok: res.ok };
-}
-
-async function workflowActivo() {
-  const ws = await kapso("GET", "/workflows");
-  const w = (ws.datos?.data ?? []).find((x) => x.status === "active");
-  if (w === undefined) throw new Error("No hay ningún workflow en estado active.");
-  return w;
-}
+import {
+  CLAVE_VARIABLES,
+  TRIGGER_API,
+  kapso,
+  remitentePrincipal,
+  workflowActivo,
+} from "./kapsoCliente.mjs";
 
 /**
  * Se asegura de que el flow tenga un trigger `api_call`, que es lo que permite
@@ -61,13 +40,11 @@ async function workflowActivo() {
  */
 async function asegurarTriggerApi(workflowId) {
   const trs = await kapso("GET", `/workflows/${workflowId}/triggers`);
-  // "api_call", no "api": el resto del vocabulario de Kapso da 422 "Invalid
-  // trigger type". Lo verifiqué probando; la API no lista los tipos válidos.
-  const yaHay = (trs.datos?.data ?? []).some((t) => t.trigger_type === "api_call" && t.active === true);
+  const yaHay = (trs.datos?.data ?? []).some((t) => t.trigger_type === TRIGGER_API && t.active === true);
   if (yaHay) return "ya estaba";
 
   const r = await kapso("POST", `/workflows/${workflowId}/triggers`, {
-    trigger: { trigger_type: "api_call", active: true },
+    trigger: { trigger_type: TRIGGER_API, active: true },
   });
   if (!r.ok) throw new Error(`No pude crear el trigger api_call: ${r.status} ${JSON.stringify(r.datos).slice(0, 300)}`);
   return "creado";
@@ -183,13 +160,17 @@ const GUION_COMPLETO = argv.includes("--guion");
 // El destinatario sale de la allowlist, no de un argumento: mandarle mensajes
 // reales a un número que no está autorizado es exactamente lo que la barrera
 // existe para impedir, y un script de pruebas no es una excepción.
-const telefono = env("BILLER_REMITENTES_AUTORIZADOS").split(",")[0].trim();
+const telefono = remitentePrincipal();
 if (telefono === "") {
   console.error("Falta BILLER_REMITENTES_AUTORIZADOS: no sé a qué número escribirle.");
   process.exit(1);
 }
 
 const w = await workflowActivo();
+if (w === null) {
+  console.error('No hay ningún workflow en estado "active". Un draft no corre aunque el trigger esté prendido.');
+  process.exit(1);
+}
 console.log(`Workflow: ${w.name} (${w.id})`);
 console.log(`Trigger api: ${await asegurarTriggerApi(w.id)}`);
 console.log(`Destinatario: ${telefono}\n`);
