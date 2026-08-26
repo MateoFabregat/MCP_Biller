@@ -6,20 +6,25 @@ consulten y operen Biller de forma conversacional.
 
 Tiene **dos modos operativos** (controlados por `BILLER_CAPABILITY_MODE`):
 
-- **`read_only` (default):** solo las 6 tools de lectura se registran en el
+- **`read_only` (default):** solo las 27 tools de lectura se registran en el
   servidor MCP. Solo `GET`. Modo seguro para producción y uso sin riesgo.
-- **`write_enabled`:** se agregan las 6 tools de escritura (`POST`) —
+- **`write_enabled`:** se agregan las 7 tools de escritura (`POST`) —
   protegidas por dry-run + confirmación + gate de ambiente + idempotencia + audit.
   La **ejecución real** del `POST` además requiere `BILLER_WRITE_ENABLED=true`.
 
 - Stack: TypeScript + Node.js, `@modelcontextprotocol/sdk`, Zod, Vitest. Transporte: **stdio**.
-- Fuente de verdad de endpoints/campos:
-  **[OpenAPI público de Biller](https://francodest-biller-v3-docs.apidocumentation.com/openapi.json)**.
+- Fuente de verdad de endpoints/campos: la **documentación oficial de la API de
+  Biller** (OpenAPI). La emisión de CFE vive en **`POST /v3/comprobantes/emitir`**;
+  el resto de las operaciones sigue en `v2`.
 
-> **Advertencia fiscal.** Emitir o anular un CFE tiene consecuencias **reales e
-> irreversibles** ante DGI. La escritura está **apagada por defecto**
-> (`BILLER_WRITE_ENABLED` no seteado) y, aun encendida, exige confirmación
-> explícita por operación. **Probá siempre primero en `https://test.biller.uy`.**
+> **Advertencia fiscal.** Emitir o anular un CFE genera un documento **real**
+> ante DGI. No es irreversible —una venta mal emitida se anula con una Nota de
+> Crédito, y si esa anulación fue el error, una Nota de Débito le devuelve
+> validez al original— pero **cada corrección es otro comprobante**, con su
+> numeración y su envío a DGI: se arregla, no se deshace. Por eso la escritura
+> está **apagada por defecto** (`BILLER_WRITE_ENABLED` no seteado) y, aun
+> encendida, exige confirmación explícita por operación.
+> **Probá siempre primero en `https://test.biller.uy`.**
 
 ---
 
@@ -30,20 +35,28 @@ Tiene **dos modos operativos** (controlados por `BILLER_CAPABILITY_MODE`):
   campos reales que devuelve Biller (ver [Campos del comprobante](#campos-del-comprobante-lectura)).
 - Obtiene **un comprobante** por `id`, `numero_interno` o terna `tipo+serie+numero`
   (con `id` incluye el detalle de `items[]` tipado).
+- Descarga el **PDF** de un comprobante (`GET /v2/comprobantes/pdf`).
 - Lista **comprobantes recibidos** DGI (`GET /v2/comprobantes/recibidos/obtener`).
-- **Resumen de facturación por período** (totales por moneda y tipo; ventas suman,
-  NC restan, ND suman). Mantiene los totales separados por moneda e incluye
-  `conteo_por_estado`.
+- **Resumen de facturación por período**, con cortes por **sucursal**, día, mes,
+  tipo, moneda o cliente (ver [Reportes](#reportes-cuánto-vendí-y-dónde)).
+- **Vencimientos y aging**: qué vence esta semana y qué ya venció, por tramos y
+  por cliente (ver [Vencimientos](#vencimientos-qué-tengo-que-cobrar)).
+- **Cuenta corriente**: deuda **neta** por cliente y por factura — lo facturado a
+  crédito menos lo cobrado, con recibos totales y parciales
+  (ver [Cuenta corriente](#cuenta-corriente-quién-me-debe-plata)).
+- **Alertas operativas**: comprobantes rechazados por DGI y CAEs por agotarse o
+  vencer (ver [Alertas](#alertas-operativas)).
 - **Datos DGI por RUT** (nombre, datos de entidad, actividad, certificado único).
 - **Health check** (no llama a Biller, nunca revela el token).
 
 **Escritura (con barreras, ver más abajo)**
-- **Emitir** comprobante (`POST /v2/comprobantes/crear`).
+- **Emitir** comprobante (`POST /v3/comprobantes/emitir`).
 - **Anular** comprobante (`POST /v2/comprobantes/anular`).
 - **Crear cliente** (`POST /v2/clientes/crear`).
 - **Cargar producto/servicio** (`POST /v2/productos/cargar`).
 - **Crear recibo** (`POST /v2/recibos/crear`).
 - **Cancelar recibo** (`POST /v2/recibos/cancelar`).
+- **Registrar pago** (`POST /v2/pagos/crear`).
 
 ## Límites
 
@@ -57,7 +70,12 @@ Tiene **dos modos operativos** (controlados por `BILLER_CAPABILITY_MODE`):
   cuando Biller lo devuelve.
 - No hay tool de listado de clientes porque el OpenAPI público no documenta un
   endpoint GET para esa operación.
-- No implementa descarga de PDF.
+- **La cobranza sí se lee, pero la imputación factura-por-factura puede ser
+  estimada.** Los recibos son CFE y vuelven en `GET /v2/comprobantes/obtener` con
+  `indicador_cobranza_propia = 1`, así que el **saldo por cliente es exacto**. Lo
+  que el listado no trae es a qué factura se imputó cada cobro: `biller_cuenta_corriente`
+  consulta cada recibo por `id` para averiguarlo y, si la API no lo devuelve, cae a
+  **FIFO** (lo más viejo primero) declarándolo en `estrategia`. Ver [PLAN_V2](docs/PLAN_V2.md).
 - No loguea ni devuelve `BILLER_API_TOKEN`; el audit no guarda el payload completo.
 
 ---
@@ -73,21 +91,178 @@ Tiene **dos modos operativos** (controlados por `BILLER_CAPABILITY_MODE`):
 | `biller_listar_comprobantes_emitidos` | `/v2/comprobantes/obtener` | Filtros locales `moneda`/`cliente_rut`/`limit` y `emitidas_desde`/`emitidas_hasta` (por fecha de **emisión** fiscal). |
 | `biller_listar_comprobantes_recibidos` | `/v2/comprobantes/recibidos/obtener` | Solo montos totales (sin items). |
 | `biller_obtener_comprobante` | `/v2/comprobantes/obtener` | Por `id`, `numero_interno` o terna. Con `id` trae `items[]` tipado. |
-| `biller_resumen_facturacion_periodo` | `/v2/comprobantes/obtener` | Totales por moneda/tipo + `conteo_por_estado`. Filtros locales por fecha de emisión. |
+| `biller_obtener_pdf` | `/v2/comprobantes/pdf` | Representación impresa en base64. Por defecto solo devuelve metadatos: pedí `incluir_base64=true` para el archivo. |
+| `biller_resumen_facturacion_periodo` | `/v2/comprobantes/obtener` | Totales del período con `agrupar_por`. Ver [Reportes](#reportes-cuánto-vendí-y-dónde). |
+| `biller_vencimientos` | `/v2/comprobantes/obtener` | Aging por `fecha_vencimiento` + ranking de clientes. Monto **bruto**: no descuenta cobros. |
+| `biller_cuenta_corriente` | `/v2/comprobantes/obtener` | Deuda **neta** (facturado − cobrado), por cliente y por factura. Recibos totales y parciales. |
+| `biller_alertas_operativas` | `/v2/comprobantes/obtener` + `/v2/dgi/empresas/certificado-unico` | Rechazos DGI, CAE por agotarse/vencer, emisión tardía, racha sin facturar y certificado DGI. |
+| `biller_plata_en_riesgo` | `/v2/comprobantes/obtener` | Las 6 alertas sobre el dinero: cliente en fuga, deudor grande, deuda hacia los 90 días, concentración en alza, mes por debajo, devoluciones disparadas. Cada una con acción y monto expuesto. |
+| `biller_ranking_clientes` | `/v2/comprobantes/obtener` | Top, nuevos, dormidos, concentración (HHI) y ratio de notas de crédito. **"Nuevo" exige `detectar_nuevos=true`**: sin mirar antes del período no se puede saber, y `es_nuevo` viene en `null` en vez de adivinar. |
+| `biller_ranking_productos` | `/v2/comprobantes/obtener` | Unidades e importe por producto + **dispersión de precios** entre clientes. N+1 acotado: declara `cobertura_importe_pct`. |
+| `biller_ranking_sucursales` | `/v2/comprobantes/obtener` | Participación de cada local y su **evolución en puntos** contra el período anterior: muestra la sucursal que factura más y pesa menos. Nombres desde `BILLER_SUCURSALES_JSON`. |
+| `biller_cohortes_clientes` | `/v2/comprobantes/obtener` | Retención por mes de alta: de los que entraron en marzo, cuántos siguen comprando. El "alta" es la primera compra **del rango** (Biller no expone fecha de alta), así que las primeras cohortes se marcan `posible_contaminada`. |
+| `biller_comparar_periodos` | `/v2/comprobantes/obtener` | Variación por moneda, proyección de cierre (run-rate) y exposición cambiaria. |
+| `biller_compras_proveedores` | `/v2/comprobantes/recibidos/obtener` | A quién le comprás y cuánto. Devengado, **no** pagado. |
+| `biller_requisitos_comprobante` | — | *"¿Qué necesito para emitir esto?"* Devuelve los campos que faltan y **una** pregunta por vez. Sin red. Contempla la regla de las 5.000 UI. |
+| `biller_emision_guiada` | — | El paso ANTERIOR a `requisitos`, para el chat: pregunta **a quién** se le factura y de ahí *deduce* el tipo de CFE (RUT → e-Factura, CI → e-Ticket). Devuelve una pregunta por vez con el mensaje tocable armado. Sin red. Ver [FLUJO_WHATSAPP.md](docs/FLUJO_WHATSAPP.md) §3. |
+| `biller_plan_anulacion` | `/v2/comprobantes/obtener` | *"¿Cómo anulo esto?"* NC para anular, ND para revertir la anulación. Detecta si ya tiene una NC encima. |
+| `biller_resolver_nombre` | `/v2/comprobantes/obtener` | *"Facturale a Distribuidora **Peres**"* → quién es. Resuelve un nombre escrito a mano —con typo, abreviado, sin el "S.R.L."— contra los clientes y productos REALES de la empresa. Ante la duda devuelve candidatos y **exige preguntar**, en vez de elegir. Ver [`services/resolver.ts`](src/services/resolver.ts). |
+| `biller_reporte_diario` | varios | El digest operativo, listo para WhatsApp. Con `enviar=true` lo manda vía Kapso (solo a números de la allowlist). |
+| `biller_catalogo_datos` | — | Qué se puede preguntar y qué **no**, con la cobertura de cada cosa. |
+| `biller_metricas` | — | Cómo viene funcionando el asistente: qué proporción de mensajes cae en "no entendí", en qué paso se abandonan las emisiones, qué tools fallan. NO toca la API ni devuelve datos de facturación. Ver [Métricas](#métricas-cómo-sabemos-que-anda). |
+| `biller_menu_whatsapp` | — | El menú del asistente por WhatsApp y el enrutador de lo que escribe el usuario. Con `enviar=true` lo manda como **lista interactiva** tocable. Ver [FLUJO_WHATSAPP.md](docs/FLUJO_WHATSAPP.md). |
+| `biller_enviar_comprobante_whatsapp` | `/v2/comprobantes/obtener` + `/pdf` | Adjunta el **PDF** de un CFE emitido a un WhatsApp, con el detalle armado desde el comprobante. El archivo no pasa por el contexto del modelo. Allowlist obligatoria. |
+| `biller_recordatorio_cobro` | `/v2/comprobantes/obtener` | Le manda **al cliente deudor** su saldo. Única tool cuyo destinatario no es el usuario: exige dry-run → `confirmation_token` → confirm, allowlist, y no repite el envío al mismo cliente el mismo día. Si la imputación es FIFO reclama el total **sin** detallar facturas. Un cliente por invocación: no manda en lote. |
+| `biller_posicion_iva` *(opt-in)* | `/v2/comprobantes/obtener` + recibidos | IVA ventas − IVA compras. **No se registra por defecto**: se parece a una declaración jurada sin serlo (`BILLER_ENABLE_IVA_ESTIMADO=true`). |
 
 **Escritura (`readOnlyHint:false`, `destructiveHint:true`)**
 
 | Tool | Endpoint |
 |---|---|
-| `biller_emitir_comprobante` | `POST /v2/comprobantes/crear` |
+| `biller_emitir_comprobante` | `POST /v3/comprobantes/emitir` (acepta `confirmar_por_whatsapp`: manda el preview como botones ✅/✖️) |
 | `biller_anular_comprobante` | `POST /v2/comprobantes/anular` |
 | `biller_crear_cliente` | `POST /v2/clientes/crear` |
 | `biller_cargar_producto` | `POST /v2/productos/cargar` |
 | `biller_crear_recibo` | `POST /v2/recibos/crear` |
 | `biller_cancelar_recibo` | `POST /v2/recibos/cancelar` |
+| `biller_crear_pago` | `POST /v2/pagos/crear` |
 
 `biller_listar_clientes` (listado GET de clientes) **no se registra**: no hay
 endpoint GET documentado (ver [Pendientes](#pendientes-de-validación-contra-biller)).
+
+> **Cómo se calcula cada número** — fórmula por fórmula, y qué parte usa IA
+> (respuesta corta: ninguna): [`docs/CALCULOS.md`](docs/CALCULOS.md).
+> **Arquitectura y diagramas:** [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md).
+> **La conversación por WhatsApp** — qué pasa cuando llega un "hola", cómo se
+> emite con botones y cómo llega el PDF: [`docs/FLUJO_WHATSAPP.md`](docs/FLUJO_WHATSAPP.md).
+> **Conexión con Kapso** (transporte HTTP, tokens, despliegue): [`docs/KAPSO.md`](docs/KAPSO.md).
+
+---
+
+## Reportes: cuánto vendí y dónde
+
+`biller_resumen_facturacion_periodo` responde preguntas del tipo *"¿cuánto vendí
+en cada local en junio?"*.
+
+```jsonc
+{ "periodo": "2026-06", "agrupar_por": ["sucursal"] }
+```
+
+**`periodo`** acepta `2026-06` (mes), `2026` (año), `2026-06-15` (día), `hoy`,
+`ayer`, `mes_actual`, `mes_pasado`, `ultimos_7_dias`, `ultimos_30_dias`,
+`ultimos_90_dias`, `anio_actual`. También podés pasar `desde`/`hasta` en `aaaa-mm-dd`.
+
+**`agrupar_por`** admite `sucursal`, `dia`, `mes`, `tipo_comprobante`, `moneda`,
+`cliente` y `estado`, y se pueden combinar (`["sucursal","mes"]` cruza local por mes).
+
+Tres decisiones que hacen que los números **coincidan con Biller**:
+
+1. **El período es por fecha de EMISIÓN fiscal.** Los parámetros `desde`/`hasta`
+   de la API filtran por fecha de *creación* (carga en Biller), así que una venta
+   del 30/06 cargada el 02/07 quedaría afuera. La tool consulta por creación con
+   un margen y después filtra localmente por emisión.
+2. **`solo_aceptados` viene en `true`.** El total cuenta solo los comprobantes en
+   estado `"Aceptado DGI"`, que es el criterio con el que Biller muestra sus
+   totales. El total con todos los estados igual se devuelve en
+   `totales_por_moneda_todos_los_estados` para comparar.
+3. **Los rangos largos se parten en ventanas** de 7 días (ajustable con
+   `ventana_dias`) y se unen deduplicando por `id`: la API no pagina y devuelve
+   500 con rangos amplios.
+
+Para que los grupos digan `Sucursal 6 (Pocitos)` en vez de `Sucursal 6`,
+configurá `BILLER_SUCURSALES_JSON` (Biller no expone un endpoint de sucursales).
+
+---
+
+## Vencimientos: qué tengo que cobrar
+
+`biller_vencimientos` responde *"¿qué facturas vencen esta semana?"* y *"¿quién
+me debe más?"*.
+
+```jsonc
+{ "horizonte_dias": 7 }        // lo que vence en los próximos 7 días + lo ya vencido
+```
+
+Devuelve el detalle de facturas ordenado de la más vencida a la más lejana, los
+totales por moneda separados en **vencido** y **por vencer**, el aging por tramos
+(1-30, 31-60, 61-90, +90 días) y un ranking `por_cliente` con el monto vencido y
+los días de atraso máximo.
+
+> ⚠️ **Es el monto bruto, no la deuda neta.** Esta tool no descuenta los cobros:
+> una factura ya cobrada aparece igual. Los recibos se detectan y se excluyen del
+> listado (cobrar un recibo no tiene sentido), y si hay alguno en la ventana la
+> respuesta avisa que el monto mostrado sobra. `cobranzas_imputadas` es siempre
+> `false`. **Para la deuda real usá `biller_cuenta_corriente`.**
+
+Tres decisiones que conviene conocer:
+
+1. **`dias_atras` (default 180)** es la ventana de emisión que se consulta. Una
+   factura que vence esta semana pudo emitirse hace meses; si trabajás con plazos
+   más largos, subilo (cada 7 días es una llamada más a la API).
+2. **`solo_a_credito` viene en `true`**: descarta el contado con la heurística
+   `fecha_vencimiento <= fecha_emision`, porque Biller no expone la forma de pago
+   en el GET. Pasá `false` para incluirlo.
+3. **Solo cuentan ventas y notas de débito.** Las notas de crédito restan deuda,
+   no se cobran, así que no se listan como cobrables.
+
+## Cuenta corriente: quién me debe plata
+
+`biller_cuenta_corriente` responde lo que vencimientos no puede: **lo facturado a
+crédito menos lo cobrado**, por cliente y por factura.
+
+La clave es que **un recibo es un CFE**: se emite como e-Ticket (101) o e-Factura
+(111) y vuelve en el mismo `GET /v2/comprobantes/obtener`, marcado con
+`indicador_cobranza_propia = 1`. Puede ser **total, parcial o un "Adelanto"** sin
+referencias. Con eso, facturas, notas de crédito y cobros salen de una sola
+consulta.
+
+```jsonc
+{ "dias_atras": 365 }          // toda la deuda abierta del último año
+{ "cliente_rut": "217832560011" }  // el estado de cuenta de un cliente
+```
+
+Devuelve por cada factura `total`, `cobrado`, `saldo` y `estado_cobro`
+(`pendiente` / `parcial` / `cancelada`), el aging calculado sobre el **saldo neto**,
+y un ranking `por_cliente` con saldo, vencido y días de atraso.
+
+**Dos niveles de precisión, y la respuesta dice cuál usó** (`estrategia`):
+
+| Nivel | Precisión | Costo |
+|---|---|---|
+| Saldo **por cliente** | **Exacto** siempre | 0 llamadas extra |
+| Saldo **por factura** | Exacto si `estrategia: "referencias"`; estimado si `"fifo"`/`"mixta"` | 1 llamada por recibo |
+
+El listado no trae a qué factura se imputó cada cobro, así que la tool consulta
+cada recibo por `id` (N+1 **solo sobre recibos**, que son bastantes menos que las
+facturas; apagable con `imputar_por_referencias=false`). Si la API no devuelve las
+referencias, imputa **FIFO** —lo más viejo primero dentro de cada cliente+moneda,
+el criterio contable estándar— y lo declara como estimación en `estrategia` y en
+los warnings.
+
+El cobro que no entra en ninguna factura abierta (un adelanto, o una factura
+anterior a la ventana) **no se fuerza**: va a `saldo_a_favor_por_moneda`. Bajar el
+saldo con plata que no le corresponde a esa factura sería peor que no imputarla.
+
+## Alertas operativas
+
+`biller_alertas_operativas` barre un período y devuelve lo que hay que atender,
+usando campos que la API **ya devuelve** en cada comprobante y que normalmente no
+se miran hasta que rompen:
+
+- **Rechazos DGI** (`estado`): un CFE "Rechazado DGI" no tiene validez fiscal —
+  la venta figura en el sistema y no existe ante DGI. Severidad `critica`.
+  "Pendiente DGI" y similares salen como `advertencia`.
+- **CAE por agotarse o vencer** (`cae.fin`, `cae.fecha_expiracion`): cuando se
+  agota el rango autorizado o expira el CAE, la facturación se corta. Avisa con
+  ≤500 números o ≤45 días (advertencia) y ≤100 números o ≤15 días (crítico).
+
+```jsonc
+{ "periodo": "ultimos_30_dias", "severidad_minima": "advertencia" }
+```
+
+> Los números de CAE disponibles son una **estimación optimista**: solo se ven
+> los comprobantes del período consultado, así que el último número usado puede
+> ser mayor al observado. Períodos más amplios dan una estimación más ajustada.
 
 ---
 
@@ -136,17 +311,28 @@ payload exacto, y devuelve un **preview** + un `confirmation_token`.
 ```jsonc
 {
   "mode": "dry_run",
-  "endpoint": "/v2/comprobantes/crear",
+  "endpoint": "/v3/comprobantes/emitir",
   "environment": "test",
   "write_enabled": false,
   "gate": { "allowed": false, "reason": "write_disabled", "requires_allow_production": false },
   "payload_preview": { "tipo_comprobante": 101, "sucursal": 6, "items": [ /* ... */ ] },
+  "totales_estimados": { "subtotal": 200, "iva_por_tasa": { "22": 44 }, "total": 244, "exacto": true },
+  "resumen": "Total estimado: UYU 244 (neto 200 — IVA 22%: 44)",
   "confirmation_token": "a1b2…(sha256)",
   "next_step": "Para EJECUTAR, volvé a llamar … con confirm=true y confirmation_token=\"a1b2…\"",
   "no_network_call": true,
   "warnings": []
 }
 ```
+
+El preview **calcula el total localmente** (`totales_estimados` + la línea
+`resumen`) para que confirmar no sea a ciegas. Es una estimación: el total
+autoritativo es el que devuelve Biller. Si algún ítem usa una tasa que no se
+puede determinar, `exacto` baja a `false` y se explica en `advertencias`.
+
+Los documentos y contactos del receptor se **enmascaran parcialmente**
+(`2149874400**`) en vez de ocultarse: hace falta reconocer a quién se le factura
+para poder confirmar.
 
 **2. Ejecución (`confirm: true` + `confirmation_token`)** — recién acá puede hacer el
 `POST`, y solo si pasan **todas** las barreras:
@@ -157,7 +343,10 @@ payload exacto, y devuelve un **preview** + un `confirmation_token`.
 3. **Gate de producción**: si el ambiente es `production`, además
    `BILLER_ALLOW_PRODUCTION_WRITES=true` **y** el argumento `allow_production=true`.
 4. **Idempotencia**: una misma `idempotency_key` no se ejecuta dos veces en la sesión
-   (también se envía como header `Idempotency-Key`).
+   (también se envía como header `Idempotency-Key`). Además, si el comprobante trae
+   `numero_interno`, antes de emitir se consulta a Biller si ese número ya se usó y
+   se **aborta la emisión** si existe — es la única defensa que sobrevive a un
+   reinicio del servidor (desactivable con `verificar_duplicado=false`).
 5. **Audit log**: cada intento/ejecución se registra (a stderr y, opcional, a archivo)
    con `audit_id`, endpoint, ambiente, hash del payload y estado — **nunca** el token
    ni el payload completo.
@@ -197,6 +386,7 @@ Copiá `.env.example` a `.env`. **Empezá siempre por TEST.** El `.env` está en
 | `BILLER_CAPABILITY_MODE` | No | `read_only` | `read_only` (solo lectura) \| `write_enabled` (+ tools de escritura). |
 | `BILLER_DEFAULT_EMPRESA_RUT` | No | — | Metadata local; **no** se envía a la API. |
 | `BILLER_DEFAULT_SUCURSAL_ID` | No | — | Default de `sucursal` (lectura y emisión). **ID real** de Biller (Ajustes → Sucursales), no un valor genérico. Opcional: `obtener` no lo exige. |
+| `BILLER_SUCURSALES_JSON` | No | — | Mapa `{"6":"Pocitos","7":"Centro"}` para nombrar sucursales en los reportes. Biller no expone un endpoint de sucursales. |
 | `BILLER_TIMEOUT_MS` | No | `30000` | Timeout HTTP (ms). |
 | `LOG_LEVEL` | No | `info` | `error`\|`warn`\|`info`\|`debug` (logs a **stderr**). |
 | `BILLER_WRITE_ENABLED` | No | `false` | Gate de ejecución POST. Sin esto, solo dry-run (requiere `write_enabled`). |
@@ -267,6 +457,97 @@ que aparezcan las tools de escritura. Después llamá `biller_emitir_comprobante
 
 ---
 
+## Métricas: cómo sabemos que anda
+
+Hasta acá había 900+ tests y **ninguna** métrica: no se sabía cuántos mensajes
+caían en "no entendí" ni en qué paso se abandonaban las emisiones. La prueba de
+que eso no alcanzaba es concreta — una prueba a mano encontró que **siete de
+siete frases reales** caían en "no entendí", con la suite entera en verde.
+
+`biller_metricas` contesta las tres preguntas que faltaban:
+
+```
+Mensajes: 10 | No entendidos: 20%
+
+   2  via=saludo         opcion=ninguna
+   2  via=desconocido    opcion=ninguna
+   1  via=sinonimo       opcion=emitir
+   1  via=aproximado     opcion=cobranzas
+```
+
+- **`enrutador.mensaje{via}`** — cuánto NO se entiende. Por encima del 20% la
+  gente deja de escribir.
+- **`emision.paso{paso}`** — el embudo. Si 100 llegan a "cliente" y 12 a
+  "confirmar", se abandonan 88 emisiones y se ve en qué pregunta.
+- **`resolver.consulta{clase}`** — cuántas veces hay que repreguntar.
+
+**Acá no entra un dato fiscal, y la garantía es estructural.** Las métricas
+salen por un canal (stderr, un agregador de logs, esta tool) que **no** pasa por
+la barrera de salida ni por la de entrada: un dato que se filtre por acá no lo ve
+ninguna de las dos. Por eso los nombres son una unión cerrada de TypeScript, los
+valores se validan contra un patrón estrecho, y las corridas de 8+ dígitos —RUT,
+CI, teléfono, número de comprobante— se rechazan aunque pasen ese patrón.
+
+> Ese último filtro lo agregó un test que probó un RUT **y pasó**. "El filtro
+> rechaza texto libre" no era lo mismo que "el filtro rechaza datos de un
+> cliente"; se habían tratado como la misma cosa.
+
+La instrumentación intercepta `registerTool`, igual que las barreras de entrada y
+salida: toda tool futura queda medida sin que su autor se acuerde de nada.
+
+En **serverless** los contadores casi no sirven (el proceso muere entre
+invocaciones): ahí la fuente de verdad son las líneas `"msg":"metrica"` del log,
+que se emiten igual. La respuesta lo dice en `alcance` en vez de dejar que se
+asuma.
+
+---
+
+## El borrador de emisión ya no vive en el contexto del modelo
+
+Emitir una factura por WhatsApp son diez o doce mensajes. Hasta acá el contrato
+era **"el agente manda TODO lo que sabe en cada llamada"**, y el estado vivía en
+el contexto del modelo — o sea que el flujo más caro del producto se apoyaba en
+lo menos confiable que hay. Un agente que se olvida un campo hace que al usuario
+le vuelvan a preguntar lo mismo; si se olvida el concepto del ítem, no hay forma
+de notarlo y el CFE sale sin esa línea.
+
+Pasándole `sesion` (el número de la conversación) a `biller_emision_guiada`, el
+server guarda el borrador y lo usa como **base** sobre la que aplica lo que
+llegue nuevo:
+
+```jsonc
+// mensaje 1
+{ "sesion": "+598…", "clase_receptor": "empresa", "documento": "210000000011" }
+// mensaje 2 — alcanza con el dato nuevo
+{ "sesion": "+598…", "fecha_emision": "17/08/2026" }
+```
+
+Cuatro decisiones que vale la pena conocer:
+
+- **La clave no es el teléfono, es un hash.** El número es un dato personal de un
+  tercero y terminaría en el archivo y en cada log que mencione la clave.
+- **`undefined` es "no me dijeron nada", nunca "borralo".** Si se confundieran,
+  cada llamada incompleta vaciaría medio borrador — el problema que el store vino
+  a resolver.
+- **Un borrador vencido no se reanuda, se descarta** (24 h). Uno de hace tres
+  días trae la fecha y los precios de hace tres días: reanudarlo en silencio es
+  emitir un comprobante que el usuario cree que es de hoy.
+- **Usá el `sesion.id` que devuelve la tool, no el teléfono.** El mismo número
+  escrito de dos formas —`099 123 456` y `+598 99 123 456`— son dos sesiones, y
+  `config.ts` ya decidió que adivinarle el código de país a un número uruguayo es
+  peor que avisar. El `id` es opaco y exacto: no se puede escribir de dos formas.
+- **El borrador se descarta al emitir, no antes.** Pasale ese mismo `sesion.id` a
+  `biller_emitir_comprobante` — si no hay borrador con esa clave, el dry-run te
+  avisa, que es cuando todavía se puede corregir. Se borra solo con `mode: executed` y un `2xx`: un
+  dry-run o un 422 lo conservan, porque ese es justo el momento en que más vale.
+
+La persistencia a disco es **opt-in** (`BILLER_BORRADOR_STORE_PATH`), al revés
+que la de idempotencia. Esa guarda solo una key; esta guardaría qué se vendió, a
+quién y la adenda — información comercial de la empresa y datos de sus clientes.
+En stdio y en el server HTTP largo la memoria alcanza de sobra.
+
+---
+
 ## Seguridad y límites
 
 - **Aislamiento de escritura**: todo el código que hace `POST` vive en `src/write/`.
@@ -301,17 +582,57 @@ No documentado en el OpenAPI público (no se inventó):
 6. **Semántica de fechas** (`desde`/`hasta`) → filtran por `fecha_creacion`. Para la
    fecha de **emisión** fiscal hay filtros locales `emitidas_desde`/`emitidas_hasta`.
 7. **Soporte del header `Idempotency-Key`** server-side → la idempotencia fuerte es
-   in-process; el header es best-effort.
-8. **Esquemas de request de los POST** → el OpenAPI solo trae **ejemplos** (no schema
-   estricto); las tools validan los campos requeridos visibles y dejan pasar el resto.
+   in-process; la defensa que sí persiste es el chequeo de `numero_interno`.
+8. **Esquema de request de `POST /v3/comprobantes/emitir`** → la doc trae la *Tabla
+   de Valores* completa y 12 ejemplos, pero no un JSON Schema. El cuerpo se valida
+   contra esa tabla (ver abajo) y los campos no documentados pasan sin tocarse.
+   Los demás POST (recibos, pagos, clientes, productos, anular) **sí** declaran
+   schema con `required`, y ese `required` se respeta literalmente.
+
+## Validación del CFE
+
+`src/biller/cfeSchema.ts` tipa la Tabla de Valores completa: los 22 tipos de CFE,
+`forma_pago`, los 16 `indicador_facturacion`, `tipo_documento`, `modalidad_venta`,
+`clausula_venta`, `via_transporte`, `tipo_traslado`, `indicador_agente_responsable`,
+y los largos máximos de cada campo.
+
+El criterio de estrictez es deliberado:
+
+- **Error** solo donde la doc dice *"Obligatorio"* o *"Mutuamente excluyente"*:
+  exportaciones sin `modalidad_venta`/`clausula_venta`/`via_transporte`/`ncm`,
+  remitos sin `tipo_traslado`, `referencias` junto con `referencia_global`,
+  `referencia_global` sin `razon_referencia`, retenciones en CFE que no las admiten,
+  y fechas fuera de rango.
+- **Warning** para todo lo demás (e-Factura sin receptor, nota de ajuste sin
+  referencia, falta de `numero_interno`…): se informa en el preview y el humano decide.
+- **Passthrough** para los campos que la doc no lista: nunca se descartan datos.
+
+> **Ojo con las fechas: la API usa DOS formatos.** `fecha_emision` y
+> `fecha_vencimiento` de un CFE van en **dd/mm/aaaa**; las fechas de recibos y los
+> filtros de lectura van en **aaaa-mm-dd**; `fecha` de un pago acepta ambos. Cada
+> schema valida el suyo y el mensaje de error aclara cuál corresponde.
 
 ## Roadmap
 
-- Tool de PDF (`/v2/comprobantes/pdf`) con manejo de base64.
-- Resource MCP con catálogo de tipos de CFE.
-- Validar paginación / filtros nativos / endpoints de clientes cuando existan.
-- Transporte Streamable HTTP.
+Lo que **ya no** está acá porque se hizo: transporte Streamable HTTP, canal de
+WhatsApp (Kapso), multi-tenant, barreras de entrada y salida.
+
+Lo que falta, en orden de lo que bloquea a lo que no (los dos primeros del
+backlog histórico —observabilidad y estado persistente del borrador— ya están:
+`biller_metricas` y el store de sesión):
+
+1. **Un usuario real con las métricas prendidas.** Todo lo de abajo son
+   hipótesis hasta que `enrutador.mensaje` y el embudo `emision.paso` tengan
+   datos de producción.
+2. **Templates de WhatsApp.** El push proactivo fuera de la ventana de 24 h los
+   necesita, y el sandbox de Kapso no los tiene. Bloquea el cierre de mes
+   proactivo (BRAINSTORM V5.5).
+3. **Migrar los schemas a Zod v4** (BRAINSTORM V5.4): borra el parche de
+   dialecto (`transport/dialecto.ts`) y emite JSON Schema 2020-12 nativo.
+4. Resource MCP con catálogo de tipos de CFE.
+5. Validar paginación / filtros nativos / endpoint GET de clientes cuando existan.
 
 ## Fuente
 
-OpenAPI: <https://francodest-biller-v3-docs.apidocumentation.com/openapi.json>
+Documentación oficial de la API de Biller (OpenAPI 3.0), servidores
+`https://test.biller.uy` y `https://biller.uy`.
