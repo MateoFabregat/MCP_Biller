@@ -1,0 +1,35 @@
+# =============================================================================
+# Qué NO se sube a Vercel.
+#
+# Importa de verdad: si desplegás con la CLI (`vercel --prod`) desde tu máquina,
+# el contenido de esta carpeta viaja tal cual. Sin la primera regla, tu `.env`
+# con el token real de Biller se subiría al deploy.
+#
+# Ojo: cuando existe .vercelignore, Vercel deja de usar .gitignore. Por eso acá
+# hay que repetir node_modules y compañía.
+# =============================================================================
+
+# --- Secretos (las variables van en el panel de Vercel, nunca en un archivo) --
+.env
+.env.*
+*.audit.log
+biller-mcp-audit.log
+
+# --- No hacen falta en runtime ------------------------------------------------
+node_modules
+dist
+tests
+evals
+docs
+scripts
+.github
+coverage
+
+*.md
+!README.md
+
+.git
+.DS_Store
+.idea
+.vscode
+*.docx
