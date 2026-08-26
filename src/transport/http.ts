@@ -40,7 +40,7 @@ import { logger } from "../logger.js";
 import { enmascararTelefono, remitentesAutorizados } from "../security/remitentes.js";
 import { autenticarConTenants } from "../tenants/acceso.js";
 import type { RegistroTenants, Tenant } from "../tenants/registry.js";
-import { conDialectoLimpio } from "./dialecto.js";
+import { conDialectoLimpio, opcionesLivianas } from "./dialecto.js";
 
 /** Ruta del endpoint MCP. Kapso apunta acá. */
 export const MCP_PATH = "/mcp";
@@ -331,7 +331,7 @@ export async function iniciarTransporteHttp(
 
           const server = crearServidorMcp(auth.tenant);
           await server.connect(
-            conDialectoLimpio(transport, { quitarOutputSchema: config.wireLiviano }),
+            conDialectoLimpio(transport, opcionesLivianas(config.wireLiviano)),
           );
         }
 

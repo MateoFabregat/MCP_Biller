@@ -75,3 +75,53 @@ describe("wire liviano (BILLER_WIRE_LIVIANO)", () => {
     await server.close();
   });
 });
+
+// =============================================================================
+// Los `$ref`, que son los que dejaron el WhatsApp mudo.
+//
+// Kapso pedía `tools/list`, recibía 200 con las 34 tools y configuraba el
+// agente con CERO. El rechazo es todo-o-nada: alcanzaba UNA tool con `$ref`
+// para tirar la lista entera, y no quedaba error en ningún lado.
+// =============================================================================
+
+describe("los schemas salen sin $ref", () => {
+  async function toolsDelWire() {
+    const ctx = createToolContext({});
+    const server = crearServidorMcp(ctx, "write_enabled");
+    const [cliente, servidor] = InMemoryTransport.createLinkedPair();
+    await server.connect(conDialectoLimpio(servidor));
+    const client = new Client({ name: "test", version: "0.0.0" });
+    await client.connect(cliente);
+    const { tools } = await client.listTools();
+    await client.close();
+    await server.close();
+    return tools;
+  }
+
+  it("ningún schema de tools/list contiene un $ref", async () => {
+    const tools = await toolsDelWire();
+    expect(tools.length).toBeGreaterThan(20);
+    for (const tool of tools) {
+      const serializado = JSON.stringify([tool.inputSchema, tool.outputSchema]);
+      expect(serializado, tool.name).not.toContain('"$ref"');
+    }
+  });
+
+  it("inlinear conserva el tipo, no solo borra el puntero", async () => {
+    // El caso exacto que rompía: `hasta` salía como {"$ref": "#/properties/desde"}.
+    // Borrar el puntero también lo haría pasar el test de arriba, y dejaría al
+    // modelo mandando cualquier cosa en un campo de fecha. Lo que importa es que
+    // `hasta` tenga el MISMO tipo y el MISMO patrón que `desde`.
+    const tools = await toolsDelWire();
+    const emitidos = tools.find((t) => t.name === "biller_listar_comprobantes_emitidos");
+    expect(emitidos).toBeDefined();
+    const props = (emitidos!.inputSchema as { properties: Record<string, Record<string, unknown>> })
+      .properties;
+    expect(props["hasta"]!["type"]).toBe(props["desde"]!["type"]);
+    expect(props["hasta"]!["pattern"]).toBe(props["desde"]!["pattern"]);
+    expect(props["hasta"]!["pattern"]).toBeTruthy();
+    // Y la descripción tiene que seguir siendo la del campo que apuntaba, no la
+    // del apuntado: son campos distintos y lo dicen en el texto.
+    expect(String(props["hasta"]!["description"])).toContain("Hasta");
+  });
+});
