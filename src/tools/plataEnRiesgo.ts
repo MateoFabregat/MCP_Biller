@@ -30,13 +30,13 @@ import { hoyComoDateUy } from "../services/fechaUy.js";
 import {
   PERIODOS_SOPORTADOS,
   aIso,
+  periodoAnterior,
   resolverPeriodo,
   type RangoFechas,
 } from "../services/periodo.js";
 import { rankingClientes } from "../services/rankingClientes.js";
 import { detectarRiesgoPlata } from "../services/riesgoPlata.js";
 import { traerVentanaAmplia } from "../services/ventana.js";
-import { periodoAnterior } from "./compararPeriodos.js";
 import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,

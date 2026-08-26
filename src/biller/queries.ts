@@ -80,7 +80,7 @@ export interface CertificadoDgiQuery {
  * facturación de la empresa entera: vale la pena consultarlo desde alertas
  * operativas aunque el OpenAPI no documente la forma de la respuesta (por eso
  * `normalizeDgiCertificado` deja `certificado` como `unknown`; ver
- * `extraerVencimientoCertificado` en src/tools/alertas.ts).
+ * `extraerVencimientoCertificado` en src/services/certificadoDgi.ts).
  */
 export async function fetchCertificadoDgi(
   client: BillerClient,

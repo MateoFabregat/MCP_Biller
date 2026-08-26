@@ -23,9 +23,10 @@
 //     Lo que importa es la racha actual COMPARADA con el comportamiento propio
 //     del período, no un umbral absoluto.
 //
-// (El certificado único de DGI, otro corte de facturación posible, se resuelve
-// en la tool `biller_alertas_operativas` porque requiere una consulta HTTP
-// aparte con estructura de respuesta no documentada — ver src/tools/alertas.ts.)
+// (El certificado único de DGI, otro corte de facturación posible, requiere una
+// consulta HTTP aparte con estructura de respuesta no documentada: el I/O y el
+// armado de la alerta viven en la tool `biller_alertas_operativas`, y el parseo
+// del vencimiento con sus umbrales en `services/certificadoDgi.ts`.)
 //
 // LÍMITE del análisis de CAE: solo se ven los comprobantes del período
 // consultado, así que `ultimo_numero_usado` es una COTA INFERIOR y los

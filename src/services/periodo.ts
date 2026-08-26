@@ -172,6 +172,48 @@ export const PERIODOS_SOPORTADOS = [
   "anio_actual",
 ];
 
+/** true si el rango es exactamente un mes calendario completo. */
+function esMesCompleto(rango: RangoFechas): boolean {
+  const d = new Date(`${rango.desde}T00:00:00Z`);
+  const h = new Date(`${rango.hasta}T00:00:00Z`);
+  if (d.getUTCDate() !== 1) return false;
+  if (d.getUTCFullYear() !== h.getUTCFullYear() || d.getUTCMonth() !== h.getUTCMonth()) return false;
+  const ultimoDia = new Date(Date.UTC(h.getUTCFullYear(), h.getUTCMonth() + 1, 0)).getUTCDate();
+  return h.getUTCDate() === ultimoDia;
+}
+
+/**
+ * Período con el que se compara por defecto.
+ *
+ * DOS CASOS, porque "el período anterior" significa cosas distintas:
+ *
+ *  · MES CALENDARIO COMPLETO -> el mes calendario previo. Cuando alguien
+ *    pregunta "¿vendí más que el mes pasado?" quiere junio contra julio, no
+ *    "los 31 días anteriores al 1 de julio" (que arrancarían el 31 de mayo).
+ *    Los meses tienen largos distintos y está bien: es la comparación que
+ *    hace cualquier contador.
+ *
+ *  · CUALQUIER OTRO RANGO -> la ventana inmediatamente anterior del MISMO
+ *    LARGO. Para "últimos 7 días" comparar contra los 7 previos es lo correcto;
+ *    ahí sí, comparar largos distintos sería el error.
+ */
+export function periodoAnterior(rango: RangoFechas): RangoFechas {
+  if (esMesCompleto(rango)) {
+    const d = new Date(`${rango.desde}T00:00:00Z`);
+    const anio = d.getUTCFullYear();
+    const mes = d.getUTCMonth(); // 0-based; el previo es mes-1
+    const inicio = new Date(Date.UTC(anio, mes - 1, 1));
+    const fin = new Date(Date.UTC(anio, mes, 0)); // día 0 = último del mes previo
+    return { desde: inicio.toISOString().slice(0, 10), hasta: fin.toISOString().slice(0, 10) };
+  }
+
+  const desde = Date.parse(`${rango.desde}T00:00:00Z`);
+  const hasta = Date.parse(`${rango.hasta}T00:00:00Z`);
+  const largoMs = hasta - desde + MS_POR_DIA;
+  const iso = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+  return { desde: iso(desde - largoMs), hasta: iso(desde - MS_POR_DIA) };
+}
+
 /**
  * Parte un rango en ventanas de a lo sumo `dias` días, ANCLADAS A UNA GRILLA
  * GLOBAL.

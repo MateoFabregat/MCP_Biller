@@ -10,7 +10,7 @@ import {
 } from "../src/biller/normalize.js";
 import { compararPeriodos } from "../src/services/comparacion.js";
 import { rankingProveedores } from "../src/services/proveedores.js";
-import { periodoAnterior } from "../src/tools/compararPeriodos.js";
+import { periodoAnterior } from "../src/services/periodo.js";
 
 function emitido(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {

@@ -21,6 +21,12 @@
   "compilerOptions": {
     "noEmit": true,
     "rootDir": ".",
+    // `tests/readonly.test.ts` importa `analizarSrc()` de
+    // scripts/check-readonly.mjs para no tener una segunda copia de la barrera
+    // de escritura. El script es ESM plano (lo corre `node` en CI, sin build),
+    // así que el typecheck de los tests necesita poder mirar dentro de un .mjs.
+    // Solo acá: el tsconfig de build sigue compilando únicamente src/**/*.ts.
+    "allowJs": true,
     "types": ["node", "vitest/globals"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"]

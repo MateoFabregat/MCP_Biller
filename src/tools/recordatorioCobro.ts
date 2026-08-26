@@ -36,9 +36,9 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { normalizarTelefono } from "../config.js";
 import { KapsoClient } from "../kapso/client.js";
+import { correrCuentaCorriente } from "../services/corridaCuentaCorriente.js";
 import { construirRecordatorio } from "../services/recordatorioCobro.js";
 import { checkConfirmationToken, computeConfirmationToken } from "../write/confirm.js";
-import { correrCuentaCorriente } from "./cuentaCorriente.js";
 import {
   WRITE_ANNOTATIONS,
   errorToolResult,

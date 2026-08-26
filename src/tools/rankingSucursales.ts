@@ -14,10 +14,14 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { PERIODOS_SOPORTADOS, resolverPeriodo, type RangoFechas } from "../services/periodo.js";
+import {
+  PERIODOS_SOPORTADOS,
+  periodoAnterior,
+  resolverPeriodo,
+  type RangoFechas,
+} from "../services/periodo.js";
 import { resolverRango, traerVentana } from "../services/ventana.js";
 import { SALTO_PARTICIPACION_PP, rankingSucursales } from "../services/sucursales.js";
-import { periodoAnterior } from "./compararPeriodos.js";
 import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,

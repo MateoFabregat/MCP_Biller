@@ -23,13 +23,12 @@ import { compararPeriodos } from "../services/comparacion.js";
 import { calcularCuentaCorriente } from "../services/cuentaCorriente.js";
 import { construirDigest } from "../services/digest.js";
 import { hoyComoDateUy } from "../services/fechaUy.js";
-import { resolverPeriodo, aIso } from "../services/periodo.js";
+import { periodoAnterior, resolverPeriodo, aIso } from "../services/periodo.js";
 import { rankingClientes } from "../services/rankingClientes.js";
 import { resumirFacturacion } from "../services/resumenFacturacion.js";
 import { detectarRiesgoPlata, type RiesgoPlataResultado } from "../services/riesgoPlata.js";
 import { analizarVencimientos } from "../services/vencimientos.js";
 import { traerVentanaAmplia } from "../services/ventana.js";
-import { periodoAnterior } from "./compararPeriodos.js";
 import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,

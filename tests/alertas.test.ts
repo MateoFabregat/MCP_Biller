@@ -11,7 +11,8 @@ import {
   generarAlertas,
   parseCae,
 } from "../src/services/alertas.js";
-import { extraerVencimientoCertificado, handleAlertas } from "../src/tools/alertas.js";
+import { extraerVencimientoCertificado } from "../src/services/certificadoDgi.js";
+import { handleAlertas } from "../src/tools/alertas.js";
 import { makeCtx } from "./helpers.js";
 
 const HOY = new Date("2026-07-27T12:00:00Z");
