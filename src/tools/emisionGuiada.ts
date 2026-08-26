@@ -33,7 +33,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { normalizarTelefono } from "../config.js";
-import { fusionarEstado, resolverClaveSesion, type BorradorStore } from "../kapso/borradorStore.js";
+import { fusionarEstado, type BorradorStore } from "../kapso/borradorStore.js";
 import { KapsoClient } from "../kapso/client.js";
 import {
   aplicarDefaults,
@@ -377,14 +377,24 @@ function normalizarItems(
         : {}),
     };
 
+    // El flag va SIEMPRE que se fije un precio, incluso en false, y por el
+    // mismo motivo por el que `montos_brutos` va siempre al borrador: el
+    // guardado se fusiona por campo y `undefined` no pisa (ver `fusionarEstado`).
+    // Sin el false explícito, un precio corregido a mano ("son 6500") dejaría
+    // viva para siempre la advertencia del "6.50" anterior.
     if (typeof item.precio === "number") {
       salida.precio = item.precio;
+      salida.precio_ambiguo = false;
     } else if (typeof item.precio === "string") {
       const leido = parsearImporte(item.precio);
       if (leido.valor === null) {
         warnings.push(`No se pudo leer el precio "${item.precio}"${ordinal}: ${leido.detalle}`);
       } else {
         salida.precio = leido.valor;
+        // La marca se GUARDA además de avisarse: un warning lo lee el modelo en
+        // esta llamada y se pierde, y la confirmación ocurre dos o tres mensajes
+        // después. Ver `ItemEnCurso.precio_ambiguo`.
+        salida.precio_ambiguo = leido.ambiguo;
         if (leido.ambiguo) {
           warnings.push(
             `⚠️ El precio "${item.precio}"${ordinal} se puede leer de dos formas. ${leido.detalle} ` +
@@ -479,10 +489,32 @@ function rellenarDesdePedido(estado: EstadoEmision, pedido: PedidoEmision): stri
     }
     if (base.precio === undefined && leido.precio !== undefined) {
       base.precio = leido.precio;
+      // La marca viaja PEGADA al precio, en la misma condición: sin esto, el
+      // "6.50" entraba al estado como 6,5 pelado y el preview mostraba $13 sin
+      // una palabra sobre las otras dos lecturas posibles. Ver `precio_ambiguo`.
+      base.precio_ambiguo = leido.precio_ambiguo === true;
       puestos.push(`items[${i}].precio`);
     }
     items[i] = base;
   });
+
+  // NÚMEROS QUE SOBRARON = VENTA QUE NO SE PUDO LEER.
+  //
+  // "…3 cajas a 1200 y portland a 6500": el segundo tramo no trae cantidad, así
+  // que no hay ítem donde poner los $6.500. Antes se descartaban en silencio y
+  // el flujo llegaba a `listo` con media factura. Abrir un ítem vacío es la
+  // forma que ya tiene este flujo de decir "seguí preguntando por otro"
+  // (`siguientePaso` mira siempre el último), y convierte la pérdida silenciosa
+  // en la pregunta que corresponde.
+  if (pedido.precios_sin_ubicar.length > 0) {
+    const ultimo = items[items.length - 1];
+    if (ultimo === undefined || Object.keys(ultimo).length > 0) {
+      items.push({});
+      puestos.push(`items[${items.length - 1}] (abierto por un precio sin ubicar)`);
+    }
+    delete estado.items_cerrados;
+  }
+
   if (items.length > 0) estado.items = items;
   return puestos;
 }
@@ -614,7 +646,9 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     // último que hizo el usuario, así que tiene que ganarle tanto a lo guardado
     // como a lo que el agente creía saber.
     const store = ctx.getBorradorStore();
-    const clave = a.sesion === undefined || a.sesion.trim() === "" ? null : resolverClaveSesion(a.sesion);
+    // La clave la deriva el STORE, no una función suelta: es quien tiene la sal
+    // de la empresa. Ver `BorradorStore.clave`.
+    const clave = a.sesion === undefined || a.sesion.trim() === "" ? null : store.clave(a.sesion);
     if (clave !== null && a.reiniciar) store.borrar(clave);
 
     const guardado = clave === null ? null : store.leer(clave);
@@ -652,6 +686,17 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       }
       for (const detalle of pedido.ambiguo ? pedido.detalles : []) {
         if (detalle.startsWith("Precio:")) warnings.push(`⚠️ ${detalle}`);
+      }
+      // El mensaje nombraba más venta de la que se pudo leer. Se avisa fuerte
+      // Y el flujo ya quedó con un ítem abierto (ver `rellenarDesdePedido`):
+      // el aviso solo, sin la pregunta, es lo que este hallazgo vino a cerrar.
+      if (pedido.precios_sin_ubicar.length > 0) {
+        warnings.push(
+          `⚠️ En el mensaje quedaron ${pedido.precios_sin_ubicar.length} precio(s) ` +
+            `(${pedido.precios_sin_ubicar.join(", ")}) que no pertenecen a ninguna línea leída: ` +
+            "el usuario nombró más de lo que se pudo entender. NO emitas todavía — preguntá qué " +
+            "más se vendió y cargá esa línea con su cantidad y su concepto.",
+        );
       }
     }
 
@@ -948,9 +993,19 @@ function borradorComprobante(
   const completar: string[] = [];
 
   if (tipo !== null) borrador["tipo_comprobante"] = tipo;
-  // La defensa contra emitir dos veces por un retry. Generado por el server; el
-  // agente solo lo copia, como todo lo demás del borrador.
-  if (estado.numero_interno !== undefined) borrador["numero_interno"] = estado.numero_interno;
+  // `numero_interno` NO VUELVE ACÁ, y esa es toda la defensa contra el duplicado.
+  //
+  // Está en CAMPOS_NO_CONFIABLES, así que la barrera de salida lo envuelve en
+  // ⟦dato-no-confiable⟧ antes de que salga del server. Un id envuelto le deja
+  // al modelo dos caminos y los dos terminan mal: copiarlo con las marcas
+  // adentro (y emitir un CFE con basura en el campo), o limpiarlo a mano — que
+  // es peor, porque dos reintentos que limpian distinto producen DOS ids
+  // distintos, `buscarPorNumeroInterno` no matchea ninguno, y la misma venta
+  // sale dos veces ante DGI. Justo lo que este id existe para impedir.
+  //
+  // El id se genera en el server, vive en el store y lo completa
+  // `completarDesdeSesion` al emitir: nunca pasa por el canal del modelo. Por
+  // eso tampoco hace falta declararlo en `completar` — no hay nada que copiar.
   if (estado.fecha_emision !== undefined) borrador["fecha_emision"] = estado.fecha_emision;
   if (estado.forma_pago !== undefined) borrador["forma_pago"] = estado.forma_pago;
   if (estado.moneda !== undefined) borrador["moneda"] = estado.moneda;
@@ -1077,7 +1132,10 @@ function resumirEstado(estado: EstadoEmision): Record<string, unknown> {
   // El texto de la adenda NO vuelve (barrera de salida); vuelve si está o no.
   if (estado.adenda !== undefined) resumen["adenda_cargada"] = estado.adenda.trim() !== "";
   if (estado.sin_adenda !== undefined) resumen["sin_adenda"] = estado.sin_adenda;
-  if (estado.numero_interno !== undefined) resumen["numero_interno"] = estado.numero_interno;
+  // El VALOR del numero_interno no vuelve (ver `borradorComprobante`): vuelve si
+  // existe. Alcanza para que el agente sepa que la deduplicación está puesta, y
+  // no le da nada que copiar mal.
+  if (estado.numero_interno !== undefined) resumen["numero_interno_generado"] = true;
 
   if (estado.items !== undefined) {
     resumen["items"] = estado.items.map((i) => ({
@@ -1085,6 +1143,9 @@ function resumirEstado(estado: EstadoEmision): Record<string, unknown> {
       concepto_cargado: (i.concepto ?? "") !== "",
       ...(i.cantidad !== undefined ? { cantidad: i.cantidad } : {}),
       ...(i.precio !== undefined ? { precio: i.precio } : {}),
+      // El flag SÍ vuelve (no es texto de nadie, es un booleano nuestro): es lo
+      // que le permite al agente ecoar la duda en vez de leer un total pelado.
+      ...(i.precio_ambiguo === true ? { precio_ambiguo: true } : {}),
       ...(i.indicador_facturacion !== undefined
         ? { indicador_facturacion: i.indicador_facturacion }
         : {}),
@@ -1248,7 +1309,9 @@ async function responder(p: {
     como_sigue: siguiente.listo
       ? "Ya está todo. Pasá 'comprobante_borrador' a biller_requisitos_comprobante para el chequeo " +
         "final (umbral de UI, campos de DGI) y después a biller_emitir_comprobante SIN confirm, con " +
-        "confirmar_por_whatsapp = el número de la conversación. Eso manda los botones ✅/✖️."
+        "confirmar_por_whatsapp = el número de la conversación. Eso manda los botones ✅/✖️. " +
+        "PASÁ SIEMPRE 'sesion' con el `sesion.id` de acá: es lo que completa el concepto de cada " +
+        "ítem, la adenda y el numero_interno (la defensa contra emitir dos veces) desde el server."
       : `Falta el paso "${siguiente.paso}". Hacé SOLO esa pregunta (está en 'pregunta'), y volvé a ` +
         "llamar esta tool con la respuesta sumada a lo que ya pasaste. No pidas varios datos juntos.",
     envio: {
@@ -1397,7 +1460,7 @@ export async function buscarPerfilCasa(ctx: ToolContext): Promise<PerfilCasa> {
     // Sin muestra suficiente no se piden los detalles: sería gastar cinco
     // requests para confirmar que no hay perfil. `derivarPerfilCasa` devuelve
     // igual el perfil vacío, con el detalle de por qué.
-    return derivarPerfilCasa(candidatos, { desde, hasta });
+    return derivarPerfilCasa(candidatos, { desde, hasta, ventana: ventana.comprobantes });
   }
 
   const client = ctx.getClient();
@@ -1407,7 +1470,11 @@ export async function buscarPerfilCasa(ctx: ToolContext): Promise<PerfilCasa> {
   });
 
   const utiles = detalles.filter((d): d is NonNullable<typeof d> => d !== null);
-  return derivarPerfilCasa(utiles, { desde, hasta });
+  // La VENTANA ENTERA va junto con los cinco detalles, y no es redundante: la
+  // tasa de IVA solo existe en los detalles, pero `montos_brutos` viene en el
+  // listado, y evaluarlo sobre cinco cuando hay doscientos en memoria hacía que
+  // una racha pasara por costumbre. Ver `derivarPerfilCasa`.
+  return derivarPerfilCasa(utiles, { desde, hasta, ventana: ventana.comprobantes });
 }
 
 export function registerEmisionGuiada(server: McpServer, ctx: ToolContext): void {

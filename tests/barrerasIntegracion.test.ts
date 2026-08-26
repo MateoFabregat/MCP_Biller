@@ -83,9 +83,10 @@ async function conServidor(
 ): Promise<{
   client: Client;
   getMock: ReturnType<typeof makeCtx>["getMock"];
+  metricas: ReturnType<typeof makeCtx>["metricas"];
   cerrar: () => Promise<void>;
 }> {
-  const { ctx, getMock } = makeCtx(opciones);
+  const { ctx, getMock, metricas } = makeCtx(opciones);
   const server = crearServidorMcp(ctx, "read_only");
   const [aCliente, aServidor] = InMemoryTransport.createLinkedPair();
   await server.connect(conDialectoLimpio(aServidor));
@@ -94,6 +95,7 @@ async function conServidor(
   return {
     client,
     getMock,
+    metricas,
     cerrar: async () => {
       await client.close();
       await server.close();
@@ -213,6 +215,60 @@ describe("con Kapso configurado, nadie pregunta sin identificarse", () => {
     expect(getMock).toHaveBeenCalledTimes(1);
     // Y las barreras de salida siguen puestas para el que SÍ está autorizado.
     expect(textoDe(res)).not.toContain(TEST_TOKEN);
+    await cerrar();
+  });
+
+  // SEC-A4: las CUATRO líneas de `crearServidorMcp`, no tres.
+  //
+  // `instrumentarTools` también intercepta `registerTool`, así que también deja
+  // de aplicar si se la mueve debajo de `registerAllTools`. Y tiene una
+  // exigencia PROPIA de orden que ninguna de las otras tiene: va PRIMERO, más
+  // afuera que `guardarEntrada`, para que un rechazo de la barrera de entrada
+  // igual se cuente. Un remitente no autorizado golpeando la puerta es de las
+  // cosas que más interesa ver en una métrica; adentro de la barrera sería
+  // invisible, y el archivo entero seguiría verde.
+  it("una llamada RECHAZADA por la barrera de entrada igual se cuenta", async () => {
+    const { client, metricas, cerrar } = await conServidor({
+      response: COMPROBANTE_ENVENENADO,
+      config: { kapso: { ...KAPSO } },
+    });
+    await client.callTool({ name: "biller_obtener_comprobante", arguments: { id: "53616" } });
+
+    const invocaciones = metricas
+      .instantanea()
+      .muestras.filter((m) => m.nombre === "tool.invocacion");
+    expect(invocaciones).toHaveLength(1);
+    expect(invocaciones[0]!.etiquetas).toMatchObject({
+      tool: "biller_obtener_comprobante",
+      // El rechazo llega como isError, o sea "error": si la instrumentación
+      // quedara ADENTRO de la barrera, este contador estaría en cero.
+      resultado: "error",
+    });
+    // Y la duración también, que es lo que dice si la puerta se está golpeando
+    // seguido y barato o seguido y caro.
+    expect(
+      metricas.instantanea().muestras.some((m) => m.nombre === "tool.duracion"),
+    ).toBe(true);
+    await cerrar();
+  });
+
+  it("y la ACEPTADA se cuenta como ok, para poder distinguirlas", async () => {
+    // El contrapeso: un contador que marcara todo como error no serviría para
+    // nada, y pasaría el test de arriba igual.
+    const { client, metricas, cerrar } = await conServidor({
+      response: COMPROBANTE_ENVENENADO,
+      config: { kapso: { ...KAPSO } },
+    });
+    await client.callTool({
+      name: "biller_obtener_comprobante",
+      arguments: { id: "53616", remitente: KAPSO.destinatariosPermitidos[0] },
+    });
+
+    const invocaciones = metricas
+      .instantanea()
+      .muestras.filter((m) => m.nombre === "tool.invocacion");
+    expect(invocaciones).toHaveLength(1);
+    expect(invocaciones[0]!.etiquetas).toMatchObject({ resultado: "ok" });
     await cerrar();
   });
 

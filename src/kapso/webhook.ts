@@ -36,7 +36,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { BillerCapabilityMode } from "../config.js";
 import { normalizarTelefono } from "../config.js";
-import { claveSesion, type BorradorStore } from "./borradorStore.js";
+import type { BorradorStore } from "./borradorStore.js";
 import { interpretarMensaje, type Interpretacion } from "./menu.js";
 
 /** Header con el que Meta (y Kapso, que lo reenvía) firma el cuerpo. */
@@ -265,9 +265,11 @@ export function decidirWebhook(evento: EventoEntrante, opciones: DecidirOpciones
   // El `from` ya viene normalizado a dígitos por `normalizarEvento`, que es la
   // misma forma que `biller_emision_guiada` recibe en `sesion` — y
   // `canonizarSesion` absorbe el resto de las diferencias de formato.
+  // La clave la deriva el propio store: es quien tiene la sal de la empresa, y
+  // acá no hay forma de conocerla. Ver `BorradorStore.clave`.
   const enFlujo =
     opciones.borradores !== undefined &&
-    opciones.borradores.leer(claveSesion(evento.from)) !== null;
+    opciones.borradores.leer(opciones.borradores.clave(evento.from)) !== null;
 
   const interpretacion = interpretarMensaje(evento.texto, {
     capabilityMode: opciones.capabilityMode,

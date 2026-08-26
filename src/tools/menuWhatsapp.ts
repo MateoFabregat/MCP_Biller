@@ -24,7 +24,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { normalizarTelefono } from "../config.js";
-import { resolverClaveSesion } from "../kapso/borradorStore.js";
 import { KapsoClient } from "../kapso/client.js";
 import {
   construirDesambiguacion,
@@ -302,7 +301,8 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
     let enFlujo = a.en_flujo ?? false;
     let flujoDerivado = false;
     if (a.en_flujo === undefined && a.sesion !== undefined && a.sesion.trim() !== "") {
-      enFlujo = ctx.getBorradorStore().leer(resolverClaveSesion(a.sesion)) !== null;
+      const store = ctx.getBorradorStore();
+      enFlujo = store.leer(store.clave(a.sesion)) !== null;
       flujoDerivado = true;
     }
 

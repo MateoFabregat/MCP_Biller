@@ -15,7 +15,7 @@ import { enmascararTelefono } from "../security/remitentes.js";
 import type { AuditEntry, AuditSink } from "./audit.js";
 import { payloadHash } from "./confirm.js";
 import { evaluateWriteGate } from "./gate.js";
-import { verificarLimiteMonto } from "./limiteMonto.js";
+import { verificarLimiteMonto, type MontoExplicito } from "./limiteMonto.js";
 import { BillerProductionBlockedError, BillerWriteDisabledError } from "../utils/errors.js";
 import type { IdempotencyStore } from "./idempotency.js";
 import type { PostResult, BillerWriteClient } from "./writeClient.js";
@@ -41,6 +41,14 @@ export interface WriteExecInput {
    * hacerlo, que es como termina un número completo en un archivo de log.
    */
   remitente?: string;
+  /**
+   * El total de la operación, cuando el payload no lo lleva en la raíz.
+   *
+   * Es el caso de la emisión: un CFE no tiene campo `total`, lo tiene calculado
+   * `calcularTotales`. Sin esto, el tope de monto no aplicaba a la única
+   * operación para la que se escribió. Ver `verificarLimiteMonto`.
+   */
+  montoExplicito?: MontoExplicito;
 }
 
 export interface WriteExecResult {
@@ -82,7 +90,7 @@ export async function executeWrite(
   //    rechazada por monto NO debe consumir la idempotency_key, así el usuario
   //    puede corregir el importe y reintentar con la misma key.
   try {
-    verificarLimiteMonto(input.payload, c.config.maxMontos);
+    verificarLimiteMonto(input.payload, c.config.maxMontos, input.montoExplicito);
   } catch (err) {
     c.auditor.record({
       tool: input.tool,

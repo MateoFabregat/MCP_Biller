@@ -62,6 +62,15 @@ export interface TotalesEstimados {
   total_iva: number;
   /** Descuentos (negativo) y recargos (positivo) globales aplicados. */
   ajustes_globales: number;
+  /**
+   * Cada ajuste global por separado, con una etiqueta corta ya armada.
+   *
+   * Existe para que el preview pueda IMPRIMIR la fila ("Descuento 10% −$1.300")
+   * en vez de dejar la diferencia escondida entre las líneas y el total. Sin
+   * esto, `formatearTotales` solo tenía el número agregado y no podía decir de
+   * qué era: un descuento invisible es plata que el usuario aprueba sin verla.
+   */
+  detalle_ajustes_globales: Array<{ etiqueta: string; monto: number }>;
   total: number;
   /** Suma de retenciones/percepciones (tasa/100 * monto_sujeto). Informativo. */
   total_retenciones_percepciones: number;
@@ -178,6 +187,7 @@ export function calcularTotales(body: ComprobanteBody): TotalesEstimados {
   // --- Descuentos y recargos globales -------------------------------------
   // Se aplican sobre el neto de los ítems que comparten indicador_facturacion.
   let ajustesGlobales = 0;
+  const detalleAjustes: Array<{ etiqueta: string; monto: number }> = [];
   for (const dr of body.descuentosRecargos ?? []) {
     const base = netoPorIndicador.get(dr.indicador_facturacion) ?? 0;
     if (base === 0) {
@@ -190,6 +200,14 @@ export function calcularTotales(body: ComprobanteBody): TotalesEstimados {
     const signo: 1 | -1 = dr.es_recargo ? 1 : -1;
     const monto = aplicarAjuste(base, dr.desc_rec_tipo, dr.valor, signo);
     ajustesGlobales += monto;
+    // La etiqueta se arma ACÁ, donde el tipo y el valor todavía existen: para
+    // cuando el preview lee `ajustes_globales`, el "10%" ya se perdió.
+    detalleAjustes.push({
+      etiqueta:
+        (dr.es_recargo ? "Recargo" : "Descuento") +
+        (dr.desc_rec_tipo === "%" && dr.valor !== undefined ? ` ${dr.valor}%` : ""),
+      monto: round2(monto),
+    });
 
     // El ajuste arrastra su parte proporcional de IVA.
     const tasa = TASA_IVA[dr.indicador_facturacion] ?? 0;
@@ -241,6 +259,7 @@ export function calcularTotales(body: ComprobanteBody): TotalesEstimados {
     iva_por_tasa: ivaPorTasa,
     total_iva: round2(totalIva),
     ajustes_globales: round2(ajustesGlobales),
+    detalle_ajustes_globales: detalleAjustes,
     total: round2(subtotal + totalIva),
     total_retenciones_percepciones: round2(totalRetenciones),
     lineas,
@@ -303,10 +322,31 @@ export interface ContextoPreview {
   hoy?: string;
   /** Cuántas líneas de ítem se listan antes de resumir el resto. */
   max_lineas?: number;
+  /**
+   * Los precios que admitían MÁS DE UNA LECTURA, para rendirlos textualmente.
+   *
+   * "6.50" es 6,50 o 6.500 —cien veces de diferencia— y `parsearImporte` elige
+   * el más probable MARCADO. Esa marca nace en el extractor, viaja por
+   * `ItemEnCurso.precio_ambiguo` y muere acá, convertida en la única forma que
+   * tiene de servir para algo: una línea escrita en el mensaje que el humano
+   * lee antes de tocar "Emitir". Un preview de $13 sin una palabra no es una
+   * confirmación, es una firma en blanco.
+   */
+  precios_ambiguos?: Array<{ concepto?: string; precio: number }>;
 }
 
 /** Cuántas líneas de ítem entran cómodas en los 1024 chars del cuerpo. */
 const MAX_LINEAS_PREVIEW = 8;
+
+/**
+ * Techo del preview, con margen sobre los 1024 del cuerpo de WhatsApp.
+ *
+ * El margen no es prudencia: `construirConfirmacionEmision` mete este texto
+ * ADENTRO de un mensaje que además lleva encabezado, documento del receptor y
+ * el "¿Lo emito?" del final. Si el cuerpo se pasa, lo que se corta es el final
+ * — o sea el TOTAL y los supuestos, justo lo que hay que leer.
+ */
+const MAX_CHARS_PREVIEW = 900;
 
 /** Hasta dónde se recorta el concepto de una línea. */
 const MAX_CONCEPTO_PREVIEW = 24;
@@ -356,8 +396,17 @@ export function describirSupuestos(ctx: ContextoPreview): string {
     );
   }
 
+  // EL SILENCIO YA ES UNA RESPUESTA, Y ES LA QUE MÁS PLATA MUEVE.
+  //
+  // Los tres estados de `montos_brutos` se rinden, incluido `undefined`. No
+  // decir nada cuando el campo falta era justo el caso peligroso: la API
+  // interpreta la ausencia como "los precios son netos" y le suma el 22%, o sea
+  // que el comprobante SÍ tiene un criterio de IVA aunque el payload no lo
+  // diga. Callarlo dejaba al usuario aprobando un total 22% más alto que el que
+  // había dictado, sin una palabra en el preview que se lo dijera.
   if (ctx.montos_brutos === true) partes.push("precios con IVA incluido");
   else if (ctx.montos_brutos === false) partes.push("IVA sumado aparte");
+  else partes.push("IVA sumado aparte (la API asume precios netos)");
 
   return partes.join(" · ");
 }
@@ -372,6 +421,8 @@ export function describirSupuestos(ctx: ContextoPreview): string {
 export function formatearTotales(t: TotalesEstimados, ctx: ContextoPreview = {}): string {
   const sim = simbolo(t.moneda);
   const plata = (n: number): string => `${sim}${formatearUy(n)}`;
+  // El signo va ADELANTE del símbolo, como se escribe: "−$1.300", no "$−1.300".
+  const conSigno = (n: number): string => (n < 0 ? `−${plata(-n)}` : `+${plata(n)}`);
 
   const visibles = t.lineas.slice(0, ctx.max_lineas ?? MAX_LINEAS_PREVIEW);
   const ocultas = t.lineas.length - visibles.length;
@@ -388,14 +439,39 @@ export function formatearTotales(t: TotalesEstimados, ctx: ContextoPreview = {})
     return { etiqueta, importe: l.aporta_al_total ? plata(l.total) : "sin cargo" };
   });
 
+  // EL NETO QUE SE MUESTRA ES EL DE ANTES DEL AJUSTE GLOBAL.
+  //
+  // `t.subtotal` ya viene con el descuento aplicado, así que imprimirlo junto a
+  // la fila del descuento lo contaría dos veces a la vista. Se muestra la suma
+  // de las líneas, después el ajuste, y después el IVA: así las tres filas
+  // explican el total en vez de competir con él.
+  const netoDeLineas = round2(t.subtotal - t.ajustes_globales);
+
   const totales: Array<{ etiqueta: string; importe: string }> = [
-    { etiqueta: "Neto", importe: plata(t.subtotal) },
+    { etiqueta: "Neto", importe: plata(netoDeLineas) },
+    // La fila que faltaba: un descuento global del 10% dejaba $1.300 invisibles
+    // entre las líneas y el total, y el usuario aprobaba una diferencia que no
+    // estaba escrita en ningún lado.
+    ...t.detalle_ajustes_globales.map((a) => ({
+      etiqueta: a.etiqueta,
+      importe: conSigno(a.monto),
+    })),
     ...Object.entries(t.iva_por_tasa).map(([tasa, monto]) => ({
       etiqueta: `IVA ${tasa}%`,
       importe: plata(monto),
     })),
     { etiqueta: `TOTAL${t.exacto ? "" : " (aprox.)"}`, importe: plata(t.total) },
   ];
+
+  // Las retenciones NO se suman al total (así lo define la doc), y por eso van
+  // DEBAJO del TOTAL y con la aclaración puesta: una fila arriba haría pensar
+  // que el número de abajo ya las incluye.
+  if (t.total_retenciones_percepciones !== 0) {
+    totales.push({
+      etiqueta: "Retenciones (aparte)",
+      importe: plata(t.total_retenciones_percepciones),
+    });
+  }
 
   const ancho =
     Math.max(...[...lineasItems, ...totales].map((f) => f.etiqueta.length + f.importe.length)) + 3;
@@ -413,5 +489,80 @@ export function formatearTotales(t: TotalesEstimados, ctx: ContextoPreview = {})
   const supuestos = describirSupuestos(ctx);
   if (supuestos !== "") bloques.push("", supuestos);
 
-  return bloques.join("\n");
+  const base = bloques.join("\n");
+  const avisos = advertenciasDelPreview(t, ctx, plata);
+  return avisos.length === 0 ? base : agregarAvisos(base, avisos);
+}
+
+/**
+ * Las advertencias que tienen que estar EN EL MENSAJE, por orden de riesgo.
+ *
+ * El orden es el que se respeta al truncar, y no es estético: primero lo que
+ * cambia el número que el usuario está por aprobar (un precio con dos lecturas
+ * posibles, una tasa que no se pudo determinar), después lo que explica el
+ * número (líneas sin cargo), y al final lo demás.
+ */
+function advertenciasDelPreview(
+  t: TotalesEstimados,
+  ctx: ContextoPreview,
+  plata: (n: number) => string,
+): string[] {
+  const avisos: string[] = [];
+
+  // 1. Los precios ambiguos. Van primero porque son el único aviso donde el
+  //    total mostrado puede estar mal por CIEN VECES.
+  for (const p of ctx.precios_ambiguos ?? []) {
+    const cual = p.concepto === undefined || p.concepto.trim() === "" ? "" : ` de "${p.concepto}"`;
+    // NO SE INVENTA LA OTRA LECTURA. Acá llega el número ya parseado, no el
+    // texto que escribió el usuario, así que "también podría ser X" sería una
+    // cuenta nuestra sobre un dato que no tenemos. Lo que sí se puede afirmar —y
+    // es lo que hay que decir— es que el número de arriba está en duda y que la
+    // diferencia es de dos órdenes de magnitud.
+    avisos.push(
+      `⚠️ El precio${cual} se leyó ${plata(p.precio)} por unidad, y estaba escrito de una forma ` +
+        "que admite otra lectura muy distinta. Confirmalo ANTES de emitir.",
+    );
+  }
+
+  // 2. Lo que el cálculo no pudo determinar y lo que no suma al total.
+  for (const a of t.advertencias) avisos.push(`⚠️ ${a}`);
+
+  const sinCargo = t.lineas.filter((l) => !l.aporta_al_total).length;
+  if (sinCargo > 0) {
+    avisos.push(
+      `ℹ️ ${sinCargo} ítem(s) van sin cargo (entrega gratuita / no facturable): no suman al total.`,
+    );
+  }
+
+  if (t.total_retenciones_percepciones !== 0) {
+    avisos.push("ℹ️ Las retenciones/percepciones se informan aparte: no están sumadas en el TOTAL.");
+  }
+
+  return avisos;
+}
+
+/**
+ * Pega los avisos abajo del preview SIN pasarse del techo del cuerpo.
+ *
+ * Se truncan los avisos y nunca los números: si algo tiene que caerse del
+ * mensaje, que sea la letra chica del final y no el TOTAL. Lo que se recorta se
+ * declara con un conteo, porque un aviso que desaparece sin dejar rastro es
+ * peor que no haberlo escrito.
+ */
+function agregarAvisos(base: string, avisos: string[]): string {
+  const puestos: string[] = [];
+  let largo = base.length + 1; // el salto de línea que separa el bloque
+  for (let i = 0; i < avisos.length; i += 1) {
+    const aviso = avisos[i]!;
+    const restantes = avisos.length - i;
+    // Se reserva lugar para la línea de "y N avisos más" antes de decidir.
+    const cola = restantes > 1 ? `\n… y ${restantes - 1} aviso(s) más` : "";
+    if (largo + aviso.length + 1 + cola.length > MAX_CHARS_PREVIEW) {
+      if (restantes > 0) puestos.push(`… y ${restantes} aviso(s) más`);
+      break;
+    }
+    puestos.push(aviso);
+    largo += aviso.length + 1;
+  }
+  return puestos.length === 0 ? base : `${base}\n${puestos.join("\n")}`;
 }

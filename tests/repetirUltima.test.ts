@@ -371,3 +371,125 @@ describe("V5.2 — en_flujo", () => {
     expect(r.opcion?.id).toBe("menu:repetir");
   });
 });
+
+// ---------------------------------------------------------------------------
+// FISCAL-7: `montos_brutos` tiene TRES estados, no dos.
+//
+// `detalle.montos_brutos === 1 ? true : false` colapsaba a `false` todo lo que
+// no fuera exactamente 1 — o sea, a "los precios son netos, sumale el 22%". Un
+// valor que no entendemos tiene que salir de la muestra, no votar por el lado
+// caro.
+//
+// Se prueba a través del NORMALIZADOR REAL y no con objetos armados a mano: la
+// conversión (`toNumberOrNull`) es la mitad del comportamiento, y un test que
+// la saltee prueba una función que en producción nunca recibe esos valores.
+// ---------------------------------------------------------------------------
+
+describe("montos_brutos: 1, 0 y todo lo demás", () => {
+  const leer = (crudo: unknown): boolean | undefined =>
+    estadoDesdeComprobante(normalizar([venta({ montos_brutos: crudo })])[0]!).estado.montos_brutos;
+
+  it("1 es true y 0 es false", () => {
+    expect(leer(1)).toBe(true);
+    expect(leer(0)).toBe(false);
+    // La API manda los números como strings en formato SQL: también valen.
+    expect(leer("1")).toBe(true);
+    expect(leer("0")).toBe(false);
+    expect(leer("1.00")).toBe(true);
+  });
+
+  it("ausente o null queda SIN definir: no vota", () => {
+    expect(leer(undefined)).toBeUndefined();
+    expect(leer(null)).toBeUndefined();
+    expect(leer("")).toBeUndefined();
+  });
+
+  it("un BOOLEANO no llega como false silencioso", () => {
+    // `toNumberOrNull` no lee booleanos, así que un `true` de la API se
+    // normaliza a null. Antes eso caía en `=== 1` → false: la empresa que
+    // factura con IVA incluido terminaba con "sumale el 22%". Ahora queda
+    // afuera de la muestra, que es lo conservador y lo correcto.
+    expect(leer(true)).toBeUndefined();
+    expect(leer(false)).toBeUndefined();
+  });
+
+  it("un numérico inesperado tampoco vota por el lado caro", () => {
+    expect(leer(2)).toBeUndefined();
+    expect(leer(-1)).toBeUndefined();
+  });
+
+  it("y lo que no vota NO alcanza la unanimidad del perfil", () => {
+    // El cierre: los tres estados existen para que el perfil pueda distinguir
+    // "todos dicen lo mismo" de "algunos no dijeron nada".
+    const base = Array.from({ length: MUESTRAS_PERFIL }, (_, i) =>
+      venta({
+        id: 200 + i,
+        fecha_emision: `2026-08-${String(20 - i).padStart(2, "0")} 10:00:00`,
+        montos_brutos: i === 0 ? true : 1,
+        items: [{ cantidad: 1, concepto: "algo", precio: 1000, indicador_facturacion: 3 }],
+      }),
+    );
+    expect(derivarPerfilCasa(normalizar(base)).montos_brutos).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FISCAL-4: la unanimidad de `montos_brutos` se mide sobre TODA la ventana.
+// ---------------------------------------------------------------------------
+
+describe("derivarPerfilCasa mira la ventana entera para montos_brutos", () => {
+  const cfeV = (i: number, over: Record<string, unknown> = {}) =>
+    venta({
+      id: 300 + i,
+      fecha_emision: `2026-08-${String(28 - i).padStart(2, "0")} 10:00:00`,
+      montos_brutos: 1,
+      forma_pago: 1,
+      items: [{ cantidad: 1, concepto: "algo", precio: 1000, indicador_facturacion: 3 }],
+      ...over,
+    });
+
+  it("los 5 detallados coinciden pero el 6º de la ventana difiere → NO deriva", () => {
+    // El caso exacto del hallazgo: la ferretería 80/20 cuyas últimas cinco
+    // coinciden por casualidad. Mirando cinco, una racha pasaba por costumbre.
+    const detalles = normalizar(Array.from({ length: MUESTRAS_PERFIL }, (_, i) => cfeV(i)));
+    const ventana = normalizar([
+      ...Array.from({ length: MUESTRAS_PERFIL }, (_, i) => cfeV(i)),
+      cfeV(9, { montos_brutos: 0 }),
+    ]);
+
+    // Sin la ventana (la conducta vieja) sí derivaba: es lo que se está arreglando.
+    expect(derivarPerfilCasa(detalles).montos_brutos).toBe(true);
+    expect(derivarPerfilCasa(detalles, { ventana }).montos_brutos).toBeUndefined();
+  });
+
+  it("la ventana entera coincidiendo SÍ deriva, y lo dice contando", () => {
+    const detalles = normalizar(Array.from({ length: MUESTRAS_PERFIL }, (_, i) => cfeV(i)));
+    const ventana = normalizar(Array.from({ length: 40 }, (_, i) => cfeV(i)));
+    const p = derivarPerfilCasa(detalles, { ventana });
+
+    expect(p.montos_brutos).toBe(true);
+    expect(p.detalles.join(" ")).toContain("40 CFE aceptados de la ventana");
+  });
+
+  it("la TASA sigue saliendo de los cinco detallados, no de la ventana", () => {
+    // El listado no trae ítems, así que `indicador_facturacion` no se puede
+    // leer de ahí. La asimetría es la razón de que el parámetro exista.
+    const detalles = normalizar(Array.from({ length: MUESTRAS_PERFIL }, (_, i) => cfeV(i)));
+    const ventana = normalizar(
+      Array.from({ length: 40 }, (_, i) => cfeV(i, { items: null })),
+    );
+    const p = derivarPerfilCasa(detalles, { ventana });
+    expect(p.indicador_facturacion).toBe(3);
+    expect(p.montos_brutos).toBe(true);
+  });
+
+  it("un rechazado de la ventana no rompe la unanimidad", () => {
+    const detalles = normalizar(Array.from({ length: MUESTRAS_PERFIL }, (_, i) => cfeV(i)));
+    const ventana = normalizar([
+      ...Array.from({ length: MUESTRAS_PERFIL }, (_, i) => cfeV(i)),
+      cfeV(9, { montos_brutos: 0, estado: "Rechazado DGI" }),
+      cfeV(10, { montos_brutos: 0, tipo_comprobante: 112 }),
+    ]);
+    expect(derivarPerfilCasa(detalles, { ventana }).montos_brutos).toBe(true);
+  });
+});

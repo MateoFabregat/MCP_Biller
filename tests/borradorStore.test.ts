@@ -17,7 +17,11 @@ import { handleEmisionGuiada } from "../src/tools/emisionGuiada.js";
 import { handleEmitirComprobante } from "../src/tools/write/emitirComprobante.js";
 import { makeCtx } from "./helpers.js";
 
-const COMPROBANTE_MINIMO = {
+// Una FUNCIÓN y no una constante: `completarDesdeSesion` completa el cuerpo IN
+// PLACE (es lo que le permite rellenar el concepto antes de que el schema lo
+// exija), así que un objeto compartido se lleva el numero_interno de un test al
+// siguiente y el de al lado empieza a mirar un id viejo.
+const comprobanteMinimo = (): Record<string, unknown> => ({
   tipo_comprobante: 101,
   forma_pago: 1,
   sucursal: 6,
@@ -25,7 +29,7 @@ const COMPROBANTE_MINIMO = {
   montos_brutos: 0,
   cliente: "-",
   items: [{ cantidad: 1, concepto: "Pelota", precio: 200, indicador_facturacion: 3 }],
-};
+});
 
 const leerJson = (res: { content: Array<{ text: string }> }): Record<string, any> =>
   JSON.parse(res.content[0]!.text);
@@ -354,7 +358,7 @@ describe("biller_emision_guiada con sesión", () => {
     expect(borradores.vivas()).toBe(1);
 
     const dry = await handleEmitirComprobante(
-      { comprobante: COMPROBANTE_MINIMO, sesion: SESION },
+      { comprobante: comprobanteMinimo(), sesion: SESION },
       ctx,
     );
     // El dry-run NO borra: si borrara, un 422 dejaría al usuario sin nada.
@@ -362,7 +366,7 @@ describe("biller_emision_guiada con sesión", () => {
 
     await handleEmitirComprobante(
       {
-        comprobante: COMPROBANTE_MINIMO,
+        comprobante: comprobanteMinimo(),
         sesion: SESION,
         confirm: true,
         confirmation_token: (dry.structuredContent as any).confirmation_token,
@@ -381,12 +385,12 @@ describe("biller_emision_guiada con sesión", () => {
     await llamar(ctx, { clase_receptor: "empresa" });
 
     const dry = await handleEmitirComprobante(
-      { comprobante: COMPROBANTE_MINIMO, sesion: SESION },
+      { comprobante: comprobanteMinimo(), sesion: SESION },
       ctx,
     );
     await handleEmitirComprobante(
       {
-        comprobante: COMPROBANTE_MINIMO,
+        comprobante: comprobanteMinimo(),
         sesion: SESION,
         confirm: true,
         confirmation_token: (dry.structuredContent as any).confirmation_token,
@@ -403,10 +407,10 @@ describe("biller_emision_guiada con sesión", () => {
       postResponse: { id: 1, serie: "A", numero: "1" },
       config: { environment: "test", writeEnabled: true },
     });
-    const dry = await handleEmitirComprobante({ comprobante: COMPROBANTE_MINIMO }, ok.ctx);
+    const dry = await handleEmitirComprobante({ comprobante: comprobanteMinimo() }, ok.ctx);
     await handleEmitirComprobante(
       {
-        comprobante: COMPROBANTE_MINIMO,
+        comprobante: comprobanteMinimo(),
         confirm: true,
         confirmation_token: (dry.structuredContent as any).confirmation_token,
       },
@@ -436,7 +440,9 @@ describe("la clave de sesión absorbe el formato", () => {
     // Sin esto, el borrador se guardaba con una clave y se intentaba borrar con
     // otra: el borrador de un comprobante YA EMITIDO sobrevivía 24 h y la
     // factura siguiente arrancaba con el cliente y los ítems de la anterior.
-    const claves = ["099 123 456", "099123456", "099-123-456", "(099) 123.456"].map(claveSesion);
+    const claves = ["099 123 456", "099123456", "099-123-456", "(099) 123.456"].map((s) =>
+      claveSesion(s),
+    );
     expect(new Set(claves).size).toBe(1);
   });
 
@@ -473,7 +479,7 @@ describe("emitir con una sesión que no existe avisa en vez de callarse", () => 
     // el identificador. Después del POST el CFE ya existe y avisar es una
     // autopsia.
     const dry = await handleEmitirComprobante(
-      { comprobante: COMPROBANTE_MINIMO, sesion: "otra-conversacion-distinta" },
+      { comprobante: comprobanteMinimo(), sesion: "otra-conversacion-distinta" },
       ctx,
     );
     const warnings = (dry.structuredContent as any).warnings as string[];
@@ -490,10 +496,19 @@ describe("emitir con una sesión que no existe avisa en vez de callarse", () => 
     );
     expect(borradores.vivas()).toBe(1);
 
-    const dry = await handleEmitirComprobante({ comprobante: COMPROBANTE_MINIMO }, ctx);
+    // La 'sesion' va en LAS DOS llamadas, y no es un detalle del test: desde que
+    // el numero_interno lo completa el server desde el store, un dry-run sin
+    // sesión hashea un payload distinto del que se confirmaría con sesión, y el
+    // token rebota con "el payload cambió". Es la conducta correcta —lo que se
+    // aprueba y lo que se ejecuta tienen que ser lo mismo— y es lo que hace el
+    // flujo real, que arrastra el `sesion.id` de punta a punta.
+    const dry = await handleEmitirComprobante(
+      { comprobante: comprobanteMinimo(), sesion: guiada.sesion.id },
+      ctx,
+    );
     await handleEmitirComprobante(
       {
-        comprobante: COMPROBANTE_MINIMO,
+        comprobante: comprobanteMinimo(),
         sesion: guiada.sesion.id, // el id opaco, no el teléfono
         confirm: true,
         confirmation_token: (dry.structuredContent as any).confirmation_token,
@@ -561,32 +576,190 @@ describe("dos instancias sobre el mismo archivo", () => {
 });
 
 describe("numero_interno automático del borrador", () => {
+  const SESION_NI = "+59899123456";
   const llamar = async (ctx: any, args: Record<string, unknown>) =>
-    leerJson(await handleEmisionGuiada({ sesion: "+59899123456", ...args }, ctx));
+    leerJson(await handleEmisionGuiada({ sesion: SESION_NI, ...args }, ctx));
 
   it("nace con el borrador y NO cambia entre mensajes", async () => {
     // Es la defensa contra emitir dos veces por un retry: un reintento del
     // mismo borrador tiene que llevar el MISMO id para que la API lo frene.
-    const { ctx } = makeCtx();
-    const r1 = await llamar(ctx, { clase_receptor: "empresa" });
-    const r2 = await llamar(ctx, { fecha_emision: "17/08/2026" });
-    const id1 = r1.comprobante_borrador.numero_interno;
+    // Se mira en el STORE, no en la respuesta: el valor ya no sale del server.
+    const { ctx, borradores } = makeCtx();
+    await llamar(ctx, { clase_receptor: "empresa" });
+    const id1 = borradores.leer(borradores.clave(SESION_NI))?.estado.numero_interno;
     expect(id1).toMatch(/^wa-[0-9a-f]{8}-/);
-    expect(r2.comprobante_borrador.numero_interno).toBe(id1);
+
+    await llamar(ctx, { fecha_emision: "17/08/2026" });
+    expect(borradores.leer(borradores.clave(SESION_NI))?.estado.numero_interno).toBe(id1);
   });
 
   it("un borrador nuevo (tras reiniciar) lleva OTRO id", async () => {
-    const { ctx } = makeCtx();
-    const r1 = await llamar(ctx, { clase_receptor: "empresa" });
-    const r2 = await llamar(ctx, { reiniciar: true });
-    expect(r2.comprobante_borrador.numero_interno).not.toBe(
-      r1.comprobante_borrador.numero_interno,
-    );
+    const { ctx, borradores } = makeCtx();
+    await llamar(ctx, { clase_receptor: "empresa" });
+    const id1 = borradores.leer(borradores.clave(SESION_NI))?.estado.numero_interno;
+    await llamar(ctx, { reiniciar: true });
+    expect(borradores.leer(borradores.clave(SESION_NI))?.estado.numero_interno).not.toBe(id1);
   });
 
   it("sin sesión no hay id: no hay borrador que lo conserve", async () => {
     const { ctx } = makeCtx();
     const r = leerJson(await handleEmisionGuiada({ clase_receptor: "empresa" }, ctx));
     expect(r.comprobante_borrador.numero_interno).toBeUndefined();
+    expect(r.estado_entendido.numero_interno_generado).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // SEC-A1: el id NO puede volver por el canal del modelo.
+  //
+  // `numero_interno` está en CAMPOS_NO_CONFIABLES, así que un borrador que lo
+  // devolviera lo devolvería ENVUELTO en ⟦dato-no-confiable⟧. Los dos caminos
+  // que le quedaban al modelo eran malos, y el segundo es el caro: si limpia
+  // las marcas a mano y dos reintentos las limpian distinto, salen dos ids
+  // distintos, `buscarPorNumeroInterno` no matchea ninguno, y la misma venta se
+  // emite DOS VECES ante DGI.
+  // -------------------------------------------------------------------------
+  it("el borrador devuelto NO trae numero_interno (ni envuelto ni limpio)", async () => {
+    const { ctx, borradores } = makeCtx();
+    const r = await llamar(ctx, { clase_receptor: "empresa" });
+    const guardado = borradores.leer(borradores.clave(SESION_NI))?.estado.numero_interno;
+
+    expect(guardado).toBeDefined();
+    expect(r.comprobante_borrador.numero_interno).toBeUndefined();
+    // Ni por acá ni por ninguna otra clave de la respuesta entera.
+    expect(JSON.stringify(r)).not.toContain(guardado!);
+    // Lo que sí vuelve es que EXISTE: alcanza para saber que la deduplicación
+    // está puesta y no da nada que copiar mal.
+    expect(r.estado_entendido.numero_interno_generado).toBe(true);
+  });
+
+  it("al emitir con 'sesion', el numero_interno se completa DESDE el store", async () => {
+    const { ctx, borradores } = makeCtx({
+      postResponse: { id: 1, serie: "A", numero: "1" },
+      config: { environment: "test", writeEnabled: true },
+    });
+    await llamar(ctx, { clase_receptor: "consumidor_final", sin_receptor: true });
+    const esperado = borradores.leer(borradores.clave(SESION_NI))?.estado.numero_interno;
+
+    // El agente NO manda numero_interno: no lo tiene.
+    const dry = await handleEmitirComprobante(
+      { comprobante: comprobanteMinimo(), sesion: SESION_NI },
+      ctx,
+    );
+    const preview = (dry.structuredContent as any).payload_preview as Record<string, unknown>;
+    expect(preview.numero_interno).toBe(esperado);
+
+    // Y el warning de "sin numero_interno no hay forma de deduplicar" desaparece.
+    const warnings = (dry.structuredContent as any).warnings as string[];
+    expect(warnings.some((w) => w.includes("no hay forma de deduplicar"))).toBe(false);
+  });
+
+  it("dos confirms de la misma sesión llevan el MISMO numero_interno", async () => {
+    // Es el invariante entero: un reintento tiene que ser reconocible como el
+    // mismo documento. Si cada intento llevara un id distinto, la deduplicación
+    // de la API no vería nada y saldrían dos CFE por la misma venta.
+    const { ctx } = makeCtx({
+      postResponse: { id: 1, serie: "A", numero: "1" },
+      config: { environment: "test", writeEnabled: true },
+    });
+    await llamar(ctx, { clase_receptor: "consumidor_final", sin_receptor: true });
+
+    const ids = await Promise.all(
+      [1, 2].map(async () => {
+        const res = await handleEmitirComprobante(
+          { comprobante: comprobanteMinimo(), sesion: SESION_NI },
+          ctx,
+        );
+        return ((res.structuredContent as any).payload_preview as Record<string, unknown>)
+          .numero_interno;
+      }),
+    );
+    expect(ids[0]).toBeDefined();
+    expect(ids[0]).toBe(ids[1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SEC-A2: la clave de sesión lleva la identidad de la empresa.
+//
+// El escenario que esto cierra es concreto y no hipotético: multi-tenant con
+// BILLER_BORRADOR_STORE_PATH, que es a nivel PROCESO. Sin un componente de
+// empresa en la clave, dos tenants con el mismo teléfono escriben y leen la
+// misma línea del mismo archivo — el borrador de una empresa pisando el de otra.
+// ---------------------------------------------------------------------------
+describe("la clave de sesión separa empresas", () => {
+  let dir: string;
+  let path: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "borradores-tenant-"));
+    path = join(dir, "borradores.jsonl");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const TELEFONO = "+59899123456";
+
+  it("el mismo teléfono en dos empresas da dos claves distintas", () => {
+    expect(claveSesion(TELEFONO, "empresa-a")).not.toBe(claveSesion(TELEFONO, "empresa-b"));
+    // Y sigue siendo estable dentro de cada una, con el formato que sea.
+    expect(claveSesion(TELEFONO, "empresa-a")).toBe(claveSesion("+598 99 123 456", "empresa-a"));
+  });
+
+  it("la sal impide reconstruir el número desde el archivo", () => {
+    // Sin sal esto era sha256 de un espacio de 10^7 teléfonos: con el archivo en
+    // la mano, la tabla se arma en segundos. La prueba es que el hash de un
+    // número CONOCIDO no coincide con el que quedó escrito.
+    const store = new BorradorStoreArchivo(path, { sal: "secreto-de-la-empresa" });
+    store.guardar(store.clave(TELEFONO), { moneda: "UYU" });
+    const contenido = readFileSync(path, "utf8");
+
+    expect(contenido).not.toContain("99123456");
+    // El atacante que prueba los 10^7 hashes sin sal no pega ninguno.
+    expect(contenido).not.toContain(claveSesion(TELEFONO));
+  });
+
+  it("dos tenants sobre el MISMO archivo no comparten borrador", () => {
+    const a = new BorradorStoreArchivo(path, { sal: "empresa-a" });
+    const b = new BorradorStoreArchivo(path, { sal: "empresa-b" });
+
+    a.guardar(a.clave(TELEFONO), { moneda: "UYU", nombre_cliente: "cliente de A" });
+    b.guardar(b.clave(TELEFONO), { moneda: "USD", nombre_cliente: "cliente de B" });
+
+    expect(a.leer(a.clave(TELEFONO))?.estado.nombre_cliente).toBe("cliente de A");
+    expect(b.leer(b.clave(TELEFONO))?.estado.nombre_cliente).toBe("cliente de B");
+  });
+
+  it("el sesion.id de un tenant NO resuelve en el otro", () => {
+    // El otro camino: no el teléfono, sino el id opaco pegado a mano. Son 24
+    // hex perfectamente válidos, y sobre un archivo compartido habría resuelto
+    // contra el borrador del vecino.
+    const a = new BorradorStoreArchivo(path, { sal: "empresa-a" });
+    const b = new BorradorStoreArchivo(path, { sal: "empresa-b" });
+
+    const idDeA = a.clave(TELEFONO);
+    a.guardar(idDeA, { nombre_cliente: "cliente de A" });
+
+    expect(a.leer(idDeA)).not.toBeNull();
+    expect(b.leer(idDeA)).toBeNull();
+  });
+
+  it("borrar en un tenant no borra el del otro", () => {
+    const a = new BorradorStoreArchivo(path, { sal: "empresa-a" });
+    const b = new BorradorStoreArchivo(path, { sal: "empresa-b" });
+    a.guardar(a.clave(TELEFONO), { moneda: "UYU" });
+    b.guardar(b.clave(TELEFONO), { moneda: "USD" });
+
+    a.borrar(a.clave(TELEFONO));
+    expect(a.leer(a.clave(TELEFONO))).toBeNull();
+    expect(b.leer(b.clave(TELEFONO))?.estado.moneda).toBe("USD");
+  });
+
+  it("sin sal (el default en memoria) la conducta no cambia", () => {
+    const store = new BorradorStoreMemoria();
+    const id = store.clave(TELEFONO);
+    expect(id).toMatch(/^[0-9a-f]{24}$/);
+    expect(store.clave("+598 99 123 456")).toBe(id);
+    store.guardar(id, { moneda: "UYU" });
+    expect(store.leer(id)?.estado.moneda).toBe("UYU");
+    // Y el id devuelto vuelve a caer en su propia sesión.
+    expect(store.clave(id)).toBe(id);
   });
 });

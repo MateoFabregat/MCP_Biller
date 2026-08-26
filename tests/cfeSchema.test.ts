@@ -360,6 +360,36 @@ describe("validarComprobante — avisos no bloqueantes", () => {
     expect(w.some((x) => /receptor/.test(x))).toBe(false);
   });
 
+  // -------------------------------------------------------------------------
+  // FISCAL-3: la ausencia de `montos_brutos` NO es neutral.
+  //
+  // La API interpreta el silencio como "los precios son netos" y le suma el
+  // 22%. O sea que omitir el campo YA ES una respuesta, y es la equivocada para
+  // el precio de mostrador uruguayo. Se avisa con el mismo criterio que la
+  // sucursal y el receptor: un campo cuya ausencia cambia el documento tiene
+  // que verse antes de emitir, no en la factura.
+  // -------------------------------------------------------------------------
+  it("avisa cuando falta montos_brutos, porque la API asume netos y suma IVA", () => {
+    const w = validarComprobante(parse({ ...E_TICKET, montos_brutos: undefined }));
+    expect(w.some((x) => /montos_brutos/.test(x) && /22%/.test(x))).toBe(true);
+  });
+
+  it("con montos_brutos explícito —incluso false— NO avisa", () => {
+    // El contrapeso: "el usuario dijo que van netos" es una respuesta, no una
+    // omisión, y avisarla sería ruido en cada emisión bien hecha.
+    for (const valor of [0, 1]) {
+      const w = validarComprobante(parse({ ...E_TICKET, montos_brutos: valor }));
+      expect(w.some((x) => /montos_brutos/.test(x)), `montos_brutos=${valor}`).toBe(false);
+    }
+  });
+
+  it("un remito sin montos_brutos NO dispara el aviso: ahí no hay precios", () => {
+    const w = validarComprobante(
+      parse({ ...E_TICKET, tipo_comprobante: 181, tipo_traslado: 1, montos_brutos: undefined }),
+    );
+    expect(w.some((x) => /montos_brutos/.test(x))).toBe(false);
+  });
+
   // Sin el importe, la regla del umbral de UI no se puede evaluar. Que el
   // silencio sea el default evita un warning inútil en cada e-Ticket; el aviso
   // aparece solo cuando el llamador SÍ intentó calcular el total y no pudo.

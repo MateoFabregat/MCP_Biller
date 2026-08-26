@@ -300,3 +300,170 @@ describe("el preview de confirmación", () => {
     expect(texto).not.toContain("$500");
   });
 });
+
+// =============================================================================
+// FISCAL-3 y FISCAL-6: lo que el preview callaba.
+//
+// Dos silencios distintos y los dos caros:
+//
+//   · `montos_brutos` sin valor no producía NINGUNA línea de supuestos. Y es
+//     justo el caso en que la API asume precios netos y suma el 22%: el
+//     silencio ya era una respuesta, y era la que más plata mueve.
+//   · Los ajustes globales, las retenciones y las advertencias no se imprimían.
+//     Un descuento del 10% dejaba $1.300 invisibles entre las líneas y el total.
+// =============================================================================
+
+describe("el preview no se calla lo que cambia el número", () => {
+  const DOS_BOLSAS_NETO = {
+    ...BASE,
+    montos_brutos: 0,
+    items: [
+      { cantidad: 2, concepto: "bolsas de portland", precio: 6500, indicador_facturacion: 3 },
+    ],
+  };
+
+  it("montos_brutos SIN VALOR se declara: la API asume netos y suma el IVA", () => {
+    // El caso del hallazgo: antes, `undefined` no escribía nada.
+    const texto = formatearTotales(calcularTotales(parse(DOS_BOLSAS_NETO)), {
+      fecha_emision: "26/08/2026",
+      forma_pago: 1,
+      hoy: "26/08/2026",
+    });
+    expect(texto).toContain("IVA sumado aparte (la API asume precios netos)");
+  });
+
+  it("y con valor explícito NO agrega el paréntesis: son cosas distintas", () => {
+    // "el usuario dijo que van netos" y "nadie dijo nada y la API los toma
+    // netos" llevan al mismo número y no son la misma afirmación.
+    const texto = formatearTotales(calcularTotales(parse(DOS_BOLSAS_NETO)), {
+      montos_brutos: false,
+    });
+    expect(texto).toContain("IVA sumado aparte");
+    expect(texto).not.toContain("la API asume");
+  });
+
+  it("un descuento global del 10% aparece como FILA, no como diferencia", () => {
+    const cuerpo = parse({
+      ...BASE,
+      montos_brutos: 0,
+      items: [
+        { cantidad: 2, concepto: "bolsas de portland", precio: 6500, indicador_facturacion: 3 },
+      ],
+      descuentosRecargos: [
+        { indicador_facturacion: 3, es_recargo: false, desc_rec_tipo: "%", valor: 10, glosa: "Cliente frecuente" },
+      ],
+    });
+    const t = calcularTotales(cuerpo);
+    const texto = formatearTotales(t, { montos_brutos: false });
+
+    // 13.000 de neto, 10% = 1.300 de descuento.
+    expect(t.ajustes_globales).toBe(-1300);
+    expect(texto).toContain("Descuento 10%");
+    expect(texto).toContain("−$1.300");
+    // El "Neto" que se imprime es el de ANTES del ajuste: si fuera el de
+    // después, la fila del descuento lo estaría restando dos veces a la vista.
+    expect(texto).toContain("$13.000");
+    // Y el TOTAL cierra: 11.700 + 22% = 14.274.
+    expect(texto).toContain("$14.274");
+  });
+
+  it("un recargo global se distingue de un descuento por el signo", () => {
+    const texto = formatearTotales(
+      calcularTotales(
+        parse({
+          ...BASE,
+          montos_brutos: 0,
+          items: [{ cantidad: 1, concepto: "Servicio", precio: 1000, indicador_facturacion: 3 }],
+          descuentosRecargos: [
+            { indicador_facturacion: 3, es_recargo: true, desc_rec_tipo: "%", valor: 5 },
+          ],
+        }),
+      ),
+      { montos_brutos: false },
+    );
+    expect(texto).toContain("Recargo 5%");
+    expect(texto).toContain("+$50");
+  });
+
+  it("las retenciones se muestran APARTE y se aclara que no suman", () => {
+    const texto = formatearTotales(
+      calcularTotales(
+        parse({
+          ...BASE,
+          montos_brutos: 0,
+          items: [{ cantidad: 1, concepto: "Servicio", precio: 1000, indicador_facturacion: 3 }],
+          retencionesPercepciones: [{ codigo: "2183", tasa: 10, monto_sujeto: 1000, valor: 100 }],
+        }),
+      ),
+      { montos_brutos: false },
+    );
+    expect(texto).toContain("Retenciones (aparte)");
+    expect(texto).toContain("no están sumadas en el TOTAL");
+  });
+
+  it("los ítems sin cargo se declaran además de mostrarse como línea", () => {
+    // La línea "sin cargo" solo se ve si el ítem entra en las 8 visibles. El
+    // aviso vale para el comprobante entero.
+    const texto = formatearTotales(
+      calcularTotales(
+        parse({
+          ...BASE,
+          montos_brutos: 0,
+          items: [
+            { cantidad: 1, concepto: "Pelota", precio: 200, indicador_facturacion: 3 },
+            { cantidad: 1, concepto: "Muestra", precio: 500, indicador_facturacion: 5 },
+          ],
+        }),
+      ),
+      { montos_brutos: false },
+    );
+    expect(texto).toContain("no suman al total");
+  });
+
+  it("una tasa que no se pudo determinar sale escrita en el preview", () => {
+    // `advertencias` existía y no se imprimía: el TOTAL decía "(aprox.)" y en
+    // ningún lado se explicaba por qué.
+    const texto = formatearTotales(
+      calcularTotales(
+        parse({
+          ...BASE,
+          montos_brutos: 0,
+          items: [{ cantidad: 1, concepto: "Otra tasa", precio: 1000, indicador_facturacion: 4 }],
+        }),
+      ),
+      { montos_brutos: false },
+    );
+    expect(texto).toContain("TOTAL (aprox.)");
+    expect(texto).toContain("⚠️");
+    expect(texto).toContain("no se puede");
+  });
+
+  it("con todo junto sigue entrando en el cuerpo de WhatsApp", () => {
+    // Si el mensaje se pasa de largo, lo que se corta es el final — o sea el
+    // TOTAL. Lo que se cae son los avisos, y se declara cuántos.
+    const texto = formatearTotales(
+      calcularTotales(
+        parse({
+          ...BASE,
+          montos_brutos: 0,
+          items: Array.from({ length: 20 }, (_, i) => ({
+            cantidad: 3,
+            concepto: `Producto con un nombre bastante largo número ${i}`,
+            precio: 1234.56,
+            indicador_facturacion: i % 3 === 0 ? 4 : 3,
+          })),
+          descuentosRecargos: [
+            { indicador_facturacion: 3, es_recargo: false, desc_rec_tipo: "%", valor: 10 },
+          ],
+          retencionesPercepciones: [{ codigo: "2183", tasa: 10, monto_sujeto: 1000, valor: 100 }],
+        }),
+      ),
+      { fecha_emision: "26/08/2026", forma_pago: 1, montos_brutos: false, hoy: "26/08/2026" },
+    );
+    expect(texto.length).toBeLessThan(1024);
+    // Los números NO se recortan nunca: lo que se cae es la letra chica.
+    expect(texto).toContain("TOTAL");
+    expect(texto).toContain("Descuento 10%");
+    expect(texto).toContain("Hoy 26/08/2026");
+  });
+});

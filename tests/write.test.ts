@@ -157,6 +157,88 @@ describe("emitir_comprobante — validaciones de negocio (A/B)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// SEC-A3: BILLER_MAX_MONTO_* tiene que aplicar a la emisión.
+//
+// El tope existe por una coma mal puesta ("facturale 1.500" leído como
+// 1.500.000), o sea por la emisión. Y era justo la operación que se salteaba:
+// `extraerMonto` busca `total` en la raíz del payload y un ComprobanteBody no
+// lo tiene — el total de un CFE es la suma de sus líneas.
+// ---------------------------------------------------------------------------
+
+describe("el tope de monto aplica a emitir_comprobante", () => {
+  const CARO = {
+    ...COMPROBANTE,
+    items: [{ cantidad: 1, concepto: "Pelota", precio: 999_999_999, indicador_facturacion: 3 }],
+  };
+
+  it("BLOQUEA la ejecución y no llega a la API", async () => {
+    const fx = makeCtx({
+      postResponse: EMIT_RESPONSE,
+      config: { writeEnabled: true, maxMontos: { UYU: 100_000 } },
+    });
+    const { exec } = await dryRunThenExecute(fx, { comprobante: CARO });
+
+    expect(exec.isError).toBe(true);
+    const err = errorOf(exec);
+    // El mensaje tiene que dejar ver de un vistazo si fue un typo o una venta
+    // real: por eso dice el monto Y el tope. Y el monto es el TOTAL CON IVA
+    // —999.999.999 + 22%—, que es la plata que iba a salir facturada, no el
+    // neto de las líneas.
+    expect(err.message).toContain("1.219.999.998");
+    expect(err.message).toContain("100.000");
+    expect(err.message).toContain("NO se ejecutó");
+    expect(fx.postMock).not.toHaveBeenCalled();
+  });
+
+  it("y queda anotado en el audit como bloqueo por monto", async () => {
+    const fx = makeCtx({
+      postResponse: EMIT_RESPONSE,
+      config: { writeEnabled: true, maxMontos: { UYU: 100_000 } },
+    });
+    await dryRunThenExecute(fx, { comprobante: CARO });
+    expect(fx.auditEntries.some((e) => e.outcome === "monto_excedido")).toBe(true);
+  });
+
+  it("el DRY-RUN lo anticipa en vez de dejar que la confirmación rebote", async () => {
+    const fx = makeCtx({
+      postResponse: EMIT_RESPONSE,
+      config: { writeEnabled: true, maxMontos: { UYU: 100_000 } },
+    });
+    const dry = await handleEmitirComprobante({ comprobante: CARO }, fx.ctx);
+    expect(sc(dry).mode).toBe("dry_run");
+    expect((sc(dry).warnings as string[]).some((w) => /supera el tope/.test(w))).toBe(true);
+  });
+
+  it("una emisión por debajo del tope sigue pasando", async () => {
+    const fx = makeCtx({
+      postResponse: EMIT_RESPONSE,
+      config: { writeEnabled: true, maxMontos: { UYU: 100_000 } },
+    });
+    const { exec, dry } = await dryRunThenExecute(fx, { comprobante: COMPROBANTE });
+    expect((sc(dry).warnings as string[]).some((w) => /supera el tope/.test(w))).toBe(false);
+    expect(sc(exec).mode).toBe("executed");
+  });
+
+  it("el tope es POR MONEDA también acá", async () => {
+    // Un límite pensado en pesos aplicado a una factura en dólares frenaría
+    // casi todo. Sin tope para USD, no se bloquea.
+    const fx = makeCtx({
+      postResponse: EMIT_RESPONSE,
+      config: { writeEnabled: true, maxMontos: { UYU: 100_000 } },
+    });
+    const enDolares = { ...CARO, moneda: "USD", tasa_cambio: 40 };
+    const { exec } = await dryRunThenExecute(fx, { comprobante: enDolares });
+    expect(sc(exec).mode).toBe("executed");
+  });
+
+  it("sin topes configurados nada cambia", async () => {
+    const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: { writeEnabled: true } });
+    const { exec } = await dryRunThenExecute(fx, { comprobante: CARO });
+    expect(sc(exec).mode).toBe("executed");
+  });
+});
+
 describe("gate de producción", () => {
   const prodCfg = { apiBaseUrl: "https://biller.uy", writeEnabled: true };
 

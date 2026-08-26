@@ -157,6 +157,55 @@ describe("S7 — tope de monto por operación", () => {
       expect(msg).toContain("NO se ejecutó");
     }
   });
+
+  // -------------------------------------------------------------------------
+  // SEC-A3: el tope NO se aplicaba a la emisión, que es para lo que se escribió.
+  //
+  // `extraerMonto` husmea `total`/`monto`/`importe` en la RAÍZ del payload. Un
+  // ComprobanteBody no tiene ninguno de los tres: el total de un CFE es la suma
+  // de sus líneas con su IVA. O sea que BILLER_MAX_MONTO_UYU nunca frenó una
+  // emisión — justo la operación que motiva el tope (una coma mal puesta).
+  // -------------------------------------------------------------------------
+  it("un ComprobanteBody NO tiene total en la raíz: por eso el tope no aplicaba", () => {
+    const cfe = {
+      tipo_comprobante: 101,
+      moneda: "UYU",
+      items: [{ cantidad: 1, concepto: "Pelota", precio: 999_999_999 }],
+    };
+    expect(extraerMonto(cfe)).toBeNull();
+    // Sin monto explícito, el tope se evapora aunque esté configurado.
+    expect(() => verificarLimiteMonto(cfe, { UYU: 100_000 })).not.toThrow();
+  });
+
+  it("con el total calculado pasado explícitamente, SÍ bloquea", () => {
+    const cfe = {
+      tipo_comprobante: 101,
+      moneda: "UYU",
+      items: [{ cantidad: 1, concepto: "Pelota", precio: 999_999_999 }],
+    };
+    expect(() =>
+      verificarLimiteMonto(cfe, { UYU: 100_000 }, { monto: 999_999_999, moneda: "UYU" }),
+    ).toThrow(BillerMontoExcedidoError);
+  });
+
+  it("el monto explícito GANA sobre lo husmeado del payload", () => {
+    // Es un número calculado, no adivinado. Si un payload trajera un `total`
+    // decorativo distinto del real, el que manda es el que se va a facturar.
+    expect(() =>
+      verificarLimiteMonto({ total: 10, moneda: "UYU" }, { UYU: 100_000 }, { monto: 500_000, moneda: "UYU" }),
+    ).toThrow(BillerMontoExcedidoError);
+  });
+
+  it("un monto explícito en cero o no finito cae al husmeo de siempre", () => {
+    // Un CFE de total 0 (todo entrega gratuita) no tiene por qué chocar contra
+    // un tope, y un NaN no puede bloquear una emisión legítima.
+    expect(() =>
+      verificarLimiteMonto({ total: 10 }, { UYU: 100_000 }, { monto: 0, moneda: "UYU" }),
+    ).not.toThrow();
+    expect(() =>
+      verificarLimiteMonto({ total: 10 }, { UYU: 100_000 }, { monto: NaN, moneda: "UYU" }),
+    ).not.toThrow();
+  });
 });
 
 describe("S6 — idempotencia persistente", () => {

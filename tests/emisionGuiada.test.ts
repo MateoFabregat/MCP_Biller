@@ -1156,6 +1156,71 @@ describe("biller_emision_guiada lee el texto del pedido por su cuenta", () => {
     expect(r.estado_entendido.items[0].precio).toBe(6500);
   });
 
+  // -------------------------------------------------------------------------
+  // FISCAL-1, del otro lado de la costura: lo que el extractor lee de más tiene
+  // que llegar al borrador, y lo que NO se pudo leer no puede terminar en
+  // `listo`.
+  // -------------------------------------------------------------------------
+  it("un pedido de DOS ítems llega con las dos líneas al borrador", async () => {
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar(
+      {
+        mensaje: "facturale a gonzalez 3 cajas de clavos a 1200 y 2 bolsas de portland a 6500",
+        clase_receptor: "empresa",
+        documento: "210000000011",
+        cliente_ya_facturado: true,
+        montos_brutos: true,
+        indicador_facturacion: 3,
+      },
+      ctx,
+    );
+    expect(r.estado_entendido.items).toHaveLength(2);
+    expect(r.comprobante_borrador.items).toHaveLength(2);
+    expect(r.comprobante_borrador.items[0]).toMatchObject({ cantidad: 3, precio: 1200 });
+    expect(r.comprobante_borrador.items[1]).toMatchObject({ cantidad: 2, precio: 6500 });
+    expect(r.listo_para_requisitos).toBe(true);
+  });
+
+  it("un precio que no entró en ninguna línea abre una pregunta, no un `listo`", async () => {
+    // El freno obligatorio del hallazgo: con los $6.500 sin ítem al que
+    // pertenecer, el flujo NO puede decir "andá a emitir". Antes emitía media
+    // factura sin un warning.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar(
+      {
+        mensaje: "facturale a gonzalez 3 cajas de clavos a 1200 y portland a 6500",
+        clase_receptor: "empresa",
+        documento: "210000000011",
+        cliente_ya_facturado: true,
+        montos_brutos: true,
+        indicador_facturacion: 3,
+      },
+      ctx,
+    );
+    expect(r.listo_para_requisitos).toBe(false);
+    expect(r.paso).toBe("concepto");
+    expect(r.warnings.join(" ")).toContain("6500");
+    expect(r.warnings.join(" ")).toContain("NO emitas todavía");
+    // Y la línea que SÍ se leyó no se pierde por el camino.
+    expect(r.comprobante_borrador.items).toHaveLength(1);
+  });
+
+  it('"500 de pan" entra como importe y el flujo pregunta lo que corresponde', async () => {
+    // Con la lectura vieja (cantidad 500), confirmar el precio con "500" daba
+    // $250.000 por una bolsa de pan.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = await llamar(
+      { mensaje: "facturale 500 de pan a la panaderia", clase_receptor: "consumidor_final", sin_receptor: true },
+      ctx,
+    );
+    expect(r.estado_entendido.items[0]).toMatchObject({ concepto_cargado: true, precio: 500 });
+    // La cantidad la pone `aplicarDefaults` en 1, no el texto.
+    expect(r.estado_entendido.items[0].cantidad).toBe(1);
+    expect(r.defaults_aplicados).toContain("cantidad");
+    // Concepto y precio ya están: lo que falta es el IVA, no la cantidad.
+    expect(r.paso).toBe("iva");
+  });
+
   it("lo que mandó el agente EXPLÍCITO nunca se pisa", async () => {
     // El texto dice 2 bolsas a 6.500; el agente dice 3 a 7.000 porque el
     // usuario lo corrigió después. Gana el dato explícito, siempre.
@@ -1362,6 +1427,63 @@ describe("el perfil de la casa: los defaults que salen del historial", () => {
     expect(r.comprobante_borrador.items[0].indicador_facturacion).toBe(3);
   });
 
+  // -------------------------------------------------------------------------
+  // FISCAL-4: la unanimidad de `montos_brutos` se mide sobre TODA la ventana.
+  //
+  // Los otros campos salen de los cinco comprobantes DETALLADOS porque la tasa
+  // de IVA vive en los ítems. `montos_brutos` no: viene en el listado, y los
+  // ~200 de la ventana de 90 días ya están en memoria. Mirando solo cinco, una
+  // ferretería 80/20 tenía una chance nada despreciable de que sus últimas
+  // cinco coincidieran por casualidad — y ahí una racha pasaba por costumbre.
+  // -------------------------------------------------------------------------
+  it("los 5 últimos coinciden pero el 6º de la ventana difiere: NO deriva", async () => {
+    // Exactamente el caso del hallazgo. Los cinco que se detallan son unánimes;
+    // el sexto —que está en la ventana y nadie miraba— dice lo contrario.
+    const ventana = [...CASA_CON_IVA_INCLUIDO, cfe(9, { id: 599, montos_brutos: 0 })];
+    const { ctx } = makeCtx({
+      impl: apiConHistorial(ventana),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+
+    expect(r.perfil_casa.campos).not.toContain("montos_brutos");
+    expect(r.comprobante_borrador.montos_brutos).toBeUndefined();
+    // Se sigue preguntando la mitad que el perfil no pudo contestar; la tasa,
+    // que SÍ se deriva de los cinco detallados, sigue derivándose.
+    expect(r.paso).toBe("precio_incluye_iva");
+    expect(r.comprobante_borrador.items[0].indicador_facturacion).toBe(3);
+  });
+
+  it("y lo dice contando la ventana entera, no cinco", async () => {
+    const ventana = [...CASA_CON_IVA_INCLUIDO, ...Array.from({ length: 7 }, (_, i) => cfe(10 + i))];
+    const { ctx } = makeCtx({
+      impl: apiConHistorial(ventana),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+
+    expect(r.comprobante_borrador.montos_brutos).toBe(true);
+    // Los doce, no los cinco: el porqué del default tiene que decir sobre qué
+    // evidencia se tomó, o no es auditable.
+    expect(r.perfil_casa.porque.join(" ")).toContain("12 CFE aceptados de la ventana");
+  });
+
+  it("una venta RECHAZADA de la ventana no vota", async () => {
+    // El criterio del proyecto: solo "Aceptado DGI". Un comprobante rechazado no
+    // facturó nada, así que no describe la costumbre de la casa — y si votara,
+    // bastaría un rechazo con otro criterio para tapar el perfil de siempre.
+    const ventana = [
+      ...CASA_CON_IVA_INCLUIDO,
+      cfe(9, { id: 598, montos_brutos: 0, estado: "Rechazado DGI" }),
+    ];
+    const { ctx } = makeCtx({
+      impl: apiConHistorial(ventana),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+    expect(r.comprobante_borrador.montos_brutos).toBe(true);
+  });
+
   it("LA RESPUESTA DEL USUARIO PISA AL PERFIL, siempre", async () => {
     // La casa factura con IVA incluido en las últimas cinco; esta venta no. Lo
     // que dijo el usuario gana sin discutir, y el perfil deja de figurar como
@@ -1499,5 +1621,125 @@ describe("el perfil de la casa: los defaults que salen del historial", () => {
     // Y el total es el de un precio CON IVA adentro: 2 × 6500 = 13.000 finales,
     // no 15.860. Es exactamente el 22% que este default mueve.
     expect(resumen).toContain("$13.000");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FISCAL-2: la marca de precio AMBIGUO tiene que llegar al preview.
+//
+// `extraerPedido.ts` la viene poniendo desde siempre, con un comentario que
+// dice "TIENE QUE SOBREVIVIR HASTA EL PREVIEW". No sobrevivía: se perdía al
+// volcarse al estado, y el usuario recibía "$13" sin una palabra sobre que
+// probablemente eran $13.000. Cien veces de diferencia, en el único mensaje que
+// el humano lee antes de que exista un CFE.
+//
+// Estos tests recorren la costura entera —extractor → estado → store → payload
+// → resumen— porque el hallazgo era justo que cada pieza andaba y el camino no.
+// ---------------------------------------------------------------------------
+
+describe("un precio ambiguo sobrevive hasta el resumen de confirmación", () => {
+  const SESION = "59895923567";
+
+  const llamar = async (args: Record<string, unknown>, ctx: Parameters<typeof handleEmisionGuiada>[1]) =>
+    JSON.parse((await handleEmisionGuiada(args, ctx)).content[0]!.text) as Record<string, any>;
+
+  it("del texto al store: la marca se GUARDA, no solo se avisa", async () => {
+    const { ctx, borradores } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    await llamar({ sesion: SESION, mensaje: "facturale a perez 2 bolsas a 6.50" }, ctx);
+
+    const guardado = borradores.leer(borradores.clave(SESION))?.estado;
+    expect(guardado?.items?.[0]?.precio).toBe(6.5);
+    expect(guardado?.items?.[0]?.precio_ambiguo).toBe(true);
+  });
+
+  it("sobrevive a los mensajes siguientes del flujo", async () => {
+    // El motivo por el que un warning no alcanzaba: la confirmación ocurre dos
+    // o tres mensajes después, y el warning ya se lo llevó el viento.
+    const { ctx, borradores } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    await llamar({ sesion: SESION, mensaje: "facturale a perez 2 bolsas a 6.50" }, ctx);
+    await llamar({ sesion: SESION, mensaje: "emision:iva:3" }, ctx);
+    const r = await llamar({ sesion: SESION, mensaje: "emision:montos_brutos:si" }, ctx);
+
+    expect(borradores.leer(borradores.clave(SESION))?.estado.items?.[0]?.precio_ambiguo).toBe(true);
+    // Y el agente lo puede ver en el espejo: es un booleano nuestro, no texto
+    // de nadie, así que sí vuelve en la respuesta.
+    expect(r.estado_entendido.items[0].precio_ambiguo).toBe(true);
+  });
+
+  it("EL RESUMEN DEL PREVIEW LLEVA LA ADVERTENCIA, escrita", async () => {
+    // El cierre del hallazgo. Un precio ambiguo no puede llegar a un preview
+    // que solo diga "$13".
+    const { ctx } = makeCtx({
+      config: { capabilityMode: "write_enabled", environment: "test", writeEnabled: true },
+      postResponse: { id: 99 },
+    });
+    const guiada = await llamar(
+      {
+        sesion: SESION,
+        mensaje: "facturale a perez 2 bolsas a 6.50",
+        clase_receptor: "consumidor_final",
+        sin_receptor: true,
+        montos_brutos: true,
+        indicador_facturacion: 3,
+      },
+      ctx,
+    );
+    expect(guiada.listo_para_requisitos).toBe(true);
+
+    const dry = await handleEmitirComprobante(
+      {
+        sesion: guiada.sesion.id,
+        comprobante: { ...guiada.comprobante_borrador, sucursal: 6, cliente: "-" },
+      },
+      ctx,
+    );
+    expect(dry.isError).not.toBe(true);
+    const structured = dry.structuredContent as Record<string, any>;
+    const resumen = String(structured.resumen);
+
+    // El invariante: si llegó a `listo`, el resumen tiene la advertencia.
+    expect(resumen).toContain("⚠️");
+    expect(resumen).toContain("El precio");
+    expect(resumen).toContain("$6,50");
+    expect(resumen).toContain("ANTES de emitir");
+    // Y el agente también lo recibe, que es quien puede repreguntar.
+    expect((structured.warnings as string[]).join(" ")).toContain("AMBIGUO");
+  });
+
+  it("un precio corregido a mano APAGA la advertencia", async () => {
+    // El otro lado: una marca que no se puede apagar es ruido, y el ruido hace
+    // que se dejen de leer las advertencias que sí importan.
+    const { ctx, borradores } = makeCtx({
+      config: { capabilityMode: "write_enabled", environment: "test", writeEnabled: true },
+      postResponse: { id: 99 },
+    });
+    const primera = await llamar(
+      {
+        sesion: SESION,
+        mensaje: "facturale a perez 2 bolsas a 6.50",
+        clase_receptor: "consumidor_final",
+        sin_receptor: true,
+        montos_brutos: true,
+        indicador_facturacion: 3,
+      },
+      ctx,
+    );
+    // "no, son 6500"
+    const guiada = await llamar({ sesion: SESION, items: [{ precio: "6500" }] }, ctx);
+
+    expect(borradores.leer(borradores.clave(SESION))?.estado.items?.[0]?.precio_ambiguo).toBe(false);
+    expect(guiada.estado_entendido.items[0].precio_ambiguo).toBeUndefined();
+
+    const dry = await handleEmitirComprobante(
+      {
+        sesion: guiada.sesion.id,
+        comprobante: { ...guiada.comprobante_borrador, sucursal: 6, cliente: "-" },
+      },
+      ctx,
+    );
+    const resumen = String((dry.structuredContent as Record<string, any>).resumen);
+    expect(resumen).toContain("$13.000");
+    expect(resumen).not.toContain("admite otra lectura");
+    expect(primera.comprobante_borrador.items[0].precio).toBe(6.5);
   });
 });

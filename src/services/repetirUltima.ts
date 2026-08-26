@@ -139,9 +139,16 @@ export function estadoDesdeComprobante(detalle: ComprobanteEmitido): ResultadoRe
       );
     }
   }
-  if (detalle.montos_brutos !== null && detalle.montos_brutos !== undefined) {
-    estado.montos_brutos = detalle.montos_brutos === 1;
-  }
+  // TRES ESTADOS, NO DOS. `=== 1` sobre un campo que puede traer cualquier cosa
+  // colapsaba TODO lo que no fuera exactamente 1 —un 2, un valor que el
+  // normalizador no supo leer— a `false`, o sea a "los precios son netos, sumale
+  // el 22%". Un valor que no entendemos tiene que salir de la muestra, no votar
+  // por el lado caro. Ojo con el normalizador real: `toNumberOrNull` no lee
+  // booleanos, así que un `true` de la API llega como null y también queda
+  // afuera — que es la conducta correcta y está bajo test.
+  const brutos = detalle.montos_brutos;
+  if (brutos === 1) estado.montos_brutos = true;
+  else if (brutos === 0) estado.montos_brutos = false;
 
   const items: ItemEnCurso[] = [];
   for (const item of detalle.items ?? []) {
@@ -274,7 +281,18 @@ function tasaUnicaDe(detalle: ComprobanteEmitido): number | undefined {
  */
 export function derivarPerfilCasa(
   detalles: ReadonlyArray<ComprobanteEmitido>,
-  opciones: { minimo?: number; desde?: string; hasta?: string } = {},
+  opciones: {
+    minimo?: number;
+    desde?: string;
+    hasta?: string;
+    /**
+     * TODAS las ventas de la ventana, sin detalle. Ver `montos_brutos` abajo.
+     *
+     * Es el listado crudo que ya está en memoria (`traerVentana`), no una
+     * consulta nueva: no cuesta un request.
+     */
+    ventana?: ReadonlyArray<ComprobanteEmitido>;
+  } = {},
 ): PerfilCasa {
   const minimo = opciones.minimo ?? MUESTRAS_PERFIL;
   const muestra = ultimasVentasAceptadas(detalles, minimo);
@@ -299,18 +317,44 @@ export function derivarPerfilCasa(
   // un solo lugar del código.
   const estados = muestra.map((c) => estadoDesdeComprobante(c).estado);
 
-  // --- El criterio de IVA: unanimidad o nada -------------------------------
-  const brutos = unanime(estados.map((e) => e.montos_brutos), minimo);
+  // --- El criterio de IVA: unanimidad SOBRE TODA LA VENTANA ----------------
+  //
+  // POR QUÉ ESTE CAMPO NO SE MIRA SOBRE LOS ÚLTIMOS CINCO COMO LOS DEMÁS
+  //
+  // Los otros campos se derivan de los cinco comprobantes que se pidieron con
+  // DETALLE, porque la tasa de IVA vive en los ítems y el listado no los trae.
+  // `montos_brutos` no: viene en el LISTADO, así que los ~200 comprobantes de
+  // la ventana de 90 días ya están en memoria y mirar solo cinco era tirar
+  // evidencia gratis.
+  //
+  // Y tirarla con consecuencia. Una ferretería que factura 80/20 —ocho de cada
+  // diez con IVA incluido— tiene una chance nada despreciable de que sus
+  // ÚLTIMAS cinco facturas coincidan por casualidad: ahí la unanimidad decía
+  // "esta es la costumbre de la casa" sobre una racha, y el 20% restante salía
+  // facturado con el criterio equivocado. Un 22% de diferencia, en silencio,
+  // sobre un comprobante perfectamente bien formado.
+  //
+  // Sobre doscientos, una sola discrepancia rompe la unanimidad y el flujo
+  // vuelve a preguntar. Es exactamente lo que tiene que pasar: la unanimidad no
+  // es una estadística, es la afirmación de que esta empresa no cambia de
+  // criterio. Un contraejemplo la refuta.
+  const universoBrutos =
+    opciones.ventana === undefined
+      ? muestra
+      : opciones.ventana.filter(esVentaAceptada);
+  const brutosPorCfe = universoBrutos.map((c) => estadoDesdeComprobante(c).estado.montos_brutos);
+  const conDato = brutosPorCfe.filter((v) => v !== undefined).length;
+  const brutos = unanime(brutosPorCfe, minimo);
   if (brutos !== undefined) {
     perfil.montos_brutos = brutos;
     perfil.detalles.push(
-      `montos_brutos=${brutos}: los ${minimo} últimos CFE aceptados coinciden ` +
-        `(${brutos ? "precios con IVA incluido" : "IVA sumado aparte"}).`,
+      `montos_brutos=${brutos}: los ${conDato} CFE aceptados de la ventana que traen el campo ` +
+        `coinciden TODOS (${brutos ? "precios con IVA incluido" : "IVA sumado aparte"}).`,
     );
   } else {
     perfil.detalles.push(
-      `montos_brutos: los ${minimo} últimos CFE aceptados NO coinciden (o el campo no vino en todos). ` +
-        "Se sigue preguntando: es el campo que mueve el 22% del total.",
+      `montos_brutos: los ${conDato} CFE aceptados de la ventana que traen el campo NO coinciden ` +
+        `(o son menos de ${minimo}). Se sigue preguntando: es el campo que mueve el 22% del total.`,
     );
   }
 

@@ -64,6 +64,21 @@ export interface PedidoEmision {
   /** Nombre del cliente COMO LO ESCRIBIÓ el usuario. Sin resolver. */
   cliente?: string;
   items: ItemPedido[];
+  /**
+   * Los números que venían MARCADOS como precio ("a 6500", "$900") y que no
+   * entraron en ningún ítem.
+   *
+   * NO ES DIAGNÓSTICO: es un freno. Un número marcado como precio que quedó
+   * afuera significa que el mensaje nombraba más venta de la que se pudo leer
+   * —"…a 1200 y portland a 6500", donde el segundo tramo no trae cantidad— y
+   * un pedido así NO puede considerarse completo. Antes se descartaba en
+   * silencio y el preview mostraba media factura: los $6.500 no aparecían en
+   * ninguna línea ni en el total, y el CFE salía perfectamente bien formado.
+   *
+   * Quien lo consume (`rellenarDesdePedido`) abre un ítem vacío para que el
+   * flujo pregunte por el resto en vez de ir derecho a "listo".
+   */
+  precios_sin_ubicar: string[];
   /** "USD" o "UYU", solo si el texto la nombró. */
   moneda?: string;
   /** Código de FORMAS_PAGO: 1 contado, 2 crédito. Solo si el texto lo dijo. */
@@ -165,6 +180,32 @@ const MARCA_PRECIO_ANTES: ReadonlySet<string> = new Set([
 
 /** Y las que lo marcan DESPUÉS: "6500 cada una", "6500 c/u". */
 const MARCA_PRECIO_DESPUES: ReadonlySet<string> = new Set(["cada", "c/u", "cu", "la"]);
+
+/**
+ * Lo que SEPARA un ítem del siguiente: "…a 1200 Y 2 bolsas…".
+ *
+ * La coma y el salto de línea no están —y no es un olvido—: `tokenizarPedido`
+ * los convierte en espacio antes de que este módulo los vea. Los cubre la otra
+ * mitad de la regla (ver `abreOtroItem`): un número que acaba de consumirse
+ * como precio también separa, y eso es exactamente lo que queda escrito donde
+ * había una coma o un enter.
+ */
+const SEPARADORES_ITEM: ReadonlySet<string> = new Set(["y", "o", "mas", "ademas", "tambien", "+"]);
+
+/**
+ * Palabras que, DESPUÉS de un número, dicen que ese número no era plata.
+ *
+ * Son las que hacen que un número marcado quede afuera sin que eso signifique
+ * "falta media venta": en "a 30 días" el 30 lleva la marca de precio (la
+ * preposición es la misma) y es un plazo, y en "bolsas de 25 kg" el 25 es parte
+ * del producto. Sin esta lista, las dos frases más comunes del mostrador
+ * abrirían una pregunta de "¿algo más?" que no corresponde.
+ */
+const UNIDADES_NO_PRECIO: ReadonlySet<string> = new Set([
+  "dias", "dia", "meses", "mes", "semanas", "semana", "cuotas", "cuota", "horas", "hora",
+  "kg", "kilo", "kilos", "gr", "gramos", "lt", "litro", "litros",
+  "mt", "metro", "metros", "cm", "mm", "unidad", "unidades", "%",
+]);
 
 /** Palabras que no pueden ser el concepto de un ítem. */
 const NO_CONCEPTO: ReadonlySet<string> = new Set([
@@ -374,7 +415,14 @@ function esVerbo(t: string): boolean {
 export function extraerPedidoEmision(texto: string): PedidoEmision {
   const tokens = tokenizarPedido(texto);
   const norm = tokens.join(" ");
-  const pedido: PedidoEmision = { items: [], ambiguo: false, verbo: false, campos: [], detalles: [] };
+  const pedido: PedidoEmision = {
+    items: [],
+    precios_sin_ubicar: [],
+    ambiguo: false,
+    verbo: false,
+    campos: [],
+    detalles: [],
+  };
   if (tokens.length === 0) return pedido;
 
   pedido.verbo = tokens.some((t) => esVerbo(t));
@@ -387,10 +435,52 @@ export function extraerPedidoEmision(texto: string): PedidoEmision {
     pedido.detalles.push(`Cliente: "${cliente}" (como lo escribió el usuario; falta resolverlo).`);
   }
 
-  // --- La venta: cantidad + concepto, y los números que sobran -------------
-  let cantidad: number | undefined;
-  let concepto: string | undefined;
-  const sueltos: Array<{ token: string; marcado: boolean }> = [];
+  // --- La venta: UNO O VARIOS ítems, y los números que sobran --------------
+  //
+  // POR QUÉ ESTO LEE MÁS DE UN ÍTEM, Y POR QUÉ NO LEE CUALQUIER COSA
+  //
+  // La versión anterior tenía una sola `cantidad` y un solo `concepto`, así que
+  // "3 cajas de clavos a 1200 y 2 bolsas de portland a 6500" facturaba $3.600
+  // en vez de $16.600 — la segunda mitad de la venta desaparecía sin un solo
+  // warning, y el CFE salía perfectamente bien formado. Un comprobante al que
+  // le falta media venta no lo nota nadie hasta que se cobra.
+  //
+  // Lo que NO se podía hacer era abrir un ítem nuevo con cada número que tenga
+  // una palabra al lado: "2 bolsas DE 25 KG a 300" habría dado dos líneas
+  // ("2 bolsas" y "25 kg"), que es el error simétrico y peor, porque INVENTA
+  // una línea en vez de perderla. Por eso un segundo ítem exige un SEPARADOR
+  // adelante: la "y" explícita, o el número que se acaba de consumir como
+  // precio del ítem anterior —que es lo que queda escrito donde el usuario
+  // puso una coma o un enter, porque el tokenizador se los come—.
+  const sueltos: Array<{ token: string; marcado: boolean; posterior: string }> = [];
+  let actual: ItemPedido | undefined;
+  /** Índice del token que se consumió como precio del ítem en curso. */
+  let precioEn = -2;
+
+  const abrirItem = (item: ItemPedido): void => {
+    pedido.items.push(item);
+    actual = item;
+  };
+
+  /** Guarda el precio en el ítem en curso y lo declara. */
+  const ponerPrecio = (item: ItemPedido, texto: string): boolean => {
+    const leido = parsearImporte(texto);
+    if (leido.valor === null || leido.valor <= 0) {
+      if (leido.valor === null) {
+        pedido.detalles.push(`No se pudo leer "${texto}" como precio: se pregunta igual.`);
+      }
+      return false;
+    }
+    item.precio = leido.valor;
+    pedido.detalles.push(`Precio: ${leido.detalle}`);
+    if (leido.ambiguo) {
+      // TIENE QUE SOBREVIVIR HASTA EL PREVIEW: entre las dos lecturas hay cien
+      // veces de diferencia. Ver `ItemPedido.precio_ambiguo`.
+      item.precio_ambiguo = true;
+      pedido.ambiguo = true;
+    }
+    return true;
+  };
 
   for (let i = 0; i < tokens.length; i += 1) {
     const t = tokens[i]!;
@@ -402,36 +492,82 @@ export function extraerPedidoEmision(texto: string): PedidoEmision {
     const textoCantidad = compuesto ? `${t} ${tokens[i + 1]}` : t;
     const siguiente = tokens[i + salto];
 
+    // "500 DE pan" NO ES UNA CANTIDAD: SON QUINIENTOS PESOS DE PAN.
+    //
+    // La forma "<número> de <cosa>" sin unidad adelante es como se pide en el
+    // mostrador uruguayo, y leerla como cantidad tenía dos consecuencias en
+    // cadena: 500 unidades de pan, y después el precio confirmado ("500")
+    // multiplicado por esas 500 unidades — $250.000 por una bolsa de pan.
+    //
+    // Se distingue de "una docena DE empanadas" porque ahí el número está
+    // escrito en letras (o es un compuesto), y de "una factura DE 12000" porque
+    // ahí el "de" viene ANTES del número, no después.
+    const importeDeConcepto = esNumeroToken(t) && !compuesto && siguiente === "de";
+
     // ¿Arranca un concepto justo después? Entonces es la cantidad de ese ítem.
     // El "de" cuenta como arranque —"una docena DE empanadas"— pero no queda
     // adentro del concepto; de eso se ocupa `recolectarConcepto`.
     const abreConcepto =
-      siguiente !== undefined && (esPalabraConcepto(siguiente) || siguiente === "de");
-    if (cantidad === undefined && abreConcepto) {
+      !importeDeConcepto &&
+      siguiente !== undefined &&
+      (esPalabraConcepto(siguiente) || siguiente === "de");
+
+    // El primer ítem no necesita separador; los siguientes sí. Ver arriba.
+    const previoTok = tokens[i - 1] ?? "";
+    const puedeAbrir =
+      pedido.items.length === 0 || SEPARADORES_ITEM.has(previoTok) || i - 1 === precioEn;
+
+    if (importeDeConcepto && puedeAbrir) {
+      const recolectado = recolectarConcepto(tokens, i + 1);
+      if (recolectado.concepto !== undefined) {
+        const item: ItemPedido = { concepto: recolectado.concepto };
+        if (ponerPrecio(item, t)) {
+          abrirItem(item);
+          precioEn = i;
+          i = recolectado.hasta - 1;
+          continue;
+        }
+      }
+      // Si no salió limpio, sigue por el camino de siempre: el número queda
+      // suelto y el flujo pregunta, que es lo correcto.
+    }
+
+    if (abreConcepto && puedeAbrir) {
       const leida = parsearCantidad(textoCantidad);
       if (leida.valor !== null && leida.valor > 0) {
         const recolectado = recolectarConcepto(tokens, i + salto);
-        cantidad = leida.valor;
-        concepto = recolectado.concepto;
+        const item: ItemPedido = { cantidad: leida.valor };
+        if (recolectado.concepto !== undefined) item.concepto = recolectado.concepto;
+        abrirItem(item);
         i = recolectado.hasta - 1;
         continue;
       }
     }
 
     if (!esNumeroToken(t)) continue;
-    const previo = tokens[i - 1] ?? "";
     const posterior = tokens[i + 1] ?? "";
     const marcado =
-      MARCA_PRECIO_ANTES.has(previo) ||
-      MARCA_PRECIO_DESPUES.has(posterior) ||
-      /^(u\$s|us\$|usd|\$u|\$)/.test(t);
-    sueltos.push({ token: t, marcado });
+      // Una unidad detrás desarma cualquier marca de adelante: en "bolsas DE 25
+      // KG a 300" la preposición marcaba el 25 como precio y la bolsa se
+      // facturaba a veinticinco pesos, con el 300 —el precio de verdad—
+      // descartado en silencio.
+      !UNIDADES_NO_PRECIO.has(posterior) &&
+      (MARCA_PRECIO_ANTES.has(previoTok) ||
+        MARCA_PRECIO_DESPUES.has(posterior) ||
+        /^(u\$s|us\$|usd|\$u|\$)/.test(t));
+
+    // Un número marcado como precio pertenece al ítem que se está leyendo. Es
+    // lo único que hace falta para que la segunda mitad de la venta exista.
+    if (marcado && actual !== undefined && actual.precio === undefined) {
+      if (ponerPrecio(actual, t)) precioEn = i;
+      continue;
+    }
+    sueltos.push({ token: t, marcado, posterior });
   }
 
-  // El precio: el primero marcado; si no hay ninguno, el único que quedó.
+  // El precio suelto: el primero marcado; si no hay ninguno, el único que quedó.
   const elegido = sueltos.find((n) => n.marcado) ?? (sueltos.length === 1 ? sueltos[0] : undefined);
-  let precio: number | undefined;
-  let precioAmbiguo = false;
+  let usado: (typeof sueltos)[number] | undefined;
 
   if (elegido !== undefined) {
     // UN NÚMERO SUELTO SIN NINGUNA MARCA NO ES UN PRECIO POR SÍ SOLO.
@@ -441,39 +577,59 @@ export function extraerPedidoEmision(texto: string): PedidoEmision {
     // factura que el usuario estaba nombrando. Se exige o una marca explícita
     // ("a 6500", "$6500"), o que el mensaje ya se haya declarado una venta:
     // hay un cliente, o hay una cantidad y un concepto.
-    const hayVenta = pedido.cliente !== undefined || (cantidad !== undefined && concepto !== undefined);
+    const hayVenta =
+      pedido.cliente !== undefined ||
+      pedido.items.some((it) => it.cantidad !== undefined && it.concepto !== undefined);
     if (elegido.marcado || hayVenta) {
-      const leido = parsearImporte(elegido.token);
-      if (leido.valor !== null && leido.valor > 0) {
-        precio = leido.valor;
-        precioAmbiguo = leido.ambiguo;
-        pedido.detalles.push(`Precio: ${leido.detalle}`);
-        if (leido.ambiguo) pedido.ambiguo = true;
-      } else if (leido.valor === null) {
-        pedido.detalles.push(`No se pudo leer "${elegido.token}" como precio: se pregunta igual.`);
+      const destino = pedido.items.find((it) => it.precio === undefined);
+      if (destino !== undefined) {
+        ponerPrecio(destino, elegido.token);
+        // Se intentó: leído o no, no queda como "sin ubicar" — si no se pudo
+        // leer, el flujo pregunta el precio de esa línea, que es lo correcto.
+        usado = elegido;
+      } else if (pedido.items.length === 0) {
+        // "cobrale 1500 a Martínez": plata sin línea. El concepto se pregunta.
+        const item: ItemPedido = {};
+        if (ponerPrecio(item, elegido.token)) abrirItem(item);
+        usado = elegido;
       }
+      // Y si TODOS los ítems ya tienen precio, este número sobra de verdad:
+      // cae en `precios_sin_ubicar` acá abajo y el flujo pregunta qué más se
+      // vendió. Crearle un ítem sin concepto sería inventar una línea.
     }
   }
 
-  if (concepto !== undefined || cantidad !== undefined || precio !== undefined) {
-    const item: ItemPedido = {};
-    if (concepto !== undefined) {
-      item.concepto = concepto;
-      pedido.campos.push("concepto");
-      pedido.detalles.push(`Concepto: "${concepto}".`);
-    }
-    if (cantidad !== undefined) {
-      item.cantidad = cantidad;
-      pedido.campos.push("cantidad");
-      pedido.detalles.push(`Cantidad: ${cantidad}.`);
-    }
-    if (precio !== undefined) {
-      item.precio = precio;
-      pedido.campos.push("precio");
-      if (precioAmbiguo) item.precio_ambiguo = true;
-    }
-    pedido.items.push(item);
+  // LO QUE QUEDÓ MARCADO COMO PRECIO Y NO ENTRÓ EN NINGÚN LADO.
+  //
+  // Es el freno de FISCAL-1: mientras haya uno, el mensaje nombraba más venta
+  // de la que se pudo leer y el pedido NO está completo. Ver `precios_sin_ubicar`.
+  for (const n of sueltos) {
+    if (n === usado || !n.marcado) continue;
+    // "a 30 días" y "de 25 kg" llevan la misma marca y no son plata.
+    if (UNIDADES_NO_PRECIO.has(n.posterior)) continue;
+    pedido.precios_sin_ubicar.push(n.token);
   }
+  if (pedido.precios_sin_ubicar.length > 0) {
+    pedido.detalles.push(
+      `Quedaron ${pedido.precios_sin_ubicar.length} número(s) escritos como precio ` +
+        `(${pedido.precios_sin_ubicar.join(", ")}) que no pertenecen a ningún ítem leído: ` +
+        "el pedido NO está completo, falta preguntar qué más se vendió.",
+    );
+  }
+
+  // Los campos y el eco, ya con los ítems armados.
+  pedido.items.forEach((item, i) => {
+    const ordinal = pedido.items.length === 1 ? "" : ` (ítem ${i + 1})`;
+    if (item.concepto !== undefined) {
+      pedido.campos.push("concepto");
+      pedido.detalles.push(`Concepto${ordinal}: "${item.concepto}".`);
+    }
+    if (item.cantidad !== undefined) {
+      pedido.campos.push("cantidad");
+      pedido.detalles.push(`Cantidad${ordinal}: ${item.cantidad}.`);
+    }
+    if (item.precio !== undefined) pedido.campos.push("precio");
+  });
 
   // --- Las señales que no son números --------------------------------------
   if (MARCA_IVA_APARTE.test(norm)) {

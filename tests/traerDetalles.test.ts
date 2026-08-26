@@ -196,6 +196,46 @@ describe("cache", () => {
     expect((await traerPorId(client, [31])).detalles.size).toBe(1);
     expect(get).toHaveBeenCalledTimes(2);
   });
+
+  // -------------------------------------------------------------------------
+  // SEC-A6: el cache devolvía la REFERENCIA, no una copia.
+  //
+  // `cacheVentanas.ts` ya copiaba, con el motivo escrito: quien recibe la lista
+  // la ordena o la filtra in place. Acá pesa más, porque lo que se puede
+  // envenenar no es el orden de una lista sino el CONTENIDO de un comprobante
+  // —sus ítems, su total, su estado— servido después a otra tool que lo cree
+  // recién traído de la API.
+  // -------------------------------------------------------------------------
+  it("mutar lo devuelto NO envenena lo que va a recibir la próxima pregunta", async () => {
+    const { client, get } = cliente((o) => [crudo(idDe(o), { total: 1000 })]);
+
+    const primera = await traerPorId(client, [41]);
+    const detalle = primera.detalles.get(41)!;
+    (detalle as unknown as Record<string, unknown>).total = 999_999;
+    (detalle as unknown as Record<string, unknown>).estado = "Rechazado DGI";
+    detalle.items?.push({ codigo: "X", concepto: "inyectado", cantidad: 1, precio: 1 } as never);
+
+    const segunda = await traerPorId(client, [41]);
+    expect(get).toHaveBeenCalledTimes(1); // salió del cache: es el caso que importa
+    expect(segunda.detalles.get(41)?.total).toBe(1000);
+    expect(segunda.detalles.get(41)?.estado).toBe("Aceptado DGI");
+    expect(segunda.detalles.get(41)?.items).toHaveLength(1);
+  });
+
+  it("tampoco al revés: mutar DESPUÉS de guardar no toca lo guardado", async () => {
+    // El objeto que se entrega y el que se guarda no pueden ser el mismo. Si el
+    // llamador lo muta apenas lo recibe, el cache no se tiene que enterar.
+    const compartido = crudo(42, { total: 2000 });
+    const { client, get } = cliente(() => [compartido]);
+
+    const primera = await traerPorId(client, [42]);
+    // El normalizador ya devuelve objetos nuevos, así que se muta el resultado.
+    (primera.detalles.get(42) as unknown as Record<string, unknown>).total = -1;
+
+    const segunda = await traerPorId(client, [42]);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(segunda.detalles.get(42)?.total).toBe(2000);
+  });
 });
 
 // ---------------------------------------------------------------------------

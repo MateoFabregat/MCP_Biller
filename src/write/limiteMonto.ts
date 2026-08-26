@@ -73,15 +73,39 @@ export function extraerMonto(payload: unknown): { monto: number; moneda: string 
   return null;
 }
 
+/** Un total que el llamador ya calculó. Ver `verificarLimiteMonto`. */
+export interface MontoExplicito {
+  monto: number;
+  moneda: string;
+}
+
 /**
  * Aplica el tope. Lanza `BillerMontoExcedidoError` si se supera.
  * Sin tope configurado para esa moneda, no hace nada.
+ *
+ * `explicito` EXISTE PORQUE EL PAYLOAD MÁS IMPORTANTE NO TIENE TOTAL.
+ *
+ * `extraerMonto` husmea `total`/`monto`/`importe` en la raíz, que es lo correcto
+ * para un recibo o un pago. Un ComprobanteBody no tiene ninguno de los tres: el
+ * total de un CFE es la suma de sus líneas con su IVA, y eso lo calcula
+ * `calcularTotales`. Sin este parámetro, el tope se saltaba justo la operación
+ * que lo motivó —una coma mal puesta en un precio— y BILLER_MAX_MONTO_UYU no
+ * frenaba una emisión ni una vez.
+ *
+ * Cuando viene, GANA sobre lo husmeado: es un número calculado, no adivinado.
  */
-export function verificarLimiteMonto(payload: unknown, limites: LimitesMonto | undefined): void {
+export function verificarLimiteMonto(
+  payload: unknown,
+  limites: LimitesMonto | undefined,
+  explicito?: MontoExplicito,
+): void {
   // Tolera `undefined`: una config vieja sin este campo debe seguir escribiendo,
   // no romper toda la capa de escritura con un TypeError.
   if (limites === undefined || Object.keys(limites).length === 0) return;
-  const extraido = extraerMonto(payload);
+  const extraido =
+    explicito !== undefined && Number.isFinite(explicito.monto) && explicito.monto !== 0
+      ? { monto: Math.abs(explicito.monto), moneda: explicito.moneda }
+      : extraerMonto(payload);
   if (extraido === null) return;
 
   const limite = limites[extraido.moneda];

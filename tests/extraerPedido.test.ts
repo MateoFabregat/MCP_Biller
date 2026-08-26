@@ -95,6 +95,120 @@ describe("la gramática mínima: [verbo]? (a|para) <cliente> + <cantidad> <conce
   });
 });
 
+// =============================================================================
+// FISCAL-1: una venta con DOS ítems es una venta con dos ítems.
+//
+// La versión anterior tenía una sola `cantidad` y un solo `concepto`, así que
+// "3 cajas a 1200 y 2 bolsas a 6500" facturaba $3.600 en vez de $16.600: la
+// segunda mitad desaparecía sin un warning, y el CFE salía perfectamente bien
+// formado. Un comprobante al que le falta media venta no lo nota nadie hasta
+// que se cobra — y los 25 casos de arriba son todos de un ítem, así que la
+// suite entera quedaba verde.
+// =============================================================================
+
+describe("varios ítems en un mensaje", () => {
+  it('la frase del hallazgo: "3 cajas de clavos a 1200 y 2 bolsas de portland a 6500"', () => {
+    const p = extraerPedidoEmision(
+      "facturale a Gonzalez 3 cajas de clavos a 1200 y 2 bolsas de portland a 6500",
+    );
+    expect(p.cliente).toBe("gonzalez");
+    expect(p.items).toHaveLength(2);
+    expect(p.items[0]).toMatchObject({ concepto: "cajas de clavos", cantidad: 3, precio: 1200 });
+    expect(p.items[1]).toMatchObject({ concepto: "bolsas de portland", cantidad: 2, precio: 6500 });
+
+    // La cuenta que importa: 3×1200 + 2×6500 = 16.600, no 3.600.
+    const total = p.items.reduce((a, i) => a + (i.cantidad ?? 1) * (i.precio ?? 0), 0);
+    expect(total).toBe(16_600);
+    expect(p.precios_sin_ubicar).toEqual([]);
+  });
+
+  it("la coma también separa, aunque el tokenizador se la coma", () => {
+    // `tokenizarPedido` convierte la coma en espacio, así que el separador que
+    // queda escrito es el número que se acaba de consumir como precio.
+    const p = extraerPedidoEmision("3 cajas de clavos a 1200, 2 bolsas de portland a 6500");
+    expect(p.items).toHaveLength(2);
+    expect(p.items[1]).toMatchObject({ concepto: "bolsas de portland", cantidad: 2, precio: 6500 });
+  });
+
+  it("un salto de línea entre ítems se comporta igual que la coma", () => {
+    const p = extraerPedidoEmision("facturale a perez\n2 bolsas a 6500\n3 cajas a 1200");
+    expect(p.items).toHaveLength(2);
+    expect(p.items[0]).toMatchObject({ cantidad: 2, precio: 6500 });
+    expect(p.items[1]).toMatchObject({ cantidad: 3, precio: 1200 });
+  });
+
+  it("NO abre un ítem nuevo con la unidad de un producto", () => {
+    // El error simétrico y peor, porque INVENTA una línea en vez de perderla:
+    // "2 bolsas DE 25 KG a 300" no son dos ítems, es uno de 2 bolsas a $300.
+    const p = extraerPedidoEmision("facturale a perez 2 bolsas de 25 kg a 300");
+    expect(p.items).toHaveLength(1);
+    expect(p.items[0]).toMatchObject({ cantidad: 2, precio: 300 });
+    expect(p.precios_sin_ubicar).toEqual([]);
+  });
+
+  it("un precio que no entra en ningún ítem NO se descarta en silencio", () => {
+    // El freno obligatorio: el segundo tramo no trae cantidad, así que no hay
+    // ítem donde poner los $6.500. Antes se perdían sin decir nada.
+    const p = extraerPedidoEmision("facturale a perez 3 cajas de clavos a 1200 y portland a 6500");
+    expect(p.items).toHaveLength(1);
+    expect(p.precios_sin_ubicar).toEqual(["6500"]);
+    expect(p.detalles.some((d) => d.includes("NO está completo"))).toBe(true);
+  });
+
+  it('el plazo de "a 30 días" no cuenta como precio perdido', () => {
+    // Lleva la misma marca (la preposición es la misma) y no es plata. Sin la
+    // exclusión, la frase más común del crédito abriría un "¿algo más?".
+    const p = extraerPedidoEmision("facturale a perez 2 bolsas a 6500 a 30 dias");
+    expect(p.items).toHaveLength(1);
+    expect(p.items[0]).toMatchObject({ cantidad: 2, precio: 6500 });
+    expect(p.precios_sin_ubicar).toEqual([]);
+    expect(p.forma_pago).toBe(2);
+  });
+});
+
+// =============================================================================
+// FISCAL-5: "500 de pan" son quinientos PESOS de pan.
+//
+// Leerlo como cantidad tenía dos consecuencias en cadena: 500 unidades, y
+// después el precio confirmado ("500") multiplicado por esas 500 unidades —
+// $250.000 por una bolsa de pan.
+// =============================================================================
+
+describe('la forma "N de X" es un importe, no una cantidad', () => {
+  it.each([
+    "facturale 500 de pan a la panaderia",
+    "facturale 500 de pan",
+    "500 de pan a la panaderia",
+  ])('"%s" -> $500 de pan, no 500 panes', (texto) => {
+    const p = extraerPedidoEmision(texto);
+    expect(p.items).toHaveLength(1);
+    expect(p.items[0]?.concepto).toBe("pan");
+    expect(p.items[0]?.precio).toBe(500);
+    // Lo que NO puede pasar: que 500 quede de cantidad. Con la cantidad en 500,
+    // confirmar el precio con "500" da $250.000.
+    expect(p.items[0]?.cantidad).toBeUndefined();
+  });
+
+  it("con unidad adelante SÍ es cantidad: '2 bolsas de portland'", () => {
+    // El contrapeso. La distinción es que el "de" venga pegado al número o no.
+    const p = extraerPedidoEmision("facturale a perez 2 bolsas de portland a 6500");
+    expect(p.items[0]).toMatchObject({ cantidad: 2, concepto: "bolsas de portland", precio: 6500 });
+  });
+
+  it("una cantidad en LETRAS con 'de' sigue siendo cantidad", () => {
+    // "una docena de empanadas" son doce empanadas, no doce pesos de empanada.
+    // El número escrito en letras es lo que separa los dos casos.
+    const p = extraerPedidoEmision("facturale a perez una docena de empanadas a 60 c/u");
+    expect(p.items[0]).toMatchObject({ cantidad: 12, concepto: "empanadas", precio: 60 });
+  });
+
+  it('"una factura de 12000" no se toca: ahí el "de" va ANTES del número', () => {
+    const p = extraerPedidoEmision("una factura de 12000 a la panaderia");
+    expect(p.items[0]?.precio).toBe(12_000);
+    expect(p.items[0]?.concepto).toBeUndefined();
+  });
+});
+
 describe("la plata la lee TypeScript, no el modelo", () => {
   it("el punto de miles: 6.500 son seis mil quinientos", () => {
     // `Number("6.500")` es 6.5. Es la línea que justifica el módulo entero.

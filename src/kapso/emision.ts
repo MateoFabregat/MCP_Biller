@@ -107,6 +107,20 @@ export interface ItemEnCurso {
   cantidad?: number;
   precio?: number;
   indicador_facturacion?: number;
+  /**
+   * true cuando el precio admitía dos lecturas y se guardó la más probable
+   * ("6.50" es 6,50 o 6.500 — cien veces de diferencia).
+   *
+   * VIVE ACÁ PORQUE TIENE QUE SOBREVIVIR HASTA EL PREVIEW, y el estado es lo
+   * único que sobrevive entre un mensaje y el siguiente. `extraerPedido.ts` lo
+   * viene marcando desde siempre, pero la marca se perdía al volcarse al
+   * estado: el preview mostraba "$13" sin una palabra, cuando el usuario había
+   * escrito lo que probablemente eran $13.000.
+   *
+   * NO es un campo del CFE y no entra al borrador: se rinde como TEXTO en el
+   * resumen de confirmación (ver `ContextoPreview.precios_ambiguos`).
+   */
+  precio_ambiguo?: boolean;
 }
 
 /**

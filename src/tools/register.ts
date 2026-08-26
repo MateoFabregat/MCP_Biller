@@ -192,12 +192,25 @@ export function createToolContext(env: Record<string, string | undefined> = proc
   const getBorradorStore = (): BorradorStore => {
     if (cachedBorradores === undefined) {
       let path: string | undefined;
+      // LA SAL ES LA IDENTIDAD DE LA EMPRESA, Y SALE DE DONDE YA SALÍA.
+      //
+      // `cacheId` es un hash de (base URL + token) que el cliente ya calcula
+      // para no mezclar los caches de dos empresas — el mismo problema, un piso
+      // más abajo. Reusarlo acá hace dos cosas de una: liga la clave de sesión
+      // a la empresa (dos tenants con el mismo teléfono dejan de compartir
+      // borrador sobre un archivo común) y sala el hash del número con un
+      // secreto que ya existe, para que el archivo no permita revertir a
+      // teléfonos. Ver `claveSesion`.
+      let sal: string | undefined;
       try {
         path = getConfig().borradorStorePath;
+        sal = getClient().cacheId;
       } catch {
-        path = undefined;
+        // Sin config no hay identidad ni ruta: memoria y sin sal, que es el
+        // comportamiento de siempre. Un flujo de emisión sin store funciona
+        // peor; sin config no funciona nada, y eso lo reporta otra capa.
       }
-      cachedBorradores = crearBorradorStore(path);
+      cachedBorradores = crearBorradorStore(path, sal);
     }
     return cachedBorradores;
   };

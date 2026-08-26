@@ -20,6 +20,7 @@ import { checkConfirmationToken, computeConfirmationToken } from "../../write/co
 import { executeWrite } from "../../write/execute.js";
 import { evaluateWriteGate } from "../../write/gate.js";
 import { generateIdempotencyKey } from "../../write/idempotency.js";
+import { verificarLimiteMonto, type MontoExplicito } from "../../write/limiteMonto.js";
 import { errorToolResult, jsonResult, type ToolContext, type ToolResult } from "../shared.js";
 
 // El preview existe para que un humano verifique A QUIÉN le está facturando.
@@ -180,6 +181,15 @@ export interface RunWriteParams {
    * para un caso legítimo (el dueño arranca la factura y la confirma el encargado).
    */
   remitente?: string;
+  /**
+   * El total de la operación, para el tope de monto, cuando el payload no lo
+   * lleva en la raíz. Un ComprobanteBody nunca lo lleva: el total de un CFE es
+   * la suma de sus líneas. Ver `verificarLimiteMonto`.
+   *
+   * No entra en el hash del confirmation_token: es un derivado del mismo payload
+   * que ya está hasheado, igual que `totalesEstimados`.
+   */
+  montoExplicito?: MontoExplicito;
 }
 
 export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> {
@@ -211,6 +221,17 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
       if (p.idempotencyKey !== undefined) {
         warnings.push(
           "La protección de idempotencia es in-process y se resetea al reiniciar el servidor MCP.",
+        );
+      }
+      // El tope se APLICA en `executeWrite`, o sea con confirm=true. Acá se
+      // ANTICIPA: un preview que no dice nada y una confirmación que rebota es
+      // exactamente el momento en que la gente vuelve a intentar sin entender.
+      try {
+        verificarLimiteMonto(payload, config.maxMontos, p.montoExplicito);
+      } catch (err) {
+        warnings.push(
+          `⛔ ${err instanceof Error ? err.message : String(err)} ` +
+            "Este preview es válido, pero confirmarlo va a rebotar.",
         );
       }
       return jsonResult({
@@ -263,6 +284,7 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
       allowProduction: p.allowProduction,
       rateLimitClass: p.rateLimitClass,
       remitente: p.remitente,
+      ...(p.montoExplicito !== undefined ? { montoExplicito: p.montoExplicito } : {}),
     });
 
     return jsonResult({

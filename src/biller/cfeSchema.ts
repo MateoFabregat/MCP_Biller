@@ -727,5 +727,24 @@ export function validarComprobante(
     );
   }
 
+  // `montos_brutos` ausente NO es neutral, y es el campo que más plata mueve.
+  //
+  // La API interpreta el silencio como "los precios son netos" y le suma el
+  // 22%. O sea que omitirlo YA ES una respuesta, y es la equivocada para el
+  // precio de mostrador uruguayo, que se cotiza con IVA adentro: "la pelota,
+  // $200" sale facturada $244 y el comprobante queda perfectamente bien
+  // formado. Se avisa con el mismo criterio que la sucursal y el receptor: un
+  // campo cuya ausencia cambia el documento tiene que verse en el preview.
+  //
+  // No aplica a remitos ni resguardos: ahí no hay precios que interpretar.
+  if (tipo !== TIPO_RESGUARDO && !TIPOS_REMITO.has(tipo) && body.montos_brutos === undefined) {
+    warnings.push(
+      "Falta 'montos_brutos', y su ausencia NO es neutral: la API asume que los precios son " +
+        "NETOS y les suma el IVA (22% en tasa básica). Si los precios que dio el usuario ya " +
+        "incluían IVA —el precio de mostrador uruguayo—, este comprobante va a salir 22% más " +
+        "caro. Mandá montos_brutos=true si ya lo incluían, o false para dejarlo explícito.",
+    );
+  }
+
   return warnings;
 }

@@ -19,7 +19,6 @@ import {
 } from "../../biller/cfeSchema.js";
 import { normalizarTelefono } from "../../config.js";
 import { WRITE_PATHS } from "../../constants.js";
-import { resolverClaveSesion } from "../../kapso/borradorStore.js";
 import { KapsoClient } from "../../kapso/client.js";
 import { construirConfirmacionEmision } from "../../kapso/menu.js";
 import { calcularTotales } from "../../services/calcularTotales.js";
@@ -108,28 +107,60 @@ const fullSchema = z.object(inputShape);
  * Solo COMPLETA, nunca pisa: un concepto que el agente sí mandó (el usuario lo
  * cambió a último momento) le gana al guardado.
  */
-function completarDesdeSesion(args: unknown, ctx: ToolContext): void {
-  if (typeof args !== "object" || args === null) return;
-  const a = args as { sesion?: unknown; comprobante?: { items?: unknown; adenda?: unknown } };
-  if (typeof a.sesion !== "string" || a.sesion.trim() === "") return;
-  if (typeof a.comprobante !== "object" || a.comprobante === null) return;
+function completarDesdeSesion(args: unknown, ctx: ToolContext): DatosDeSesion {
+  const vacio: DatosDeSesion = { precios_ambiguos: [], avisos: [] };
+  const avisos: string[] = [];
+  if (typeof args !== "object" || args === null) return vacio;
+  const a = args as {
+    sesion?: unknown;
+    comprobante?: { items?: unknown; adenda?: unknown; numero_interno?: unknown };
+  };
+  if (typeof a.sesion !== "string" || a.sesion.trim() === "") return vacio;
+  if (typeof a.comprobante !== "object" || a.comprobante === null) return vacio;
 
-  const guardado = ctx.getBorradorStore().leer(resolverClaveSesion(a.sesion));
-  if (guardado === null) return;
+  const guardado = ctx.getBorradorStore().leer(ctx.getBorradorStore().clave(a.sesion));
+  if (guardado === null) return vacio;
 
+  const preciosAmbiguos: DatosDeSesion["precios_ambiguos"] = [];
   const itemsGuardados = guardado.estado.items ?? [];
   const items = a.comprobante.items;
   if (Array.isArray(items)) {
     for (let i = 0; i < items.length; i += 1) {
-      const item = items[i] as { concepto?: unknown };
+      const item = items[i] as { concepto?: unknown; precio?: unknown };
       if (typeof item !== "object" || item === null) continue;
-      const conceptoGuardado = itemsGuardados[i]?.concepto;
+      const guardadoItem = itemsGuardados[i];
+      const conceptoGuardado = guardadoItem?.concepto;
       if (
         (item.concepto === undefined || item.concepto === "") &&
         conceptoGuardado !== undefined &&
         conceptoGuardado !== ""
       ) {
         item.concepto = conceptoGuardado;
+      }
+
+      // LA MARCA DE AMBIGÜEDAD VIAJA POR ACÁ Y NO POR EL PAYLOAD.
+      //
+      // `precio_ambiguo` no es un campo del CFE: no puede ir en el cuerpo. Pero
+      // tiene que llegar al preview, que es lo único que el humano lee antes de
+      // emitir. Sale del store —donde lo dejó la emisión guiada— y entra al
+      // `contextoPreview`, que no se hashea porque no se envía.
+      //
+      // Se exige que el precio SIGA SIENDO el mismo: si el agente mandó otro, el
+      // usuario lo corrigió y la duda ya no existe. Advertir sobre un precio que
+      // se cambió sería ruido, y el ruido es lo que hace que se dejen de leer
+      // las advertencias que sí importan.
+      const precioPayload = typeof item.precio === "number" ? item.precio : Number(item.precio);
+      if (
+        guardadoItem?.precio_ambiguo === true &&
+        guardadoItem.precio !== undefined &&
+        Number.isFinite(precioPayload) &&
+        precioPayload === guardadoItem.precio
+      ) {
+        const concepto = typeof item.concepto === "string" ? item.concepto : conceptoGuardado;
+        preciosAmbiguos.push({
+          ...(concepto !== undefined ? { concepto } : {}),
+          precio: guardadoItem.precio,
+        });
       }
     }
   }
@@ -141,13 +172,54 @@ function completarDesdeSesion(args: unknown, ctx: ToolContext): void {
   ) {
     a.comprobante.adenda = guardado.estado.adenda;
   }
+
+  // EL `numero_interno` LO PONE EL SERVER, NO EL MODELO.
+  //
+  // Está en CAMPOS_NO_CONFIABLES, así que si volviera en el borrador volvería
+  // envuelto en ⟦dato-no-confiable⟧ — y el modelo o lo copiaba con las marcas
+  // adentro, o las limpiaba a mano. Lo segundo es peor: dos reintentos que
+  // limpian distinto producen dos ids distintos, `buscarPorNumeroInterno` no
+  // matchea ninguno, y la misma venta sale DOS VECES ante DGI. Por eso el id
+  // vive en el store y se completa acá: el único camino que no pasa por el
+  // canal del modelo. Ver `borradorComprobante` en tools/emisionGuiada.ts.
+  //
+  // ES LA ÚNICA EXCEPCIÓN A "SOLO COMPLETA, NUNCA PISA", y por el mismo motivo
+  // por el que existe: si un numero_interno traído por el modelo le ganara al
+  // del borrador, el invariante que este campo garantiza —dos intentos de la
+  // MISMA venta llevan el MISMO id— dependería otra vez de que el modelo
+  // copiara bien. Un id distinto por intento es exactamente el duplicado ante
+  // DGI que se está evitando. Para emitir OTRO comprobante hay otra sesión.
+  const guardadoNI = guardado.estado.numero_interno;
+  if (guardadoNI !== undefined && guardadoNI !== "") {
+    if (
+      typeof a.comprobante.numero_interno === "string" &&
+      a.comprobante.numero_interno !== "" &&
+      a.comprobante.numero_interno !== guardadoNI
+    ) {
+      avisos.push(
+        "El 'numero_interno' que venía en el cuerpo se reemplazó por el del borrador de esa " +
+          "sesión: lo genera el server y es lo que hace que un reintento no emita dos veces. " +
+          "No hace falta que lo mandes.",
+      );
+    }
+    a.comprobante.numero_interno = guardadoNI;
+  }
+
+  return { precios_ambiguos: preciosAmbiguos, avisos };
+}
+
+/** Lo que el borrador guardado aporta y el payload no puede transportar. */
+interface DatosDeSesion {
+  precios_ambiguos: Array<{ concepto?: string; precio: number }>;
+  /** Lo que hubo que corregir del cuerpo que llegó. Va a `warnings`. */
+  avisos: string[];
 }
 
 export async function handleEmitirComprobante(
   args: unknown,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  completarDesdeSesion(args, ctx);
+  const deSesion = completarDesdeSesion(args, ctx);
   const parsed = fullSchema.safeParse(args);
   if (!parsed.success) return validationErrorResult(parsed.error, ctx);
   const a = parsed.data;
@@ -213,6 +285,18 @@ export async function handleEmitirComprobante(
   }
 
   warnings.push(...totales.advertencias);
+  warnings.push(...deSesion.avisos);
+
+  // El precio ambiguo también sale como warning, además de estar escrito en el
+  // resumen: el resumen lo lee el humano por WhatsApp y esto lo lee el agente,
+  // que es quien puede repreguntar antes de mandar el preview.
+  for (const p of deSesion.precios_ambiguos) {
+    warnings.push(
+      `⚠️ El precio ${p.precio} ${p.concepto === undefined ? "" : `de "${p.concepto}" `}` +
+        "quedó marcado como AMBIGUO al leerlo (admite otra lectura con 100x de diferencia). " +
+        "Está escrito en el resumen del preview: no confirmes sin que el usuario lo ratifique.",
+    );
+  }
 
   // --- ¿La sesión que me pasaron existe? -----------------------------------
   //
@@ -225,7 +309,9 @@ export async function handleEmitirComprobante(
   // fuerte en vez de fallar: fallar la emisión por un borrador colgado sería
   // peor que el problema.
   const claveSesion_ =
-    a.sesion === undefined || a.sesion.trim() === "" ? null : resolverClaveSesion(a.sesion);
+    a.sesion === undefined || a.sesion.trim() === ""
+      ? null
+      : ctx.getBorradorStore().clave(a.sesion);
   if (claveSesion_ !== null && ctx.getBorradorStore().leer(claveSesion_) === null) {
     warnings.push(
       "No hay ningún borrador guardado con esa 'sesion', así que al emitir no se va a borrar nada. " +
@@ -248,6 +334,15 @@ export async function handleEmitirComprobante(
     rateLimitClass: "dgi", // creación de comprobantes: 1 req/seg
     warnings,
     totalesEstimados: totales,
+    // EL TOPE DE MONTO NECESITA QUE ALGUIEN LE DIGA CUÁL ES EL TOTAL.
+    //
+    // `extraerMonto` busca `total`/`monto`/`importe` en la raíz del payload, y
+    // un ComprobanteBody no tiene ninguno de los tres: el total de un CFE es la
+    // suma de sus líneas. O sea que BILLER_MAX_MONTO_UYU no limitaba nunca la
+    // emisión — justo la operación para la que el tope existe (una coma mal
+    // puesta en un precio). El número ya está calculado unas líneas arriba; lo
+    // único que faltaba era pasarlo.
+    montoExplicito: { monto: totales.total, moneda: (payload.moneda ?? "UYU").toUpperCase() },
     // Los supuestos del preview salen del MISMO payload que se hashea, no de
     // una descripción aparte: no hay forma de que el mensaje diga "contado" y
     // se emita a crédito. `hoy` entra para poder escribir "Hoy 26/08/2026", y
@@ -259,6 +354,11 @@ export async function handleEmitirComprobante(
         ? { fecha_vencimiento: payload.fecha_vencimiento }
         : {}),
       ...(payload.montos_brutos !== undefined ? { montos_brutos: payload.montos_brutos } : {}),
+      // La única parte del preview que NO sale del payload, y no puede salir de
+      // ahí: `precio_ambiguo` no es un campo del CFE. Ver `completarDesdeSesion`.
+      ...(deSesion.precios_ambiguos.length > 0
+        ? { precios_ambiguos: deSesion.precios_ambiguos }
+        : {}),
       hoy: hoyDgiUy(),
     },
   });
