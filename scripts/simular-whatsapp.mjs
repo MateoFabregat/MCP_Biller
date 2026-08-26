@@ -153,6 +153,37 @@ async function faseKapso() {
     anotar("kapso", "ok", "Ninguna conversación trabada en handoff.");
   }
 
+  // Ejecuciones que MURIERON, que se ven igual que el handoff desde el chat.
+  //
+  // Kapso marca el mensaje como leído y muestra "escribiendo…" ANTES de correr
+  // el agente. Si el paso falla —se acabaron los créditos del proyecto, el
+  // modelo no responde, lo que sea— el usuario ve los tres puntitos, después
+  // nada, y no hay ningún error de este lado: el MCP está impecable, las tools
+  // cargan, el enrutador anda. Todo verde y el número mudo.
+  //
+  // El error vive en el evento de la ejecución y en ningún otro lugar, así que
+  // se lee de ahí y se muestra tal cual.
+  const fallidas = (ex.datos?.data ?? []).filter((e) => e.status === "failed");
+  if (fallidas.length > 0) {
+    anotar(
+      "kapso",
+      "mal",
+      `${fallidas.length} ejecución(es) FALLADAS. El usuario ve "escribiendo…" y después nada.`,
+    );
+    const motivos = new Set();
+    for (const f of fallidas.slice(0, 5)) {
+      const evs = await kapso("GET", `/workflow_executions/${f.id}/events`);
+      const fin = (evs.datos?.data ?? []).find((e) => e.event_type === "execution_failed");
+      const error = fin?.payload?.error ?? "(sin detalle)";
+      if (!motivos.has(error)) {
+        motivos.add(error);
+        console.log(`      · ${f.started_at}: ${String(error).slice(0, 200)}`);
+      }
+    }
+  } else {
+    anotar("kapso", "ok", "Ninguna ejecución falló.");
+  }
+
   const mcp = await urlMcpConfigurada(activo.id);
   if (mcp === null) {
     anotar("kapso", "mal", "El Agent Node NO tiene ningún MCP server configurado: el agente no tiene con qué contestar.");
