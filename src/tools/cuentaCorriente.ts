@@ -17,7 +17,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { correrCuentaCorriente } from "../services/corridaCuentaCorriente.js";
-import { ESTRATEGIAS } from "../services/cuentaCorriente.js";
+import { ESTRATEGIAS, ORIGENES_IMPUTACION } from "../services/cuentaCorriente.js";
 import { BUCKETS } from "../services/vencimientos.js";
 import {
   READ_ONLY_ANNOTATIONS,
@@ -169,7 +169,7 @@ const outputShape = {
       imputado: z.number(),
       sin_imputar: z.number(),
       cliente_rut: z.string().nullable(),
-      origen: z.enum(["referencias", "fifo"]),
+      origen: z.enum(ORIGENES_IMPUTACION),
     }),
   ),
   totales: z.object({

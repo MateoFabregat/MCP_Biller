@@ -8,7 +8,7 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { compararPeriodos } from "../services/comparacion.js";
+import { METODOS_PROYECCION, compararPeriodos } from "../services/comparacion.js";
 import {
   PERIODOS_SOPORTADOS,
   periodoAnterior,
@@ -93,7 +93,7 @@ const outputShape = {
       promedio_diario: z.number(),
       proyectado_al_cierre: z.number(),
       variacion_proyectada_pct: z.number().nullable(),
-      metodo: z.literal("run_rate_lineal"),
+      metodo: z.enum(METODOS_PROYECCION),
       advertencia: z.string(),
     })
     .nullable(),

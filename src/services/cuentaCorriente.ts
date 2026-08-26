@@ -297,8 +297,32 @@ export const ESTRATEGIAS = [
 
 export type Estrategia = (typeof ESTRATEGIAS)[number];
 
-/** De dónde salió la imputación de UN cobro concreto. */
-export type OrigenImputacion = "referencias" | "items_concepto" | "fifo";
+/**
+ * De dónde salió la imputación de UN cobro concreto. UNA sola definición, por
+ * la misma razón que `ESTRATEGIAS` — y por el mismo accidente.
+ *
+ * Esto era un `type` suelto de tres valores mientras la tool escribía a mano un
+ * `z.enum(["referencias", "fifo"])` de dos. Faltaba `items_concepto`, que es
+ * justamente el caso más común contra la API real: el GET de comprobantes no
+ * trae las referencias del recibo, así que la imputación sale del concepto de
+ * los ítems. O sea que `biller_cuenta_corriente` —"¿quién me debe?", la opción
+ * más usada del menú— fallaba con un error de validación de SALIDA cada vez que
+ * había cobranzas de verdad, y andaba perfecto con la cuenta vacía.
+ *
+ * Un `type` no se puede leer en tiempo de ejecución: mientras el vocabulario
+ * viva en un `type`, el schema lo tiene que repetir a mano, y repetirlo a mano
+ * es esto. Como array, el tipo y el `z.enum` salen del mismo lugar.
+ */
+export const ORIGENES_IMPUTACION = [
+  /** El recibo declaró a qué comprobante va. Exacto. */
+  "referencias",
+  /** Salió del concepto de los ítems del recibo. Exacto, pero por otro camino. */
+  "items_concepto",
+  /** No había nada declarado: se estimó lo más viejo primero. */
+  "fifo",
+] as const;
+
+export type OrigenImputacion = (typeof ORIGENES_IMPUTACION)[number];
 
 export interface CuentaCorrienteResultado {
   /** Cómo se imputó. "fifo"/"mixta" => el saldo POR FACTURA es una estimación. */

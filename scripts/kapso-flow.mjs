@@ -86,6 +86,35 @@ const systemPrompt = leerSystemPrompt();
 const phoneNumberId = env("KAPSO_PHONE_NUMBER_ID");
 const httpToken = env("BILLER_HTTP_AUTH_TOKEN");
 
+// --- Que la URL conteste ANTES de apuntarle Kapso ----------------------------
+//
+// POR QUÉ ESTE CHEQUEO EXISTE. Este script configuraba el flow sin comprobar
+// nunca que la URL respondiera. Cuando el túnel estaba caído o el bearer no era
+// el que el server espera, Kapso se conectaba, comía el error y le daba al
+// agente CERO tools — y un agente sin tools no falla: llama `handoff_to_human`
+// y la conversación queda muda para siempre. Del lado del WhatsApp eso se ve
+// exactamente igual que "no lo configuré": no hay error, no vuelve nada.
+//
+// Se hace el handshake completo y se cuentan las tools, no solo un ping: un
+// 200 en la raíz no dice nada de si `tools/list` devuelve algo.
+const { ClienteMcp } = await import("./mcpCliente.mjs");
+try {
+  const cliente = new ClienteMcp(urlMcp, httpToken);
+  const info = await cliente.conectar();
+  const tools = await cliente.listarTools();
+  if (tools.length === 0) {
+    console.error(`✗ ${urlMcp} contesta pero devuelve CERO tools.`);
+    console.error("  Apuntar Kapso acá deja el número mudo sin ningún error visible. No sigo.");
+    process.exit(1);
+  }
+  console.log(`✓ El MCP contesta: ${info.serverInfo?.name} con ${tools.length} tools.`);
+} catch (err) {
+  console.error(`✗ No pude hablar con ${urlMcp}: ${err instanceof Error ? err.message : String(err)}`);
+  console.error("  Si es un túnel, fijate que siga levantado; si es un 401, que el bearer sea el mismo");
+  console.error("  que BILLER_HTTP_AUTH_TOKEN. No configuro Kapso contra un MCP que no contesta.");
+  process.exit(1);
+}
+
 // --- El modelo ---------------------------------------------------------------
 const modelos = await kapso("GET", "/provider_models");
 const modelo = modelos.data.find((m) => m.name === MODELO && m.deprecation_status === "active");
@@ -123,6 +152,19 @@ const definition = {
           // mandar cada respuesta con una tool, y cualquier olvido del modelo
           // se ve del otro lado como un visto sin contestar.
           message_delivery_mode: "auto_send_assistant_text",
+          // Acá NO está `handoff_to_human`, pero que quede claro que eso no
+          // alcanza: VERIFICADO CONTRA LA API (2026-08-26), Kapso se la agrega
+          // igual —`agent_default_tools_version: 2` la impone— y releer la
+          // definición después del PATCH la muestra de vuelta en la lista. No
+          // hay forma de sacarla desde acá.
+          //
+          // Importa porque esa tool ya congeló una conversación: no hay nadie
+          // atendiendo handoffs en este flujo, así que llamarla no escala nada,
+          // deja el chat mudo para siempre y no le avisa a nadie. La única
+          // barrera que sí funciona es el system prompt, que se lo prohíbe
+          // explícitamente (ver docs/FLUJO_WHATSAPP.md §5). Se deja nombrada la
+          // lista mínima igual: dice cuál es la intención, aunque Kapso la
+          // amplíe.
           enabled_default_tools: ["complete_task", "get_whatsapp_context"],
           flow_agent_mcp_servers: [
             {

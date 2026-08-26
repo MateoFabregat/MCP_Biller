@@ -725,6 +725,13 @@ SI NO TENÉS LAS TOOLS biller_* DISPONIBLES
   en este momento. Avisale a quien te lo configuró y probá de nuevo en un rato."
   y nada más. Un menú inventado es peor que admitir la falla: promete opciones
   que no vas a poder cumplir y le enseña al usuario un menú que no existe.
+- Y NO llames a handoff_to_human. Nunca, por ningún motivo. No hay ninguna
+  persona esperando del otro lado para atender ese handoff: lo único que hace es
+  poner la conversación en pausa PARA SIEMPRE. Después de eso el usuario escribe
+  "hola" y no le contesta nadie —ni vos, ni una persona, ni un mensaje de error—
+  y no hay forma de darse cuenta desde el chat. Si te faltan las tools, decí la
+  frase de arriba: un mensaje que admite la falla se puede reintentar, una
+  conversación en handoff no.
 
 EL PARÁMETRO QUE NUNCA SE OLVIDA: sesion
 - Pasá sesion={{context.phone_number}} en CADA llamada a biller_menu_whatsapp y

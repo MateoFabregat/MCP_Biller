@@ -187,7 +187,13 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
     tools: ["biller_cuenta_corriente", "biller_crear_recibo"],
     requiereEscritura: true,
     sinonimos: [
-      "me pagaron", "registrar un cobro", "registrar un pago", "cobre una factura",
+      // OJO CON "registrar un pago" A SECAS: estaba acá, y es exactamente el
+      // título de `menu:pago_proveedor`. Quien tocaba esa opción del catálogo
+      // terminaba registrando un COBRO — la plata al revés: un recibo contra un
+      // cliente que no pagó, en vez de asentar lo que YO le pagué al proveedor.
+      // Un sinónimo que no dice de qué lado del mostrador está la plata no
+      // puede vivir en ninguna de las dos opciones.
+      "me pagaron", "registrar un cobro", "registrar un pago de un cliente", "cobre una factura",
       "me deposito", "recibi un pago", "marcar como pagada", "ya me pago",
       "me pago el cliente", "hacer un recibo", "emitir un recibo",
     ],
@@ -492,7 +498,11 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
     tools: ["biller_compras_proveedores"],
     oculta: true,
     sinonimos: [
-      "cuanto compre", "mis proveedores", "compras del mes", "cuanto le compre",
+      // "mis compras" es el TÍTULO de esta opción, y estaba faltando: quien
+      // copiaba el renglón del catálogo tal cual caía en "no entendí". El
+      // título es lo único que el usuario ve escrito por nosotros, así que es
+      // la frase que MÁS probablemente vuelva textual.
+      "mis compras", "cuanto compre", "mis proveedores", "compras del mes", "cuanto le compre",
       "gastos con proveedores", "compras a proveedores", "que compre",
     ],
   },
@@ -531,8 +541,8 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
     requiereEscritura: true,
     oculta: true,
     sinonimos: [
-      "le pague a un proveedor", "registrar un pago a proveedor", "pague una factura de compra",
-      "pagar a proveedor", "asentar un pago",
+      "registrar un pago", "le pague a un proveedor", "registrar un pago a proveedor",
+      "pague una factura de compra", "pagar a proveedor", "asentar un pago",
     ],
   },
   {

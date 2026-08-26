@@ -36,6 +36,26 @@ import { hoyComoDateUy, hoyIsoUy } from "./fechaUy.js";
 /** Moneda local: no genera exposición cambiaria. */
 export const MONEDA_LOCAL = "UYU";
 
+/**
+ * Cómo se proyectó el cierre del período. UNA sola definición, en un array y no
+ * en un `type`, porque el schema de salida de `biller_comparar_periodos` los
+ * necesita EN TIEMPO DE EJECUCIÓN para armar su `z.enum`.
+ *
+ * Escrito a mano en los dos lados, se desincronizó: la tool declaraba un
+ * `z.literal("run_rate_lineal")` —un solo valor— mientras el servicio devolvía
+ * `run_rate_por_dia_de_semana` cada vez que había datos suficientes para
+ * aprender el patrón semanal. O sea que la proyección fallaba con un error de
+ * validación de salida justo en su mejor caso, que es el caso con más datos.
+ */
+export const METODOS_PROYECCION = [
+  /** Se aprendió el patrón semanal: los sábados del negocio pesan distinto. */
+  "run_rate_por_dia_de_semana",
+  /** No hubo datos para aprender el patrón: promedio diario parejo. */
+  "run_rate_lineal",
+] as const;
+
+export type MetodoProyeccion = (typeof METODOS_PROYECCION)[number];
+
 export interface TotalesPeriodo {
   rango: RangoFechas;
   total_por_moneda: Record<string, number>;
@@ -65,7 +85,7 @@ export interface Proyeccion {
    * `run_rate_por_dia_de_semana` cuando se pudo aprender el patrón semanal del
    * negocio; `run_rate_lineal` cuando no hubo datos para aprenderlo.
    */
-  metodo: "run_rate_por_dia_de_semana" | "run_rate_lineal";
+  metodo: MetodoProyeccion;
   /** Promedio de un día hábil y de un día de fin de semana, según los datos. */
   promedio_habil: number | null;
   promedio_finde: number | null;
@@ -259,7 +279,7 @@ function proyectarPorPatron(
   proyectado: number;
   promedioHabil: number | null;
   promedioFinde: number | null;
-  metodo: "run_rate_por_dia_de_semana" | "run_rate_lineal";
+  metodo: MetodoProyeccion;
 } | null {
   let totalHabil = 0;
   let totalFinde = 0;
