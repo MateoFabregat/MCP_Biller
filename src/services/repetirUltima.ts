@@ -22,10 +22,11 @@
 // texto propio, no texto de un tercero.
 // =============================================================================
 
+import { INDICADORES_FACTURACION } from "../biller/cfeSchema.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
 import { clasificarEstado } from "./estadoDgi.js";
-import type { EstadoEmision, ItemEnCurso } from "../kapso/emision.js";
+import type { EstadoEmision, ItemEnCurso, PerfilCasa } from "../kapso/emision.js";
 
 /** Qué se pudo copiar del comprobante anterior, para contárselo al agente. */
 export interface ResultadoRepeticion {
@@ -49,13 +50,43 @@ export function elegirComprobanteARepetir(
 ): ComprobanteEmitido | null {
   let mejor: ComprobanteEmitido | null = null;
   for (const c of comprobantes) {
-    const clasificacion = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
-    if (clasificacion.categoria !== "venta") continue;
-    if (clasificarEstado(c.estado) !== "aceptado") continue;
+    if (!esVentaAceptada(c)) continue;
     const fecha = c.fecha_emision ?? "";
     if (mejor === null || fecha > (mejor.fecha_emision ?? "")) mejor = c;
   }
   return mejor;
+}
+
+/**
+ * El filtro que define QUÉ comprobante cuenta, acá y en el perfil de la casa.
+ *
+ * "Solo Aceptado DGI" es el criterio del proyecto para cualquier total (ver
+ * MEMORY): un comprobante rechazado no facturó nada, y hacerlo votar en el
+ * perfil sería derivar la costumbre de la casa de documentos que no existen
+ * ante DGI. Notas de crédito, recibos y remitos tampoco: no son ventas.
+ */
+export function esVentaAceptada(c: ComprobanteEmitido): boolean {
+  if (classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia).categoria !== "venta") {
+    return false;
+  }
+  return clasificarEstado(c.estado) === "aceptado";
+}
+
+/**
+ * Las últimas `cuantas` ventas aceptadas, de la más nueva a la más vieja.
+ *
+ * Se ordena por fecha de EMISIÓN y no por id: el id es orden de creación en
+ * Biller, y una factura cargada hoy con fecha de la semana pasada no es la
+ * costumbre más reciente de la casa.
+ */
+export function ultimasVentasAceptadas(
+  comprobantes: ReadonlyArray<ComprobanteEmitido>,
+  cuantas: number,
+): ComprobanteEmitido[] {
+  return comprobantes
+    .filter(esVentaAceptada)
+    .sort((a, b) => (b.fecha_emision ?? "").localeCompare(a.fecha_emision ?? ""))
+    .slice(0, cuantas);
 }
 
 /**
@@ -148,4 +179,174 @@ export function estadoDesdeComprobante(detalle: ComprobanteEmitido): ResultadoRe
     items_copiados: items.length,
     advertencias,
   };
+}
+
+// =============================================================================
+// El perfil de la casa
+//
+// `estadoDesdeComprobante` contesta "¿qué le facturé la última vez A ESTE
+// CLIENTE?". Esto contesta la otra pregunta, la que no depende del cliente:
+// "¿cómo factura ESTA EMPRESA?".
+//
+// Es la misma lectura corrida sobre varios comprobantes, y por eso reusa la
+// función de arriba en vez de volver a mirar los campos crudos: si mañana
+// cambia de dónde sale `forma_pago` (hoy vive en `campos_extra`, ver el
+// comentario allá arriba), cambia en un solo lugar y las dos features siguen
+// coincidiendo. Que la repetición y el perfil lean distinto el mismo
+// comprobante sería un bug invisible: dos features contestando distinto sobre
+// el mismo dato.
+//
+// LO QUE ESTE MÓDULO NO DECIDE: cuándo buscarlo, cada cuánto, y sobre qué
+// ventana. Eso es política del flujo y vive en `tools/emisionGuiada.ts`. Acá
+// entra una lista de comprobantes ya detallados y sale un perfil; es una
+// función pura, y por eso se puede testear la regla fiscal —la unanimidad— sin
+// tocar la red.
+// =============================================================================
+
+/**
+ * Cuántos CFE aceptados hacen falta para que el perfil exista.
+ *
+ * Cinco no es un número mágico, es el piso: con menos, "todas coinciden" es
+ * ruido. Una empresa que emitió tres facturas en noventa días no tiene todavía
+ * una costumbre, tiene tres facturas — y el flujo sigue preguntando, que es
+ * exactamente lo que hacía antes de que este perfil existiera.
+ */
+export const MUESTRAS_PERFIL = 5;
+
+/** El valor unánime de la lista, o undefined si falta muestra o hay mezcla. */
+function unanime<T>(valores: ReadonlyArray<T | undefined>, minimo: number): T | undefined {
+  const presentes = valores.filter((v): v is T => v !== undefined);
+  // Ojo: se exige `minimo` valores PRESENTES, no `minimo` comprobantes con
+  // alguno presente. Un campo que la API no devolvió en dos de los cinco no
+  // tiene cinco votos, tiene tres — y con tres no se defaultea nada que mueva
+  // el 22% del total.
+  if (presentes.length < minimo) return undefined;
+  const primero = presentes[0]!;
+  return presentes.every((v) => v === primero) ? primero : undefined;
+}
+
+/** El valor con MÁS DE LA MITAD de los votos, o undefined si no hay tal cosa. */
+function mayoria<T>(valores: ReadonlyArray<T | undefined>, minimo: number): T | undefined {
+  const presentes = valores.filter((v): v is T => v !== undefined);
+  if (presentes.length < minimo) return undefined;
+  const cuenta = new Map<T, number>();
+  for (const v of presentes) cuenta.set(v, (cuenta.get(v) ?? 0) + 1);
+  for (const [valor, n] of cuenta) {
+    // Más de la mitad, no "el más votado": con 2-2-1 el más votado representa
+    // al 40% de las facturas, y eso no es una costumbre.
+    if (n * 2 > presentes.length) return valor;
+  }
+  return undefined;
+}
+
+/**
+ * La tasa de IVA de un comprobante entero, si tiene UNA sola.
+ *
+ * Un comprobante con líneas al 22% y al 10% no vota: no tiene "una tasa", y
+ * elegirle una sería inventar el dato que este perfil existe para no inventar.
+ * Devolver `undefined` lo saca de la muestra, y como la unanimidad exige la
+ * muestra completa, un solo comprobante mezclado alcanza para que el flujo
+ * siga preguntando la tasa. Es el lado conservador a propósito.
+ */
+function tasaUnicaDe(detalle: ComprobanteEmitido): number | undefined {
+  const tasas = new Set<number>();
+  for (const item of detalle.items ?? []) {
+    if (item.indicador_facturacion === null || item.indicador_facturacion === undefined) {
+      return undefined;
+    }
+    tasas.add(item.indicador_facturacion);
+  }
+  if (tasas.size !== 1) return undefined;
+  return [...tasas][0];
+}
+
+/**
+ * Deriva el perfil de la casa de los últimos CFE aceptados de la empresa.
+ *
+ * ENTRA: comprobantes YA DETALLADOS (con `items`), en cualquier orden — se
+ * filtran a ventas aceptadas y se ordenan acá. El detalle hace falta por la
+ * tasa de IVA, que vive en los ítems y el listado no trae.
+ *
+ * SALE: siempre un perfil, nunca null. Un perfil sin ningún campo derivado
+ * también es una respuesta —"se miró y no alcanzó"— y sirve para no volver a
+ * buscarlo cinco veces en la misma conversación. Lo que no pasa nunca es que
+ * salga un campo que no cumplió su criterio.
+ */
+export function derivarPerfilCasa(
+  detalles: ReadonlyArray<ComprobanteEmitido>,
+  opciones: { minimo?: number; desde?: string; hasta?: string } = {},
+): PerfilCasa {
+  const minimo = opciones.minimo ?? MUESTRAS_PERFIL;
+  const muestra = ultimasVentasAceptadas(detalles, minimo);
+
+  const perfil: PerfilCasa = {
+    derivado: true,
+    muestras: muestra.length,
+    ...(opciones.desde !== undefined ? { desde: opciones.desde } : {}),
+    ...(opciones.hasta !== undefined ? { hasta: opciones.hasta } : {}),
+    detalles: [],
+  };
+
+  if (muestra.length < minimo) {
+    perfil.detalles.push(
+      `Sin perfil: se encontraron ${muestra.length} CFE aceptado(s) en la ventana y hacen falta ` +
+        `${minimo}. El flujo pregunta como siempre.`,
+    );
+    return perfil;
+  }
+
+  // La misma lectura que usa "lo de siempre": un comprobante se interpreta en
+  // un solo lugar del código.
+  const estados = muestra.map((c) => estadoDesdeComprobante(c).estado);
+
+  // --- El criterio de IVA: unanimidad o nada -------------------------------
+  const brutos = unanime(estados.map((e) => e.montos_brutos), minimo);
+  if (brutos !== undefined) {
+    perfil.montos_brutos = brutos;
+    perfil.detalles.push(
+      `montos_brutos=${brutos}: los ${minimo} últimos CFE aceptados coinciden ` +
+        `(${brutos ? "precios con IVA incluido" : "IVA sumado aparte"}).`,
+    );
+  } else {
+    perfil.detalles.push(
+      `montos_brutos: los ${minimo} últimos CFE aceptados NO coinciden (o el campo no vino en todos). ` +
+        "Se sigue preguntando: es el campo que mueve el 22% del total.",
+    );
+  }
+
+  const tasa = unanime(muestra.map(tasaUnicaDe), minimo);
+  if (tasa !== undefined && tasa in INDICADORES_FACTURACION) {
+    perfil.indicador_facturacion = tasa;
+    perfil.detalles.push(
+      `indicador_facturacion=${tasa}: los ${minimo} últimos CFE aceptados usan esa única tasa ` +
+        `(${INDICADORES_FACTURACION[tasa] ?? ""}).`,
+    );
+  } else {
+    perfil.detalles.push(
+      "indicador_facturacion: no hay una tasa única repetida en los últimos comprobantes " +
+        "(o alguno mezcla tasas). Se sigue preguntando.",
+    );
+  }
+
+  // --- Moneda y forma de pago: mayoría -------------------------------------
+  //
+  // Riesgo bajo y visible: la moneda sale en el símbolo de cada línea del
+  // preview y la forma de pago sale escrita en la línea de supuestos. Un error
+  // acá lo ve el usuario antes de confirmar; un error en el criterio de IVA
+  // cambia el total sin cambiar nada que se vea.
+  const moneda = mayoria(estados.map((e) => e.moneda), minimo);
+  if (moneda !== undefined) {
+    perfil.moneda = moneda;
+    perfil.detalles.push(`moneda=${moneda}: es la mayoría de los últimos ${minimo} CFE aceptados.`);
+  }
+
+  const formaPago = mayoria(estados.map((e) => e.forma_pago), minimo);
+  if (formaPago !== undefined) {
+    perfil.forma_pago = formaPago;
+    perfil.detalles.push(
+      `forma_pago=${formaPago}: es la mayoría de los últimos ${minimo} CFE aceptados.`,
+    );
+  }
+
+  return perfil;
 }

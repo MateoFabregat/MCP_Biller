@@ -9,6 +9,18 @@
 // tipo de comprobante, y devuelve la siguiente pregunta con el mensaje tocable
 // ya armado.
 //
+// EL PERFIL DE LA CASA
+//
+// Después de sacar cinco preguntas del flujo quedaba una que se hacía casi
+// siempre: si el precio ya trae el IVA adentro. No se puede adivinar del
+// mensaje —los dos valores están bien para mitad del mundo cada uno— pero sí
+// está escrito en las últimas facturas de la empresa, que no cambian de
+// criterio entre una y otra. Esta tool las lee (`buscarPerfilCasa` →
+// `derivarPerfilCasa`) y usa lo que encuentre como una capa de defaults que va
+// DEBAJO de todo lo demás y ARRIBA de los defaults duros. Solo defaultea el
+// criterio de IVA cuando los últimos cinco CFE aceptados coinciden TODOS: si
+// hay mezcla, se pregunta como siempre.
+//
 // Devuelve además `comprobante_borrador`: el cuerpo parcial con la forma exacta
 // que espera `biller_emitir_comprobante`. Eso saca del modelo la tarea de armar
 // el payload campo por campo, que es donde se cuelan los errores caros (un
@@ -39,6 +51,7 @@ import {
   type ClaseReceptor,
   type EstadoEmision,
   type ItemEnCurso,
+  type PerfilCasa,
 } from "../kapso/emision.js";
 import {
   esPedidoDeEmision,
@@ -47,14 +60,19 @@ import {
 } from "../kapso/extraerPedido.js";
 import { extractClienteRut } from "../biller/normalize.js";
 import { fetchEmitidos } from "../biller/queries.js";
+import { CONCURRENCIA, mapConLimite } from "../biller/traerVentanas.js";
 import { hoyComoDateUy, hoyIsoUy } from "../services/fechaUy.js";
 import { formatearUy, parsearCantidad, parsearImporte } from "../services/importe.js";
 import { aIso, consultarPorPeriodo } from "../services/periodo.js";
 import {
+  MUESTRAS_PERFIL,
+  derivarPerfilCasa,
   elegirComprobanteARepetir,
   estadoDesdeComprobante,
+  ultimasVentasAceptadas,
   type ResultadoRepeticion,
 } from "../services/repetirUltima.js";
+import { traerVentana } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
@@ -265,6 +283,22 @@ const outputShape = {
    * mencionarlos si el usuario pregunta, y para poder contarlos.
    */
   defaults_aplicados: z.array(z.string()),
+  /**
+   * El PERFIL DE LA CASA: los defaults que salieron del historial de la empresa
+   * y no de la conversación. `campos` es el subconjunto de `defaults_aplicados`
+   * que puso el perfil, y `porque` explica sobre cuántos comprobantes.
+   *
+   * Está para que el agente pueda contestar "¿por qué pusiste IVA incluido?"
+   * sin inventar la respuesta. Todo lo que dice ya aparece en el preview.
+   */
+  perfil_casa: z
+    .object({
+      derivado: z.boolean(),
+      muestras: z.number(),
+      campos: z.array(z.string()),
+      porque: z.array(z.string()),
+    })
+    .nullable(),
   comprobante_borrador: z.record(z.unknown()),
   /** Qué le falta al borrador y de dónde sacarlo. Ver `borradorComprobante`. */
   completar: z.array(z.string()),
@@ -731,7 +765,12 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     const recuperado =
       guardado === null
         ? []
-        : Object.keys(guardado.estado).filter(
+        : Object.keys(guardado.estado)
+            // `perfil_casa` no es un dato del usuario sino un cache derivado
+            // (ver `PerfilCasa`): listarlo acá diría "sin sesión esto se habría
+            // vuelto a preguntar", y no es cierto — se habría vuelto a derivar.
+            .filter((k) => k !== "perfil_casa")
+            .filter(
             (k) =>
               (estadoArgs as Record<string, unknown>)[k] === undefined &&
               JSON.stringify((estado as Record<string, unknown>)[k]) ===
@@ -760,8 +799,42 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       }
     }
 
+    // --- El perfil de la casa ------------------------------------------------
+    //
+    // La capa de defaults que sale del HISTORIAL de la empresa, y va DEBAJO de
+    // todo lo de arriba: de lo que dijo el usuario, de lo que se leyó de su
+    // texto y de lo que copió `repetir_ultima_de`. Por eso se resuelve acá, al
+    // final, cuando el estado ya tiene todo lo explícito: `convieneBuscarPerfil`
+    // mira los huecos que QUEDARON, no los que había al empezar.
+    //
+    // UNA VEZ POR SESIÓN. Lo que se busca queda cacheado en `estado.perfil_casa`
+    // —un cache derivado, no una respuesta del usuario, ver `PerfilCasa`— y en
+    // los mensajes siguientes de la misma conversación no se vuelve a consultar.
+    // Sin sesión no hay dónde cachearlo y se deriva cada vez, que sigue siendo
+    // correcto y solo cuesta una consulta que casi siempre pega en el cache de
+    // ventanas.
+    let perfil: PerfilCasa | null = estado.perfil_casa ?? null;
+    if (perfil === null && convieneBuscarPerfil(estado)) {
+      try {
+        perfil = await buscarPerfilCasa(ctx);
+        // Se cachea incluso cuando no derivó NADA: "se miró y no alcanzó" es
+        // una respuesta, y sin guardarla se volvería a mirar en cada mensaje.
+        estado.perfil_casa = perfil;
+      } catch (err) {
+        // Un perfil que no se pudo derivar NO frena una emisión: se sigue
+        // preguntando, que es exactamente la conducta de antes. Y no se cachea
+        // el fracaso: una caída transitoria de la API no tiene por qué dejar a
+        // la empresa sin perfil por el resto de la conversación.
+        perfil = null;
+        warnings.push(
+          "No se pudo leer el historial para deducir cómo factura la casa " +
+            `(${err instanceof Error ? err.message : String(err)}). Se pregunta como siempre.`,
+        );
+      }
+    }
+
     // --- Qué sigue -----------------------------------------------------------
-    let siguiente = siguientePaso(estado);
+    let siguiente = siguientePaso(estado, { perfil });
 
     // "✏️ Otra fecha" es la única respuesta que RETROCEDE el flujo: el usuario
     // descartó un dato que ya estaba resuelto (hoy, por default) y todavía no
@@ -770,6 +843,15 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     // le diríamos al agente "andá a emitir" en medio de una pregunta.
     if (pidioOtraFecha) {
       siguiente = { ...siguiente, paso: "fecha", listo: false };
+    }
+
+    // "🔢 Otro IVA" retrocede igual, y con el perfil de la casa dejó de ser un
+    // caso imposible: si el perfil ya contestó las dos mitades del IVA,
+    // `siguientePaso` diría "confirmar, listo" mientras nosotros le estamos
+    // preguntando la tasa. Mismo arreglo que arriba, por el mismo motivo: el
+    // flujo no puede decir "andá a emitir" en medio de una pregunta.
+    if (pidioOtraTasa) {
+      siguiente = { ...siguiente, paso: "iva", listo: false };
     }
 
     const tipo =
@@ -986,6 +1068,11 @@ function resumirEstado(estado: EstadoEmision): Record<string, unknown> {
   }
   if (estado.moneda !== undefined) resumen["moneda"] = estado.moneda;
   if (estado.forma_pago !== undefined) resumen["forma_pago"] = estado.forma_pago;
+  // El campo que mueve el 22% del total tiene que estar en el espejo. Antes no
+  // estaba y se notaba poco porque siempre lo había contestado el usuario; con
+  // el perfil de la casa puede venir de un default, y un default que el agente
+  // no puede ver es uno que no puede ecoar.
+  if (estado.montos_brutos !== undefined) resumen["montos_brutos"] = estado.montos_brutos;
   if (estado.items_cerrados !== undefined) resumen["items_cerrados"] = estado.items_cerrados;
   // El texto de la adenda NO vuelve (barrera de salida); vuelve si está o no.
   if (estado.adenda !== undefined) resumen["adenda_cargada"] = estado.adenda.trim() !== "";
@@ -1080,8 +1167,13 @@ async function responder(p: {
   // `aplicarDefaults`). Lo que SALE hacia el CFE tiene que estar completo: un
   // comprobante sin `fecha_emision` no se emite, y un `montos_brutos` ausente
   // factura 22% de más.
-  const { estado: conDefaults, aplicados } = aplicarDefaults(estado);
+  // El perfil de la casa entra por el estado (donde lo dejó cacheado el
+  // handler) y se aplica acá, en la copia, junto a los demás defaults: es la
+  // misma jerarquía —algo que el usuario no dijo— y sale por el mismo lugar,
+  // el borrador que después arma el preview.
+  const { estado: conDefaults, aplicados, del_perfil } = aplicarDefaults(estado);
   const { borrador, completar } = borradorComprobante(conDefaults, tipo?.tipo_comprobante ?? null);
+  const perfil = estado.perfil_casa ?? null;
 
   const notaSesion =
     clave === null
@@ -1108,6 +1200,17 @@ async function responder(p: {
     // Con o sin store. Es lo que va a decir si el store sirvió: si el abandono
     // por paso baja en las conversaciones con sesión, la hipótesis era cierta.
     sesion: clave === null ? "no" : "si",
+    // Y con o sin perfil de la casa, por el mismo motivo: la hipótesis es que
+    // el paso "iva" desaparece del embudo en las empresas que tienen perfil.
+    // Va como ETIQUETA del embudo y no como métrica propia a propósito: la
+    // pregunta ("¿el perfil sacó la pregunta de IVA?") es sobre el embudo, y
+    // separada en otro contador no se podría cruzar.
+    perfil:
+      perfil === null
+        ? "sin_buscar"
+        : perfil.montos_brutos === undefined
+          ? "sin_criterio_iva"
+          : "con_criterio_iva",
   });
 
   return jsonResult({
@@ -1123,6 +1226,15 @@ async function responder(p: {
     // distinguir "dijo contado" de "no dijo nada" y no puede avisarlo.
     estado_entendido: resumirEstado(conDefaults),
     defaults_aplicados: aplicados,
+    perfil_casa:
+      perfil === null
+        ? null
+        : {
+            derivado: true,
+            muestras: perfil.muestras,
+            campos: del_perfil,
+            porque: perfil.detalles,
+          },
     comprobante_borrador: borrador,
     completar,
     documento_detectado: documentoDetectado,
@@ -1208,6 +1320,96 @@ async function prellenarDesdeUltimaVenta(
   return r;
 }
 
+// ---------------------------------------------------------------------------
+// El perfil de la casa: cuándo se busca y cómo
+// ---------------------------------------------------------------------------
+
+/**
+ * Qué tan atrás se mira para saber cómo factura la casa. Noventa días.
+ *
+ * Es la ventana que ya usan las demás tools de período, así que en un proceso
+ * vivo el listado suele salir del cache de ventanas sin tocar la API (ver
+ * `services/ventana.ts`). Más corto se queda sin muestra en una empresa que
+ * factura poco; más largo empieza a describir una costumbre que ya cambió.
+ */
+export const DIAS_PERFIL = 90;
+
+/**
+ * ¿Vale la pena ir a buscar el perfil AHORA?
+ *
+ * Dos condiciones, y las dos son de costo, no de corrección:
+ *
+ *   1. Que ya haya una LÍNEA CON PRECIO. El perfil no cambia ninguna pregunta
+ *      anterior a esa —a quién le facturás, qué le vendiste, a cuánto—, y el
+ *      embudo dice que la enorme mayoría de las conversaciones se abandona
+ *      antes de llegar ahí. Disparar una consulta de noventa días en cada
+ *      "quiero facturar" sería gastar el rate limit de la empresa en
+ *      conversaciones que no van a existir.
+ *   2. Que quede algo que el perfil pueda contestar. Cuando el usuario ya dijo
+ *      el criterio de IVA y la tasa —o los copió `repetir_ultima_de`—, el
+ *      perfil no tiene nada que aportar y la consulta sería pura latencia.
+ *
+ * La corrección no depende de esto: si no se busca, el flujo se comporta
+ * exactamente como antes de que el perfil existiera.
+ */
+export function convieneBuscarPerfil(estado: EstadoEmision): boolean {
+  const items = estado.items ?? [];
+  const hayLinea = items.some(
+    (i) => (i.concepto ?? "") !== "" && typeof i.precio === "number" && i.precio > 0,
+  );
+  if (!hayLinea) return false;
+
+  const tasaResuelta =
+    estado.indicador_facturacion !== undefined ||
+    items.every((i) => i.indicador_facturacion !== undefined);
+  const monedaResuelta = (estado.moneda ?? "") !== "" || estado.moneda_dudosa === true;
+
+  return !(
+    estado.montos_brutos !== undefined &&
+    tasaResuelta &&
+    monedaResuelta &&
+    estado.forma_pago !== undefined
+  );
+}
+
+/**
+ * Trae los últimos CFE aceptados de la empresa y deriva el perfil.
+ *
+ * DOS CONSULTAS Y NO UNA, y la segunda es la cara: el listado no trae ítems, y
+ * la tasa de IVA vive en los ítems. Así que se piden los detalles de los
+ * `MUESTRAS_PERFIL` últimos, en paralelo acotado (el mismo techo que usan las
+ * ventanas). Son cinco GET de lectura, una sola vez por sesión de emisión —
+ * después queda cacheado en el borrador y no se vuelve a pedir.
+ *
+ * El listado sí pasa por `traerVentana`, o sea por el cache compartido, el
+ * recorte por fecha de EMISIÓN y el contador de cache por empresa. Reusarlo en
+ * vez de consultar a mano es lo que hace que este perfil cuente los mismos
+ * comprobantes que cuenta el resto del sistema.
+ */
+export async function buscarPerfilCasa(ctx: ToolContext): Promise<PerfilCasa> {
+  const hoy = hoyComoDateUy();
+  const desde = aIso(new Date(hoy.getTime() - DIAS_PERFIL * 86_400_000));
+  const hasta = hoyIsoUy(hoy);
+
+  const ventana = await traerVentana(ctx, { rango: { desde, hasta } });
+  const candidatos = ultimasVentasAceptadas(ventana.comprobantes, MUESTRAS_PERFIL);
+  if (candidatos.length < MUESTRAS_PERFIL) {
+    // Sin muestra suficiente no se piden los detalles: sería gastar cinco
+    // requests para confirmar que no hay perfil. `derivarPerfilCasa` devuelve
+    // igual el perfil vacío, con el detalle de por qué.
+    return derivarPerfilCasa(candidatos, { desde, hasta });
+  }
+
+  const client = ctx.getClient();
+  const detalles = await mapConLimite(candidatos, CONCURRENCIA, async (c) => {
+    if (c.id === null || c.id === undefined) return null;
+    return (await fetchEmitidos(client, { id: String(c.id) }))[0] ?? null;
+  });
+
+  const utiles = detalles.filter((d): d is NonNullable<typeof d> => d !== null);
+  return derivarPerfilCasa(utiles, { desde, hasta });
+}
+
 export function registerEmisionGuiada(server: McpServer, ctx: ToolContext): void {
   const puedeEnviar = (() => {
     try {
@@ -1230,6 +1432,9 @@ export function registerEmisionGuiada(server: McpServer, ctx: ToolContext): void
         "PREGUNTA POCO A PROPÓSITO: la fecha (hoy), la moneda (UYU), la forma de pago (contado) y la " +
         "cantidad (1) se completan solas y aparecen en el preview de confirmación — no las mandes " +
         "salvo que el usuario las haya dicho, y no se las preguntes vos por tu cuenta. " +
+        "Además deduce el PERFIL DE LA CASA de las últimas facturas de la empresa: si todas " +
+        "coinciden en el criterio de IVA y en la tasa, tampoco se pregunta eso (y sale igual escrito " +
+        "en el preview). Lo derivado viene en 'perfil_casa', con el porqué. " +
         "Devuelve 'comprobante_borrador' con la forma exacta que espera biller_emitir_comprobante " +
         "y 'defaults_aplicados' con lo que se completó solo. No emite nada.",
       inputSchema: inputShape,

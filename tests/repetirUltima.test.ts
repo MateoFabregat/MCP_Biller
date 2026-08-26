@@ -5,6 +5,8 @@
 import { describe, expect, it } from "vitest";
 import { normalizeComprobantesEmitidos } from "../src/biller/normalize.js";
 import {
+  MUESTRAS_PERFIL,
+  derivarPerfilCasa,
   elegirComprobanteARepetir,
   estadoDesdeComprobante,
 } from "../src/services/repetirUltima.js";
@@ -97,6 +99,132 @@ describe("estadoDesdeComprobante", () => {
     );
     expect(r.estado.adenda).toBeUndefined();
     expect(r.estado.tasa_cambio).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// El perfil de la casa
+//
+// La regla que se prueba acá es FISCAL, no de UX: `montos_brutos` decide si el
+// precio que dio el usuario lleva el IVA adentro o se le suma, o sea un 22% del
+// total. Defaultearlo mal produce un comprobante perfectamente bien formado por
+// el importe equivocado. Por eso el criterio no es "lo más frecuente" sino
+// unanimidad sobre una muestra mínima, y por eso cada caso de borde tiene su
+// test: 5 iguales alcanza, 4 y 1 no, y 4 comprobantes tampoco.
+// ---------------------------------------------------------------------------
+
+describe("derivarPerfilCasa: la unanimidad que protege el 22%", () => {
+  /** Una venta aceptada de la casa, con todo lo que el perfil mira. */
+  const cfe = (i: number, over: Record<string, unknown> = {}) =>
+    venta({
+      id: 100 + i,
+      // Fechas decrecientes: el perfil mira las ÚLTIMAS, así que el orden importa.
+      fecha_emision: `2026-08-${String(20 - i).padStart(2, "0")} 10:00:00`,
+      montos_brutos: 1,
+      forma_pago: 1,
+      items: [{ cantidad: 1, concepto: "algo", precio: 1000, indicador_facturacion: 3 }],
+      ...over,
+    });
+
+  const cinco = (over: (i: number) => Record<string, unknown> = () => ({})) =>
+    normalizar(Array.from({ length: MUESTRAS_PERFIL }, (_, i) => cfe(i, over(i))));
+
+  it("cinco CFE aceptados que coinciden → montos_brutos se defaultea", () => {
+    const p = derivarPerfilCasa(cinco());
+    expect(p.muestras).toBe(5);
+    expect(p.montos_brutos).toBe(true);
+    expect(p.derivado).toBe(true);
+    expect(p.detalles.join(" ")).toContain("montos_brutos=true");
+  });
+
+  it("cuatro iguales y uno distinto → NO se defaultea: se sigue preguntando", () => {
+    // Este es el test que le importa al guardián fiscal. Cuatro de cinco es una
+    // mayoría abrumadora y no alcanza: la quinta factura dice que en esta casa
+    // el criterio no es uno solo, y suponerlo cambia el total un 22%.
+    const p = derivarPerfilCasa(cinco((i) => (i === 2 ? { montos_brutos: 0 } : {})));
+    expect(p.muestras).toBe(5);
+    expect(p.montos_brutos).toBeUndefined();
+    expect(p.detalles.join(" ")).toContain("NO coinciden");
+  });
+
+  it("menos de cinco comprobantes → no hay perfil, aunque todos coincidan", () => {
+    const p = derivarPerfilCasa(normalizar([cfe(0), cfe(1), cfe(2), cfe(3)]));
+    expect(p.muestras).toBe(4);
+    expect(p.montos_brutos).toBeUndefined();
+    expect(p.indicador_facturacion).toBeUndefined();
+    expect(p.moneda).toBeUndefined();
+    expect(p.forma_pago).toBeUndefined();
+    expect(p.detalles.join(" ")).toContain("Sin perfil");
+  });
+
+  it("un campo que la API no devolvió en todos tampoco alcanza", () => {
+    // Cinco comprobantes, pero solo cuatro traen el campo: son cuatro votos, no
+    // cinco. "Todos los que contestaron coinciden" no es unanimidad.
+    const p = derivarPerfilCasa(cinco((i) => (i === 1 ? { montos_brutos: null } : {})));
+    expect(p.montos_brutos).toBeUndefined();
+  });
+
+  it("solo votan las ventas ACEPTADAS por DGI", () => {
+    // Mismo criterio que cualquier total del proyecto. Un rechazo no facturó
+    // nada y una nota de crédito no es una venta: si votaran, el perfil se
+    // derivaría de documentos que no describen lo que la casa cobra.
+    const conBasura = normalizar([
+      ...Array.from({ length: MUESTRAS_PERFIL }, (_, i) => cfe(i)),
+      cfe(9, { estado: "Rechazado DGI", montos_brutos: 0 }),
+      cfe(10, { tipo_comprobante: 112, montos_brutos: 0 }),
+    ]);
+    expect(derivarPerfilCasa(conBasura).montos_brutos).toBe(true);
+
+    // Y si el rechazo es el que hace falta para llegar a cinco, no llega.
+    const sinMuestra = normalizar([
+      ...Array.from({ length: 4 }, (_, i) => cfe(i)),
+      cfe(4, { estado: "Rechazado DGI" }),
+    ]);
+    expect(derivarPerfilCasa(sinMuestra).muestras).toBe(4);
+  });
+
+  it("la tasa de IVA se deriva igual: unánime, y un comprobante mezclado no vota", () => {
+    expect(derivarPerfilCasa(cinco()).indicador_facturacion).toBe(3);
+
+    const mezclado = cinco((i) =>
+      i === 0
+        ? {
+            items: [
+              { cantidad: 1, concepto: "a", precio: 100, indicador_facturacion: 3 },
+              { cantidad: 1, concepto: "b", precio: 100, indicador_facturacion: 2 },
+            ],
+          }
+        : {},
+    );
+    // El comprobante con dos tasas no tiene "una tasa": sale de la muestra, y
+    // sin él quedan cuatro votos, que no son cinco.
+    expect(derivarPerfilCasa(mezclado).indicador_facturacion).toBeUndefined();
+  });
+
+  it("moneda y forma de pago se conforman con mayoría, pero no con un empate", () => {
+    // Riesgo bajo y visible: la moneda sale en cada línea del preview y la
+    // forma de pago sale escrita en la línea de supuestos.
+    const mayoria = derivarPerfilCasa(cinco((i) => (i < 2 ? { moneda: "USD" } : {})));
+    expect(mayoria.moneda).toBe("UYU");
+    expect(mayoria.forma_pago).toBe(1);
+
+    // 2 y 2 y 1: el más votado representa al 40% de las facturas. Eso no es una
+    // costumbre, así que no se defaultea nada.
+    const empate = derivarPerfilCasa(
+      cinco((i) => (i < 2 ? { moneda: "USD" } : i < 4 ? { moneda: "UYU" } : { moneda: "EUR" })),
+    );
+    expect(empate.moneda).toBeUndefined();
+  });
+
+  it("el perfil no lleva texto de ningún comprobante: solo códigos y conteos", () => {
+    // Va a salir hacia el modelo en `perfil_casa.porque`. Si arrastrara el
+    // concepto o la razón social de un comprobante, la barrera de salida
+    // tendría que envolverlo — y sería texto de la conversación de otra venta
+    // metido en el borrador de esta.
+    const p = derivarPerfilCasa(cinco());
+    const texto = p.detalles.join(" ");
+    expect(texto).not.toContain("algo");
+    expect(texto).not.toContain("PEREZ");
   });
 });
 

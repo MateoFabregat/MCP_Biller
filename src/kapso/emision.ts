@@ -110,6 +110,68 @@ export interface ItemEnCurso {
 }
 
 /**
+ * EL PERFIL DE LA CASA: los defaults que salen del historial de la empresa.
+ *
+ * QUÉ PROBLEMA RESUELVE
+ *
+ * Después de sacar cinco preguntas del flujo (fecha, moneda, forma de pago,
+ * cantidad, tasa de IVA) quedó UNA que se sigue haciendo casi siempre: si el
+ * precio ya trae el IVA adentro. Y es la única que no se puede defaultear
+ * mirando el mensaje, porque los dos valores posibles están bien para mitad del
+ * mundo cada uno: la panadería cotiza con IVA incluido, el mayorista lo suma
+ * aparte. Ninguna de las dos cambia de opinión entre facturas.
+ *
+ * O sea que el dato no está en el mensaje: está en las últimas facturas de ESTA
+ * empresa. Eso es este perfil — no las preferencias del CLIENTE (esas ya las
+ * copia `repetir_ultima_de`), sino la costumbre de la casa.
+ *
+ * DÓNDE ENTRA EN LA CADENA DE PRECEDENCIA
+ *
+ *   lo que dijo el usuario  >  lo leído de su texto  >  PERFIL  >  default duro
+ *
+ * Justo arriba del default duro y debajo de todo lo demás. Se aplica en
+ * `aplicarDefaults`, o sea en una COPIA: el borrador guardado sigue teniendo
+ * solo lo que dijo el usuario (ver `perfil_casa` en `EstadoEmision`).
+ *
+ * POR QUÉ LOS CAMPOS NO SE DERIVAN TODOS CON EL MISMO CRITERIO
+ *
+ * `montos_brutos` e `indicador_facturacion` exigen UNANIMIDAD sobre una muestra
+ * mínima; `moneda` y `forma_pago` se conforman con mayoría. La asimetría no es
+ * gusto: equivocarse en el criterio de IVA cambia el total un 22% y el
+ * comprobante sale igual de bien formado, así que ahí "casi siempre" no
+ * alcanza. Una moneda equivocada se ve en cada línea del preview y una forma de
+ * pago equivocada se ve escrita en la línea de supuestos.
+ *
+ * Ver `derivarPerfilCasa` en `services/repetirUltima.ts`, que es quien lo arma
+ * (y quien tiene los conteos).
+ */
+export interface PerfilCasa {
+  /** Siempre true. Marca, adentro del dato, que esto NO lo dijo el usuario. */
+  derivado: true;
+  /** Sobre cuántos CFE aceptados se derivó. Menos que el mínimo = no se deriva nada. */
+  muestras: number;
+  /** Ventana de emisión que se miró, en aaaa-mm-dd. */
+  desde?: string;
+  hasta?: string;
+  /** Solo si los `muestras` comprobantes COINCIDEN todos. */
+  montos_brutos?: boolean;
+  /** Solo si coinciden todos, y solo si cada comprobante usaba una sola tasa. */
+  indicador_facturacion?: number;
+  /** Por mayoría estricta (más de la mitad). */
+  moneda?: string;
+  /** Por mayoría estricta (más de la mitad). */
+  forma_pago?: number;
+  /**
+   * Una línea por campo derivado, y una por campo que NO se pudo derivar.
+   *
+   * Es lo que hace auditable un default que el usuario no dictó: dice cuántos
+   * comprobantes se miraron y qué contestaron. No lleva NADA de texto de un
+   * comprobante (ni conceptos ni razones sociales): solo códigos y conteos.
+   */
+  detalles: string[];
+}
+
+/**
  * Lo que se sabe hasta ahora. Todo opcional: el punto de entrada real es
  * "quiero facturarle a Pérez 2 bolsas a 6000", que llega con varios campos
  * cargados de una y salteando los primeros pasos.
@@ -215,6 +277,32 @@ export interface EstadoEmision {
    * dije que no". Ya no cambia ningún camino del flujo.
    */
   sin_adenda?: boolean;
+  /**
+   * EL PERFIL DE LA CASA, CACHEADO. NO ES UNA RESPUESTA DEL USUARIO.
+   *
+   * Es lo único de `EstadoEmision` que no salió de la conversación: se deriva
+   * del historial de CFE de la empresa (ver `derivarPerfilCasa`) y vive acá
+   * SOLO como cache, para no volver a consultarlo en cada mensaje de la misma
+   * sesión.
+   *
+   * Tres propiedades lo mantienen distinguible de un dato dicho, y las tres
+   * importan porque el borrador guardado es la BASE sobre la que se fusiona lo
+   * que llega (`fusionarEstado`):
+   *
+   *   · Va bajo su propia clave. Los valores derivados NUNCA se escriben en
+   *     `montos_brutos`, `moneda`, `forma_pago` ni `indicador_facturacion` del
+   *     estado guardado: se aplican en la COPIA que devuelve `aplicarDefaults`,
+   *     igual que la fecha de hoy o la cantidad 1.
+   *   · Lleva `derivado: true` adentro, así que un volcado del borrador lo
+   *     declara solo.
+   *   · No se puede inyectar desde afuera: `biller_emision_guiada` no acepta
+   *     ningún parámetro que lo escriba. Solo lo pone el server.
+   *
+   * Si esto se guardara como si el usuario lo hubiera dicho, una corrección
+   * posterior ("no, este va sin IVA adentro") tendría que discutirle a un dato
+   * de la misma jerarquía. Así, pisa un `undefined` y no hay nada que discutir.
+   */
+  perfil_casa?: PerfilCasa;
   /**
    * Identificador de deduplicación, generado por el server al abrir el borrador.
    *
@@ -746,19 +834,44 @@ export function separarDireccionCiudad(bruto: string): { direccion: string; ciud
 // --- Los defaults -----------------------------------------------------------
 
 /** Qué campo se completó solo. Se usa para explicarlo en el preview. */
-export type ClaveDefault = "fecha_emision" | "moneda" | "forma_pago" | "cantidad";
+export type ClaveDefault =
+  | "fecha_emision"
+  | "moneda"
+  | "forma_pago"
+  | "cantidad"
+  | "montos_brutos"
+  | "indicador_facturacion";
 
 export interface EstadoConDefaults {
   /** Copia del estado con los defaults ya puestos. El original no se toca. */
   estado: EstadoEmision;
   /** Qué se completó solo, para poder decirlo. */
   aplicados: ClaveDefault[];
+  /**
+   * Cuáles de esos vinieron del PERFIL DE LA CASA y no del default duro.
+   *
+   * Es un subconjunto de `aplicados`, no una lista aparte: para el preview los
+   * dos son lo mismo (algo que el usuario no dijo y hay que mostrarle). La
+   * distinción existe para poder explicarlo cuando pregunta —"lo pongo así
+   * porque tus últimas cinco facturas fueron así"— y para poder MEDIR cuántas
+   * preguntas ahorró el perfil.
+   */
+  del_perfil: ClaveDefault[];
 }
 
 /** Lo que `aplicarDefaults` necesita saber del mundo. Todo inyectable. */
 export interface ContextoDefaults {
   /** Hoy en dd/mm/aaaa. Se inyecta para que la máquina de estados no lea el reloj. */
   hoy?: string;
+  /**
+   * El perfil de la casa, si ya se buscó.
+   *
+   * Se puede pasar acá o dejarlo en `estado.perfil_casa` (donde lo cachea la
+   * sesión): lo de acá gana. Que el estado alcance es lo que hace que
+   * `siguientePaso(estado)` siga siendo llamable con un solo argumento desde
+   * cualquier lado sin perder el perfil.
+   */
+  perfil?: PerfilCasa | null;
 }
 
 /**
@@ -787,12 +900,21 @@ export interface ContextoDefaults {
  *   · forma_pago = contado. Es el default de DGI y el del mostrador.
  *   · cantidad = 1 por ítem que no la traiga. "una bolsa de portland" es lo que
  *     alguien dice cuando vende una.
- *   · el IVA NO se defaultea acá: se pregunta, fusionado, en un solo paso.
- *     Equivocarse ahí cambia la factura un 22% (ver `montos_brutos`), así que
- *     es la única de las seis que se sigue preguntando.
+ *   · el IVA NO tiene default duro: o lo dice el usuario, o lo dice el PERFIL
+ *     DE LA CASA por unanimidad, o se pregunta. Equivocarse ahí cambia la
+ *     factura un 22% (ver `montos_brutos`), así que no hay ningún valor que se
+ *     pueda suponer desde cero.
  *
  * Y los cinco vuelven a aparecer en el preview antes de emitir. Un default que
  * el usuario no ve es una suposición nuestra impresa en un documento fiscal.
+ *
+ * EL PERFIL VA ENTRE MEDIO, NO ARRIBA NI ABAJO DE TODO.
+ *
+ * Cada campo se resuelve en el mismo orden: lo que dijo el usuario (ya está en
+ * `estado`, y entonces acá no se toca) → el perfil de la casa → el default
+ * duro. Por eso el perfil se consulta ADENTRO de cada `if` de campo faltante y
+ * no antes: un perfil aplicado sobre el estado, y no sobre el hueco, sería un
+ * dato con la misma jerarquía que una respuesta. Ver `PerfilCasa`.
  */
 export function aplicarDefaults(
   estado: EstadoEmision,
@@ -801,22 +923,73 @@ export function aplicarDefaults(
   const hoy = contexto.hoy ?? hoyDgi();
   const salida: EstadoEmision = { ...estado };
   const aplicados: ClaveDefault[] = [];
+  const del_perfil: ClaveDefault[] = [];
 
+  // El perfil explícito le gana al cacheado en la sesión: así un llamador puede
+  // recalcularlo sin tener que escribirlo primero en el estado.
+  const perfil = contexto.perfil ?? salida.perfil_casa ?? null;
+  const desdePerfil = (clave: ClaveDefault): void => {
+    aplicados.push(clave);
+    del_perfil.push(clave);
+  };
+
+  // La fecha NO se toma del perfil, y no es un olvido: la fecha de la casa es
+  // hoy, siempre. Un promedio de las fechas de las últimas facturas no
+  // significa nada, y copiar la última es el error que el TTL del borrador
+  // existe para evitar.
   if ((salida.fecha_emision ?? "") === "") {
     salida.fecha_emision = hoy;
     aplicados.push("fecha_emision");
   }
 
   // La moneda se defaultea SOLO cuando no hay nada que desambiguar. Con
-  // `moneda_dudosa` se deja en blanco a propósito: `siguientePaso` la pregunta.
+  // `moneda_dudosa` se deja en blanco a propósito: `siguientePaso` la pregunta,
+  // y el perfil tampoco la contesta — la duda la puso el texto del usuario, que
+  // le gana a la costumbre.
   if ((salida.moneda ?? "") === "" && salida.moneda_dudosa !== true) {
-    salida.moneda = "UYU";
-    aplicados.push("moneda");
+    if (perfil?.moneda !== undefined) {
+      salida.moneda = perfil.moneda;
+      desdePerfil("moneda");
+    } else {
+      salida.moneda = "UYU";
+      aplicados.push("moneda");
+    }
   }
 
   if (salida.forma_pago === undefined) {
-    salida.forma_pago = 1;
-    aplicados.push("forma_pago");
+    if (perfil?.forma_pago !== undefined) {
+      // Ojo con la consecuencia, que es deseada: si la casa vende a crédito,
+      // el flujo va a pedir el vencimiento. Es un dato que hace falta de
+      // verdad — sin él la venta no aparece en "¿quién me debe?" —, no una
+      // pregunta de más. Defaultear contado sobre una casa que vende a crédito
+      // pierde la cobranza en silencio, que es bastante peor.
+      salida.forma_pago = perfil.forma_pago;
+      desdePerfil("forma_pago");
+    } else {
+      salida.forma_pago = 1;
+      aplicados.push("forma_pago");
+    }
+  }
+
+  // EL CRITERIO DE IVA: DEL PERFIL O DE NADIE.
+  //
+  // No hay default duro y no puede haberlo (ver `montos_brutos`): los dos
+  // valores posibles están mal para la mitad de los casos. Lo único que
+  // autoriza a completarlo sin preguntar es que las últimas N facturas de esta
+  // misma empresa coincidan TODAS, que es lo que `derivarPerfilCasa` exige
+  // antes de poner el campo. Si no coinciden, el campo no viene y el flujo
+  // pregunta como siempre.
+  if (salida.montos_brutos === undefined && perfil?.montos_brutos !== undefined) {
+    salida.montos_brutos = perfil.montos_brutos;
+    desdePerfil("montos_brutos");
+  }
+
+  // La tasa, con el mismo criterio de unanimidad. Sin ella el paso de IVA se
+  // sigue haciendo aunque `montos_brutos` ya esté resuelto: `siguientePaso`
+  // pregunta las dos mitades por separado.
+  if (salida.indicador_facturacion === undefined && perfil?.indicador_facturacion !== undefined) {
+    salida.indicador_facturacion = perfil.indicador_facturacion;
+    desdePerfil("indicador_facturacion");
   }
 
   // La cantidad se completa solo en los ítems que ya tienen concepto: un ítem
@@ -834,7 +1007,7 @@ export function aplicarDefaults(
     if (toco) aplicados.push("cantidad");
   }
 
-  return { estado: salida, aplicados };
+  return { estado: salida, aplicados, del_perfil };
 }
 
 // --- Qué sigue --------------------------------------------------------------
@@ -859,10 +1032,11 @@ export interface SiguientePaso {
  * cuánto). Lo administrativo —fecha, moneda, forma de pago, cantidad— ya no se
  * pregunta: lo contesta `aplicarDefaults` y se muestra en el preview.
  *
- * SIGUE SIENDO PURA. El único dato del mundo que necesita es qué día es hoy, y
- * entra como parámetro (`contexto.hoy`) con un default inyectable — el mismo
- * patrón que `hoyDgi(ahora)` y `construirSubmenuFecha(hoy)`. Así el test que
- * verifica que la fecha se defaultea no depende de cuándo se corra.
+ * SIGUE SIENDO PURA. Los dos datos del mundo que necesita —qué día es hoy y el
+ * perfil de la casa— entran como parámetros (`contexto`), con default
+ * inyectable: el mismo patrón que `hoyDgi(ahora)` y `construirSubmenuFecha(hoy)`.
+ * Así el test que verifica que la fecha se defaultea no depende de cuándo se
+ * corra, y el que verifica el perfil no depende de que haya API.
  *
  * Nunca devuelve "no sé qué preguntar": si no falta nada, `listo` es true. Ese
  * es el invariante que hace que el flujo no se pueda trancar.

@@ -29,6 +29,7 @@ import {
 } from "../src/kapso/emision.js";
 import { construirPayloadInteractivo } from "../src/kapso/client.js";
 import { handleEmisionGuiada } from "../src/tools/emisionGuiada.js";
+import { handleEmitirComprobante } from "../src/tools/write/emitirComprobante.js";
 import { sanitizeToolResult } from "../src/security/sanitize.js";
 import { makeCtx } from "./helpers.js";
 
@@ -1243,5 +1244,260 @@ describe("biller_emision_guiada lee el texto del pedido por su cuenta", () => {
     const r = await llamar({ mensaje: "emision:iva:3" }, ctx);
     expect(r.estado_entendido.indicador_facturacion).toBe(3);
     expect(r.estado_entendido.nombre_cliente).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// El perfil de la casa
+//
+// La regla fiscal (la unanimidad de `montos_brutos`) se prueba pura en
+// `repetirUltima.test.ts`. Acá se prueba lo otro: que el perfil entre en la
+// cadena de precedencia en el lugar exacto —debajo de todo lo que dijo el
+// usuario, arriba de los defaults duros—, que salga escrito en el preview, y
+// que sin historial el flujo se comporte EXACTAMENTE como antes de existir.
+// ---------------------------------------------------------------------------
+
+describe("el perfil de la casa: los defaults que salen del historial", () => {
+  const llamar = async (args: Record<string, unknown>, ctx: Parameters<typeof handleEmisionGuiada>[1]) =>
+    JSON.parse((await handleEmisionGuiada(args, ctx)).content[0]!.text) as Record<string, any>;
+
+  /** Un día de hace `n` días, en el formato que devuelve la API. */
+  const diasAtras = (n: number): string =>
+    `${new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10)} 10:00:00`;
+
+  /** Una venta aceptada de la casa, adentro de la ventana de 90 días. */
+  const cfe = (i: number, over: Record<string, unknown> = {}) => ({
+    id: 500 + i,
+    tipo_comprobante: 111,
+    moneda: "UYU",
+    total: 1000,
+    estado: "Aceptado DGI",
+    fecha_emision: diasAtras(i + 1),
+    montos_brutos: 1,
+    forma_pago: 1,
+    cliente: { documento: "210000000011", razon_social: "PEREZ SA" },
+    items: [{ cantidad: 1, concepto: "bolsas de harina", precio: 1000, indicador_facturacion: 3 }],
+    ...over,
+  });
+
+  /**
+   * Una API con historial: el listado devuelve todo, el detalle (por id) uno.
+   *
+   * La distinción importa porque el perfil hace las DOS consultas: el listado no
+   * trae ítems, y la tasa de IVA vive en los ítems.
+   */
+  const apiConHistorial = (comprobantes: Array<Record<string, unknown>>) => (opts: any) => {
+    const id = opts?.query?.id;
+    if (id !== undefined) return comprobantes.filter((c) => String(c["id"]) === String(id));
+    return comprobantes;
+  };
+
+  const CASA_CON_IVA_INCLUIDO = Array.from({ length: 5 }, (_, i) => cfe(i));
+
+  /** "Cliente conocido, línea completa": todo lo que el usuario dijo, y nada más. */
+  const PEDIDO_COMPLETO = {
+    clase_receptor: "empresa" as const,
+    documento: "210000000011",
+    cliente_ya_facturado: true,
+    items: [{ concepto: "bolsas de harina", cantidad: 2, precio: 6500 }],
+  };
+
+  it("cliente conocido + línea completa + perfil = CERO preguntas", async () => {
+    // El objetivo entero de la feature, medido: con las cinco últimas facturas
+    // coincidiendo, la única pregunta que quedaba en el flujo desaparece y el
+    // usuario pasa directo al preview.
+    const { ctx } = makeCtx({
+      impl: apiConHistorial(CASA_CON_IVA_INCLUIDO),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+
+    expect(r.paso).toBe("confirmar");
+    expect(r.listo_para_requisitos).toBe(true);
+    expect(r.defaults_aplicados).toContain("montos_brutos");
+    expect(r.defaults_aplicados).toContain("indicador_facturacion");
+    expect(r.perfil_casa).toMatchObject({ derivado: true, muestras: 5 });
+    expect(r.perfil_casa.campos).toContain("montos_brutos");
+    // Y el valor derivado es el que va al CFE, no una etiqueta decorativa.
+    expect(r.comprobante_borrador.montos_brutos).toBe(true);
+    expect(r.comprobante_borrador.items[0].indicador_facturacion).toBe(3);
+  });
+
+  it("sin historial, la conducta es IDÉNTICA a la de antes: se pregunta el IVA", async () => {
+    // La propiedad que hace que esto se pueda mergear sin miedo: cuando el
+    // perfil no existe —empresa nueva, API muda, cuatro facturas— no cambia
+    // absolutamente nada.
+    const { ctx } = makeCtx({ impl: () => [], config: { capabilityMode: "write_enabled" } });
+    const r = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+
+    expect(r.paso).toBe("iva");
+    expect(r.listo_para_requisitos).toBe(false);
+    expect(r.comprobante_borrador.montos_brutos).toBeUndefined();
+    expect(r.defaults_aplicados).not.toContain("montos_brutos");
+  });
+
+  it("cuatro facturas iguales tampoco alcanzan: el flujo sigue preguntando", async () => {
+    const { ctx } = makeCtx({
+      impl: apiConHistorial(CASA_CON_IVA_INCLUIDO.slice(0, 4)),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+    expect(r.paso).toBe("iva");
+    expect(r.perfil_casa).toMatchObject({ muestras: 4 });
+    expect(r.perfil_casa.campos).toEqual([]);
+  });
+
+  it("una factura fuera de línea rompe la unanimidad y devuelve la pregunta", async () => {
+    const mezcla = [...CASA_CON_IVA_INCLUIDO.slice(0, 4), cfe(4, { montos_brutos: 0 })];
+    const { ctx } = makeCtx({
+      impl: apiConHistorial(mezcla),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+    // Y la pregunta que vuelve es la CHICA: la tasa sigue siendo unánime, así
+    // que no se repregunta el paso fusionado entero sino solo la mitad que el
+    // perfil no pudo contestar. Media pregunta ahorrada es una mejora real.
+    expect(r.paso).toBe("precio_incluye_iva");
+    expect(r.comprobante_borrador.montos_brutos).toBeUndefined();
+    expect(r.comprobante_borrador.items[0].indicador_facturacion).toBe(3);
+  });
+
+  it("LA RESPUESTA DEL USUARIO PISA AL PERFIL, siempre", async () => {
+    // La casa factura con IVA incluido en las últimas cinco; esta venta no. Lo
+    // que dijo el usuario gana sin discutir, y el perfil deja de figurar como
+    // el origen de ese campo.
+    const { ctx } = makeCtx({
+      impl: apiConHistorial(CASA_CON_IVA_INCLUIDO),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar(
+      { sesion: "59895923567", ...PEDIDO_COMPLETO, montos_brutos: false },
+      ctx,
+    );
+    expect(r.comprobante_borrador.montos_brutos).toBe(false);
+    expect(r.defaults_aplicados).not.toContain("montos_brutos");
+    expect(r.perfil_casa.campos).not.toContain("montos_brutos");
+  });
+
+  it("EL PERFIL NO SE ESCRIBE EN EL BORRADOR GUARDADO: solo como cache derivado", async () => {
+    // Mismo criterio que los defaults de siempre. Si `montos_brutos: true`
+    // quedara guardado, "el perfil lo supuso" y "el usuario lo dijo" serían
+    // indistinguibles la próxima vez que se lea el borrador — y `fusionarEstado`
+    // trata lo guardado como base.
+    const { ctx, borradores } = makeCtx({
+      impl: apiConHistorial(CASA_CON_IVA_INCLUIDO),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+
+    const guardado = borradores.leer(r.sesion.id)!;
+    expect(guardado.estado.montos_brutos).toBeUndefined();
+    expect(guardado.estado.indicador_facturacion).toBeUndefined();
+    // Lo que SÍ queda es el perfil, bajo su propia clave y marcado como derivado.
+    expect(guardado.estado.perfil_casa).toMatchObject({ derivado: true, muestras: 5 });
+  });
+
+  it("se busca UNA vez por sesión: el segundo mensaje no vuelve a consultar", async () => {
+    const { ctx, getMock } = makeCtx({
+      impl: apiConHistorial(CASA_CON_IVA_INCLUIDO),
+      config: { capabilityMode: "write_enabled" },
+    });
+    await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+    const consultasPrimerMensaje = getMock.mock.calls.length;
+    expect(consultasPrimerMensaje).toBeGreaterThan(0);
+
+    // El segundo mensaje agrega un ítem: mismo estado, misma sesión, perfil ya
+    // cacheado. No tiene por qué costar ni una consulta más.
+    await llamar(
+      {
+        sesion: "59895923567",
+        items: [
+          { concepto: "bolsas de harina", cantidad: 2, precio: 6500 },
+          { concepto: "levadura", cantidad: 1, precio: 300 },
+        ],
+      },
+      ctx,
+    );
+    expect(getMock.mock.calls.length).toBe(consultasPrimerMensaje);
+  });
+
+  it("no se busca antes de que haya una línea con precio", async () => {
+    // El embudo dice que la mayoría de las conversaciones se abandona antes de
+    // cargar el primer precio. Consultar noventa días de historial en cada
+    // "quiero facturar" sería gastar el rate limit de la empresa en
+    // conversaciones que no van a existir.
+    const { ctx, getMock } = makeCtx({
+      impl: apiConHistorial(CASA_CON_IVA_INCLUIDO),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar({ sesion: "59895923567", clase_receptor: "empresa" }, ctx);
+    expect(r.paso).toBe("cliente");
+    expect(r.perfil_casa).toBeNull();
+    expect(getMock).not.toHaveBeenCalled();
+  });
+
+  it("si el historial no se puede leer, el flujo sigue: se pregunta como siempre", async () => {
+    const { ctx } = makeCtx({
+      impl: () => {
+        throw new Error("API caída");
+      },
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+    expect(r.paso).toBe("iva");
+    expect(r.perfil_casa).toBeNull();
+    expect(r.warnings.join(" ")).toContain("historial");
+  });
+
+  it("el perfil no puede inyectarse desde afuera", async () => {
+    // `perfil_casa` no está en el schema de entrada, y no es un olvido: si un
+    // agente (o un texto de un comprobante que el agente copió) pudiera
+    // mandarlo, tendría una forma de fijar `montos_brutos` sin que ninguna
+    // factura de la empresa lo respalde.
+    const { ctx } = makeCtx({ impl: () => [], config: { capabilityMode: "write_enabled" } });
+    const r = await llamar(
+      {
+        sesion: "59895923567",
+        ...PEDIDO_COMPLETO,
+        perfil_casa: { derivado: true, muestras: 99, montos_brutos: true, detalles: [] },
+      },
+      ctx,
+    );
+    expect(r.paso).toBe("iva");
+    expect(r.comprobante_borrador.montos_brutos).toBeUndefined();
+  });
+
+  it("EL DEFAULT DEL PERFIL SALE ESCRITO EN LA LÍNEA DE SUPUESTOS DEL PREVIEW", async () => {
+    // La contrapartida de no preguntar: lo que el sistema decidió solo tiene
+    // que estar en lo único que el usuario lee antes de que exista un CFE.
+    //
+    // No hizo falta tocar el render para esto, y el test es lo que lo prueba:
+    // `describirSupuestos` arma la línea desde los campos del PAYLOAD, y el
+    // perfil llena esos mismos campos en `comprobante_borrador`. El camino es
+    // el mismo por el que ya salían la fecha y la forma de pago.
+    const { ctx } = makeCtx({
+      impl: apiConHistorial(CASA_CON_IVA_INCLUIDO),
+      config: { capabilityMode: "write_enabled", environment: "test", writeEnabled: true },
+      postResponse: { id: 99 },
+    });
+    const guiada = await llamar({ sesion: "59895923567", ...PEDIDO_COMPLETO }, ctx);
+
+    // El agente arma el comprobante desde el borrador tal cual, sin conceptos
+    // (los completa el server desde la sesión) y sin tocar el criterio de IVA.
+    const dry = await handleEmitirComprobante(
+      {
+        sesion: guiada.sesion.id,
+        comprobante: { ...guiada.comprobante_borrador, sucursal: 6, cliente: "-" },
+      },
+      ctx,
+    );
+    expect(dry.isError).not.toBe(true);
+    const resumen = String((dry.structuredContent as Record<string, any>).resumen);
+
+    expect(resumen).toContain("precios con IVA incluido");
+    expect(resumen).toContain("Contado");
+    // Y el total es el de un precio CON IVA adentro: 2 × 6500 = 13.000 finales,
+    // no 15.860. Es exactamente el 22% que este default mueve.
+    expect(resumen).toContain("$13.000");
   });
 });
