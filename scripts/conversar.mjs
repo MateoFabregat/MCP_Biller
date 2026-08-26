@@ -73,12 +73,27 @@ async function asegurarTriggerApi(workflowId) {
   return "creado";
 }
 
-/** Arranca una ejecución y devuelve su id. */
-async function arrancar(workflowId, telefono, mensaje) {
+/**
+ * Arranca una ejecución y devuelve su id.
+ *
+ * `whatsapp_conversation_id` NO es opcional en la práctica. Sin él, la ejecución
+ * corre igual pero `get_whatsapp_context` contesta "No WhatsApp conversation
+ * associated with this flow execution" y el agente no tiene a dónde escribir:
+ * completa la tarea con la respuesta vacía y no sale ningún mensaje. Se ve
+ * idéntico a "el agente no contestó", que es justo lo que este script está
+ * tratando de distinguir.
+ */
+async function arrancar(workflowId, telefono, mensaje, conversacionId) {
   const r = await kapso("POST", `/workflows/${workflowId}/executions`, {
     workflow_execution: {
       phone_number: telefono,
-      execution_context: { vars: { last_user_input: mensaje } },
+      ...(conversacionId === undefined ? {} : { whatsapp_conversation_id: conversacionId }),
+      // `variables`, NO `execution_context.vars`. Los dos dan 202 y solo el
+      // primero deja la variable puesta; con el segundo la ejecución arranca con
+      // vars={} y el `{{last_user_input}}` del system prompt le llega LITERAL al
+      // modelo, que entonces manda el menú pase lo que pase. Un 202 no dice que
+      // el cuerpo se haya entendido.
+      variables: { last_user_input: mensaje },
     },
   });
   if (!r.ok) throw new Error(`POST executions → ${r.status}: ${JSON.stringify(r.datos).slice(0, 400)}`);
@@ -132,14 +147,32 @@ function resumir(eventos) {
   return { tools, llamadas, dichos, handoff };
 }
 
-/** Los mensajes que salieron por WhatsApp en esa conversación. La prueba final. */
-async function mensajesDe(conversacionId, desdeIso) {
-  const r = await kapso("GET", `/whatsapp/conversations/${conversacionId}/messages`);
-  const todos = r.datos?.data ?? [];
-  return todos
-    .filter((m) => m.direction === "outbound" && (desdeIso === undefined || m.created_at >= desdeIso))
-    .map((m) => m.content ?? `[${m.message_type}]`);
-}
+/**
+ * LO QUE ESTE SCRIPT NO PUEDE VER, y por qué no lo reporta como falla.
+ *
+ * La API de plataforma de Kapso no expone los mensajes de una conversación
+ * (`/whatsapp/conversations/{id}/messages` da 404, y el objeto de conversación
+ * no los trae). Así que lo único que se ve desde acá es lo que dejó la
+ * ejecución: qué tools se configuraron, cuáles llamó y qué texto propio produjo.
+ *
+ * Y ESO ES ENGAÑOSO SI NO SE DICE. El menú NO sale como texto del asistente:
+ * sale porque el agente llama `biller_menu_whatsapp` con enviar=true, y esa tool
+ * le habla a la API de mensajería de Kapso por su cuenta. O sea que el camino
+ * feliz —el que uno quiere ver— deja "texto del agente: vacío". La primera
+ * versión de este script lo reportaba como "✗ NO salió ningún mensaje" mientras
+ * el menú llegaba perfecto al teléfono.
+ *
+ * La prueba de que salió está en NUESTRO log, no acá: `kapso.mensaje.enviado`
+ * con su `message_id` de WhatsApp (wamid...).
+ */
+const TOOLS_QUE_ESCRIBEN_SOLAS = new Set([
+  "biller_menu_whatsapp",
+  "biller_emision_guiada",
+  "biller_resolver_nombre",
+  "biller_reporte_diario",
+  "biller_enviar_comprobante_whatsapp",
+  "biller_recordatorio_cobro",
+]);
 
 // =============================================================================
 // Main
@@ -161,16 +194,21 @@ console.log(`Workflow: ${w.name} (${w.id})`);
 console.log(`Trigger api: ${await asegurarTriggerApi(w.id)}`);
 console.log(`Destinatario: ${telefono}\n`);
 
+// La conversación de WhatsApp de ese número, si ya existe. Es lo que convierte
+// esto en una prueba de punta a punta: el agente contesta AHÍ, por WhatsApp.
+const convs = await kapso("GET", "/whatsapp/conversations");
+const conversacionId = (convs.datos?.data ?? []).find((c) => c.phone_number === telefono)?.id;
+console.log(`Conversación: ${conversacionId ?? "ninguna todavía (escribile una vez desde el teléfono)"}\n`);
+
 const guion = GUION_COMPLETO
   ? ["hola", "quién me debe plata", "cómo viene el mes", "gracias"]
   : [argv.find((a) => !a.startsWith("--")) ?? "hola"];
 
 for (const mensaje of guion) {
   console.log(`\n${"=".repeat(70)}\n> "${mensaje}"`);
-  const desde = new Date().toISOString();
   let id;
   try {
-    id = await arrancar(w.id, telefono, mensaje);
+    id = await arrancar(w.id, telefono, mensaje, conversacionId);
   } catch (err) {
     console.log(`  ✗ ${err instanceof Error ? err.message : String(err)}`);
     continue;
@@ -183,11 +221,15 @@ for (const mensaje of guion) {
   console.log(`  tools llamadas: ${llamadas.length > 0 ? llamadas.join(" → ") : "ninguna"}`);
   if (handoff !== null) console.log(`  ✗ HANDOFF (${handoff}): la conversación quedó muda.`);
 
-  const conv = eventos.find((e) => e.payload?.conversation_id)?.payload?.conversation_id;
-  const salidos = dichos.length > 0 ? dichos : conv ? await mensajesDe(conv, desde) : [];
-  if (salidos.length === 0) {
-    console.log("  ✗ NO salió ningún mensaje para el usuario.");
+  const mandoElla = llamadas.some((t) => TOOLS_QUE_ESCRIBEN_SOLAS.has(t));
+  if (dichos.length > 0) {
+    for (const d of dichos) console.log(`  < ${d.replace(/\n/g, "\n    ").slice(0, 600)}`);
+  } else if (mandoElla) {
+    console.log(`  < (lo mandó la tool directo por WhatsApp: ${llamadas.filter((t) => TOOLS_QUE_ESCRIBEN_SOLAS.has(t)).join(", ")})`);
+    console.log("    Verificalo en el log del server: kapso.mensaje.enviado con su message_id.");
+  } else if (tools.filter((t) => t.startsWith("biller_")).length === 0) {
+    console.log("  ✗ El agente no tenía NINGUNA tool biller_*: por eso no contestó.");
   } else {
-    for (const s of salidos) console.log(`  < ${s.replace(/\n/g, "\n    ").slice(0, 600)}`);
+    console.log("  ✗ El agente terminó sin decir nada y sin mandar nada. Eso sí es una falla.");
   }
 }
