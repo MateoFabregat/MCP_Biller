@@ -14,8 +14,9 @@ import type { BillerClient } from "./client.js";
 import {
   normalizeComprobantesEmitidos,
   normalizeComprobantesRecibidos,
+  normalizeDgiCertificado,
 } from "./normalize.js";
-import type { ComprobanteEmitido, ComprobanteRecibido } from "./types.js";
+import type { ComprobanteEmitido, ComprobanteRecibido, DgiCertificado } from "./types.js";
 
 export interface EmitidosQuery {
   id?: string;
@@ -68,4 +69,28 @@ export async function fetchRecibidos(
     rateLimitClass: "dgi",
   });
   return normalizeComprobantesRecibidos(raw);
+}
+
+export interface CertificadoDgiQuery {
+  rut: string;
+}
+
+/**
+ * GET /v2/dgi/empresas/certificado-unico. Un certificado vencido corta la
+ * facturación de la empresa entera: vale la pena consultarlo desde alertas
+ * operativas aunque el OpenAPI no documente la forma de la respuesta (por eso
+ * `normalizeDgiCertificado` deja `certificado` como `unknown`; ver
+ * `extraerVencimientoCertificado` en src/tools/alertas.ts).
+ */
+export async function fetchCertificadoDgi(
+  client: BillerClient,
+  q: CertificadoDgiQuery,
+): Promise<DgiCertificado> {
+  const raw = await client.get({
+    path: PATHS.dgiCertificado,
+    query: { rut: q.rut },
+    // DGI: límite documentado de 1 req/seg.
+    rateLimitClass: "dgi",
+  });
+  return normalizeDgiCertificado(raw);
 }
