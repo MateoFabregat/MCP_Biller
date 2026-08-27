@@ -8,8 +8,92 @@
 // reporta un warning y NO se descartan resultados silenciosamente.
 // =============================================================================
 
-import type { ComprobanteEmitido, ComprobanteRecibido } from "../biller/types.js";
+import { round2 } from "../biller/coerce.js";
 import { extractClienteRut } from "../biller/normalize.js";
+import type { ComprobanteEmitido, ComprobanteRecibido } from "../biller/types.js";
+import { classifyCfe, type CfeClassification } from "./cfeTypes.js";
+import { clasificarEstado } from "./resumenFacturacion.js";
+
+// =============================================================================
+// LA REGLA DE QUÉ SUMA EN UN TOTAL DE FACTURACIÓN
+//
+// Vive acá, una sola vez, porque es la regla que decide si el número que
+// contesta el asistente coincide con el que muestra el panel de Biller. Dos
+// implementaciones de esto es la única categoría de bug que el proyecto declara
+// prohibida (ver docs/HANDBOOK.md, "dejar la lógica compartida adentro de una
+// tool"): el día que una cambie y la otra no, dos tools contestan totales
+// distintos PARA LOS MISMOS COMPROBANTES y nada falla — nadie se entera hasta
+// que un cliente lo nota.
+//
+// Son dos condiciones, y ninguna es opcional:
+//
+//   1. `suma_en_resumen` (de `classifyCfe`): ventas +1, notas de crédito −1,
+//      notas de débito +1; recibos, especiales (eRemito/eResguardo) y tipos no
+//      clasificables NO aportan. El recibo es el caso traicionero: se emite
+//      como e-Ticket/e-Factura, así que por tipo es indistinguible de una
+//      venta, y sumarlo duplica lo ya facturado.
+//
+//   2. El estado DGI, cuando `solo_aceptados` (el default de todas las tools de
+//      análisis): solo "Aceptado DGI". Es el criterio con el que Biller arma
+//      sus propios totales (docs/CALCULOS.md §1); contar rechazados o
+//      pendientes da un número que no cierra contra el panel.
+//
+// OJO CON LAS DOS `clasificarEstado` DEL PROYECTO. La que se usa acá es la de
+// `resumenFacturacion.ts` (aceptado / no_aceptado / desconocido), que es la que
+// usan todos los totales. La de `estadoDgi.ts` responde otra pregunta —si el
+// comprobante es un respaldo fiscal válido— y ahí "Envío no corresponde" SÍ
+// cuenta. Mezclarlas cambia totales sin que ningún test de tipos chille.
+// =============================================================================
+
+/**
+ * Clasificación del CFE si el comprobante entra en un total de facturación;
+ * `null` si no entra.
+ *
+ * Devuelve la clasificación y no un booleano a propósito: quien filtra necesita
+ * después el `signo` para que la nota de crédito reste, y volver a llamar a
+ * `classifyCfe` afuera es exactamente la costura por la que se cuela la segunda
+ * copia de la regla.
+ *
+ * NO valida `total` ni `moneda`: eso depende de qué esté sumando cada llamador
+ * (hay agregados que suman `total` del comprobante y otros que suman
+ * `cantidad × precio` de los items), y meterlo acá haría que esta función
+ * mienta sobre lo que decide.
+ */
+export function clasificarParaFacturacion(
+  c: ComprobanteEmitido,
+  soloAceptados: boolean,
+): CfeClassification | null {
+  const clasif = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
+  if (!clasif.suma_en_resumen) return null;
+  if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") return null;
+  return clasif;
+}
+
+/**
+ * Importe NETO facturado en UNA moneda, sumando el `total` de cada comprobante
+ * con su signo.
+ *
+ * Es la lectura a nivel COMPROBANTE, que es lo que permite calcular una
+ * cobertura sin haber traído el detalle de items de todos (ver
+ * `tools/rankingProductos.ts`: el detalle es un N+1 acotado).
+ *
+ * Un comprobante sin `total`, o en otra moneda, no suma: no se convierte
+ * moneda en ningún lado del proyecto.
+ */
+export function importeFacturadoEnMoneda(
+  comprobantes: ComprobanteEmitido[],
+  moneda: string,
+  soloAceptados: boolean,
+): number {
+  return round2(
+    comprobantes.reduce((acc, c) => {
+      const clasif = clasificarParaFacturacion(c, soloAceptados);
+      if (clasif === null) return acc;
+      if (c.total === null || c.moneda !== moneda) return acc;
+      return acc + c.total * clasif.signo;
+    }, 0),
+  );
+}
 
 export interface EmitidoFilterInput {
   moneda?: string;

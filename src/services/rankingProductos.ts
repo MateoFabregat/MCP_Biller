@@ -38,8 +38,7 @@
 import { round2 } from "../biller/coerce.js";
 import { extractClienteNombre, extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
-import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./resumenFacturacion.js";
+import { clasificarParaFacturacion } from "./comprobanteFilters.js";
 import { monedaDeOrden } from "./monedaOrden.js";
 
 /**
@@ -193,10 +192,12 @@ export function rankingProductos(
   let itemsSinCantidadOPrecio = 0;
 
   comprobantes.forEach((c, idx) => {
-    const clasificacion = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
-    if (!clasificacion.suma_en_resumen) return; // recibos y especiales no son facturación
+    // La regla de qué suma en un total de facturación (tipo de CFE + estado
+    // DGI) vive una sola vez, en comprobanteFilters: acá se consume, no se
+    // reimplementa. La tool usa la MISMA para calcular la cobertura.
+    const clasificacion = clasificarParaFacturacion(c, soloAceptados);
+    if (clasificacion === null) return; // recibos, especiales y no aceptados
 
-    if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") return;
     if (c.moneda === null) return;
 
     if (!Array.isArray(c.items)) {

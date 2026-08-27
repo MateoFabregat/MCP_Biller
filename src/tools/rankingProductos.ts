@@ -20,10 +20,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { round2 } from "../biller/coerce.js";
 import { traerPorId } from "../biller/traerDetalles.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
-import { classifyCfe } from "../services/cfeTypes.js";
+import { importeFacturadoEnMoneda } from "../services/comprobanteFilters.js";
 import { PERIODOS_SOPORTADOS } from "../services/periodo.js";
 import { UMBRAL_DISPERSION_PCT, rankingProductos } from "../services/rankingProductos.js";
-import { clasificarEstado } from "../services/resumenFacturacion.js";
 import { resolverRango, traerVentana } from "../services/ventana.js";
 import {
   READ_ONLY_ANNOTATIONS,
@@ -169,28 +168,6 @@ async function cargarItems(
   return { comprobantes, fallidos: sinId + fallidos.length };
 }
 
-/**
- * Importe NETO (signo de `classifyCfe` aplicado) de los comprobantes que
- * calificarían para el ranking (venta/NC/ND aceptados, con moneda), en UNA
- * moneda. Se usa a nivel de COMPROBANTE (no de item) para poder calcular la
- * cobertura sin depender de haber traído el detalle de todos.
- */
-function importeCalificado(
-  comprobantes: ComprobanteEmitido[],
-  moneda: string,
-  soloAceptados: boolean,
-): number {
-  return round2(
-    comprobantes.reduce((acc, c) => {
-      const clasif = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
-      if (!clasif.suma_en_resumen) return acc;
-      if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") return acc;
-      if (c.total === null || c.moneda !== moneda) return acc;
-      return acc + c.total * clasif.signo;
-    }, 0),
-  );
-}
-
 export async function handleRankingProductos(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   const parsed = rankingProductosInputSchema.safeParse(args);
   if (!parsed.success) return validationErrorResult(parsed.error, ctx);
@@ -223,8 +200,16 @@ export async function handleRankingProductos(args: unknown, ctx: ToolContext): P
     });
 
     // --- Cobertura -------------------------------------------------------
-    const importeTotalPeriodo = importeCalificado(ventana.comprobantes, resultado.moneda_orden, a.solo_aceptados);
-    const importeAnalizado = importeCalificado(
+    // Numerador y denominador salen de la MISMA función —la regla fiscal vive
+    // en services, no acá— y con la misma moneda: comparar dos importes
+    // calculados con criterios distintos daría un porcentaje que no significa
+    // nada, y que igual se publicaría sin que nada falle.
+    const importeTotalPeriodo = importeFacturadoEnMoneda(
+      ventana.comprobantes,
+      resultado.moneda_orden,
+      a.solo_aceptados,
+    );
+    const importeAnalizado = importeFacturadoEnMoneda(
       comprobantesConItems,
       resultado.moneda_orden,
       a.solo_aceptados,

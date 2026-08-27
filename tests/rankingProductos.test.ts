@@ -6,6 +6,10 @@ import { describe, expect, it } from "vitest";
 import type { BillerGetOptions } from "../src/biller/client.js";
 import { normalizeComprobantesEmitidos } from "../src/biller/normalize.js";
 import {
+  clasificarParaFacturacion,
+  importeFacturadoEnMoneda,
+} from "../src/services/comprobanteFilters.js";
+import {
   SIN_IDENTIFICAR,
   UMBRAL_DISPERSION_PCT,
   rankingProductos,
@@ -388,5 +392,95 @@ describe("tool biller_ranking_productos", () => {
     expect(
       (res.structuredContent!.warnings as string[]).some((w) => w.includes("no se pudieron consultar por 'id'")),
     ).toBe(true);
+  });
+});
+
+// =============================================================================
+// La regla de qué suma en un total de facturación vive UNA vez, en
+// services/comprobanteFilters. Estos tests la fijan ahí y verifican que la
+// cobertura de la tool sale de esa misma regla y no de una segunda copia: el
+// día que vuelvan a divergir, el ranking contestaría un total distinto al del
+// resumen para los mismos comprobantes y nada más fallaría.
+// =============================================================================
+
+describe("regla compartida de facturación (comprobanteFilters)", () => {
+  const uno = (over: Record<string, unknown> = {}) =>
+    normalizeComprobantesEmitidos([crudo(over)])[0]!;
+
+  it("una venta aceptada califica con signo +1 y una NC con −1", () => {
+    expect(clasificarParaFacturacion(uno({ tipo_comprobante: 111 }), true)?.signo).toBe(1);
+    expect(clasificarParaFacturacion(uno({ tipo_comprobante: 112 }), true)?.signo).toBe(-1);
+    expect(clasificarParaFacturacion(uno({ tipo_comprobante: 113 }), true)?.signo).toBe(1);
+  });
+
+  it("recibos, especiales y tipos no clasificables NO califican, ni con solo_aceptados en false", () => {
+    for (const over of [
+      { indicador_cobranza_propia: 1 },
+      { tipo_comprobante: 181 }, // eRemito
+      { tipo_comprobante: 999 }, // no clasificable
+      { tipo_comprobante: null },
+    ]) {
+      expect(clasificarParaFacturacion(uno(over), true)).toBeNull();
+      expect(clasificarParaFacturacion(uno(over), false)).toBeNull();
+    }
+  });
+
+  it("con solo_aceptados solo pasa 'Aceptado DGI'; sin él pasan todos los estados", () => {
+    const noAceptados = ["Rechazado DGI", "Sobre Rechazado DGI", "Pendiente DGI", "Envío no corresponde", null, ""];
+    for (const estado of noAceptados) {
+      expect(clasificarParaFacturacion(uno({ estado }), true)).toBeNull();
+      expect(clasificarParaFacturacion(uno({ estado }), false)).not.toBeNull();
+    }
+    expect(clasificarParaFacturacion(uno({ estado: "Aceptado DGI" }), true)).not.toBeNull();
+  });
+
+  it("importeFacturadoEnMoneda suma con signo, filtra por moneda y no convierte", () => {
+    const cs = normalizeComprobantesEmitidos([
+      crudo({ id: 1, total: 1000 }),
+      crudo({ id: 2, tipo_comprobante: 112, total: 300 }), // NC: resta
+      crudo({ id: 3, moneda: "USD", total: 50 }), // otra moneda: no entra en UYU
+      crudo({ id: 4, estado: "Rechazado DGI", total: 9999 }),
+      crudo({ id: 5, indicador_cobranza_propia: 1, total: 9999 }), // recibo
+      crudo({ id: 6, total: null }), // sin total: no se inventa
+    ]);
+    expect(importeFacturadoEnMoneda(cs, "UYU", true)).toBe(700);
+    expect(importeFacturadoEnMoneda(cs, "USD", true)).toBe(50);
+    expect(importeFacturadoEnMoneda(cs, "UYU", false)).toBe(10699);
+  });
+});
+
+describe("la cobertura de la tool usa la misma regla que el ranking", () => {
+  it("un rechazado y un recibo NO inflan el denominador de la cobertura", async () => {
+    // Los dos comprobantes de mayor total del período son basura fiscal
+    // (rechazado y recibo). Si el denominador los contara, la cobertura del
+    // único comprobante analizable daría muy por debajo del 100%.
+    const porPeriodo = [
+      { id: 1, tipo_comprobante: 111, moneda: "UYU", total: 1000, estado: "Aceptado DGI", fecha_emision: "2026-06-02" },
+      { id: 2, tipo_comprobante: 111, moneda: "UYU", total: 9000, estado: "Rechazado DGI", fecha_emision: "2026-06-02" },
+      { id: 3, tipo_comprobante: 111, moneda: "UYU", total: 8000, estado: "Aceptado DGI", fecha_emision: "2026-06-02", indicador_cobranza_propia: 1 },
+    ];
+    const detallesPorId: Record<string, unknown> = {
+      "1": { ...porPeriodo[0], items: [{ codigo: "P1", concepto: "Producto Uno", cantidad: 1, precio: 1000 }] },
+      "2": { ...porPeriodo[1], items: [{ codigo: "P1", concepto: "Producto Uno", cantidad: 9, precio: 1000 }] },
+      "3": { ...porPeriodo[2], items: [{ codigo: "P1", concepto: "Producto Uno", cantidad: 8, precio: 1000 }] },
+    };
+
+    const { ctx } = makeCtx({
+      impl: (o: BillerGetOptions) => {
+        const id = o.query?.id as string | undefined;
+        if (id === undefined) return porPeriodo;
+        const d = detallesPorId[id];
+        return d ? [d] : [];
+      },
+    });
+    const res = await handleRankingProductos(
+      { desde: "2026-06-01", hasta: "2026-06-05", ventana_dias: 30 },
+      ctx,
+    );
+
+    expect(res.isError).toBeUndefined();
+    const cobertura = res.structuredContent!.cobertura as { cobertura_importe_pct: number | null };
+    expect(cobertura.cobertura_importe_pct).toBe(100);
+    expect(res.structuredContent!.comprobantes_analizados).toBe(1);
   });
 });
