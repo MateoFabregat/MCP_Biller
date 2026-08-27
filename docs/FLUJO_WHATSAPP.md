@@ -454,6 +454,95 @@ posición cuando se le pasa la misma sesión (`completarDesdeSesion`). Solo
 completa, nunca pisa: un concepto que el agente sí mandó —porque el usuario lo
 cambió a último momento— le gana al guardado.
 
+**Y por eso la POSICIÓN es un dato fiscal.** Los conceptos se copian por
+posición en los dos caminos —el agente leyendo `completar`, y
+`completarDesdeSesion` leyendo el borrador guardado—, así que sacar del **medio**
+un ítem a medio cargar corre una casilla a todas las líneas que siguen: la línea
+de $300 sale con la descripción de la de $250, en un CFE real, sin fallar. Las
+dos defensas, que son la misma regla mirada de los dos lados:
+
+- **`siguientePaso` no dice `listo` con un ítem incompleto en el medio.** Mira
+  el primer ítem que el borrador no podría mandar, no el último. Del ítem del
+  medio importa solo eso —que pueda viajar—: una línea a $0 o negativa
+  (bonificación, descuento) viaja, así que no frena el flujo. Del último se
+  sigue preguntando el precio como siempre, porque puede ser uno recién abierto.
+- **`borradorComprobante` CORTA en el primer agujero en vez de saltearlo**, y lo
+  dice en `completar` y en `warnings`. Un prefijo sigue alineado con los ítems
+  guardados; un salteo, no. Se pierde una línea —que se ve en el preview— en
+  lugar de ganar una línea con la descripción de otra cosa.
+
+Cerrar los ítems ("listo") descarta lo que quedó abierto **al final, y solo al
+final**: descartar un sufijo no le mueve la posición a ninguna línea que sí
+viaja. Y descarta solo lo que no tiene **nada** cargado: una línea con precio y
+sin descripción no se tira sola —eso facturaba $1.200 en vez de $1.450 diciendo
+"ya tengo todo"—, se pregunta nombrando su monto ("la línea de $250, ¿de qué
+era?") y se saca, si el usuario quiere, con un botón que dice cuánto saca
+(`🗑️ Sacar $250`). "↩️ Volver así" sigue existiendo para el ➕ tocado por error,
+y no puede sacar nada que el usuario haya dicho: ni un precio, ni una cantidad.
+
+**La respuesta escrita va al ítem EN CURSO, no al primero.** Los ítems que
+`extraerPedido` saca de un mensaje vienen indexados por ESE mensaje, no por el
+comprobante: volcarlos desde 0 le pegaba la respuesta de ahora a la primera
+línea. Con `[{Café,1200},{precio:250}]` y el usuario contestando "eran 2
+medialunas", el 2 aterrizaba como cantidad del café —que pasaba a $2.400—, las
+medialunas no se cargaban nunca y la pregunta se repetía. Como el volcado solo
+llena huecos, no fallaba por ningún lado. Tres reglas lo sostienen:
+
+- El ancla es `indiceItemEnCurso(itemsVigentes(estado))`, que es el ítem sobre el
+  que se está preguntando y por lo tanto sobre el que se está contestando.
+- **Dos líneas distintas no se mezclan**: si el ítem en curso y lo leído no
+  hablan de la misma línea, no se vuelca nada. El criterio exacto —subconjunto
+  de tokens, no palabra compartida— está abajo, en "Dos productos de la misma
+  familia no son la misma línea", y ahí está el porqué.
+- Sin ítem en curso no se vuelca ninguna línea: el texto es el eco de lo que el
+  agente ya mandó, y volcarlo pisa o cobra dos veces. Se dice en `warnings`.
+
+Y el **cliente solo se lee del texto mientras la etapa del cliente siga abierta**
+—no cuando ya hay `clase_receptor` resuelta, ni con `sin_receptor`, ni con un
+paso de ítem abierto—. El flujo pregunta el cliente antes que los ítems, así que
+un "cliente" leído contestando una pregunta de ítem es siempre un falso
+positivo: "sumale 3 tortas a 450" dejaba un cliente llamado "sumale" que el
+agente después copiaba a `cliente.razon_social`. La primera versión de esta
+guarda miraba si había líneas cargadas, y por eso no cubría la PRIMERA pregunta
+de ítem, que es justo donde todavía no hay ninguna: "coca 2 litros" dejaba una
+razón social "coca" en un e-Ticket sin receptor.
+
+**Las preguntas de ítem NO se contestan con texto crudo, y es a propósito.**
+`interpretarRespuestaLibre` entiende las respuestas de los pasos con botones;
+`concepto` y `precio` caen en `ninguna`. El camino es el normal: el agente manda
+`items: [{ concepto: "medialunas", precio: 60 }]`. Se probó al revés y se
+revirtió — que el server parsee castellano duplica el trabajo que el modelo ya
+hace bien, y cada filtro que hay que agregarle ("no sé" impreso como
+descripción, "bolsas 25kg" rechazado por tener dígitos) es un modo de falla
+fiscal nuevo. El hueco y su especificación quedaron en `TODO_NEXT.md` (P1).
+
+**Dos productos de la misma familia no son la misma línea.** La comparación de
+conceptos es por subconjunto de tokens, no por palabra compartida: "agua tónica"
+y "agua mineral" comparten la categoría y se distinguen por lo que sobra, así
+que no se vuelcan una sobre otra —el CFE imprimía "3 × Agua tónica $60"—,
+mientras que "Bolsa de portland" y "bolsas de portland" siguen siendo la misma.
+Y el precio de la línea que no se volcó abre un ítem para preguntarlo: el aviso
+dura un turno, el borrador dura la conversación.
+
+**El cliente no se lee del texto una vez que esa etapa quedó atrás**, y "atrás"
+incluye la PRIMERA pregunta de ítem: con `sin_receptor: true` y sin ítems, "coca
+2 litros" dejaba `nombre_cliente: "coca"` y `completar` le ordenaba al agente
+ponerlo en `cliente.razon_social` de un comprobante que se pidió sin
+identificar.
+
+**Un precio copiado por `repetir_ultima_de` ya está dicho, incluido el $0.** La
+bonificación se escribe al final de una factura de verdad, así que repetirla
+dejaba al flujo pidiendo el precio de una línea que ya valía cero: sin botones,
+y con "0" sin efecto. La marca `precio_copiado` (que el agente no puede mandar)
+distingue el cero copiado del hueco.
+
+Corolario que se paga en otro archivo: si una línea **negativa** puede viajar,
+`calcularTotales` tiene que restarle también el IVA. Acumulaba el neto sin
+guarda y el IVA detrás de `iva > 0`, así que $1.000 menos un descuento de $200
+al 22% mostraba un TOTAL de $836,07 en vez de $800 — el humano aprobaba por
+WhatsApp un número que no era el del CFE, y el tope de monto se evaluaba contra
+el número inflado.
+
 ### 3.0.3. El preview: lo único que el humano lee antes de que exista un CFE
 
 Este es el mensaje exacto que sale hoy, generado por

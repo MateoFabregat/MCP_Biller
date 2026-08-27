@@ -31,6 +31,120 @@ describe("calcularTotales", () => {
     expect(t.exacto).toBe(true);
   });
 
+  it("una línea NEGATIVA resta su IVA, y una a $0 no inventa una fila de IVA 0%", () => {
+    // La emisión guiada dejó de truncar el borrador en una línea a $0 o
+    // negativa (son líneas de mostrador emitibles: una bonificación, un
+    // descuento), así que ahora llegan hasta acá. El IVA se acumulaba detrás de
+    // un `iva > 0` mientras el neto se acumulaba sin guarda: el descuento
+    // restaba del subtotal y su IVA negativo se descartaba. El humano aprobaba
+    // por WhatsApp un total que no era el del CFE, y el tope de monto se
+    // evaluaba contra el número inflado.
+    const items = [
+      { cantidad: 1, concepto: "Servicio", precio: 1000, indicador_facturacion: 3 },
+      { cantidad: 1, concepto: "Descuento fidelidad", precio: -200, indicador_facturacion: 3 },
+      { cantidad: 1, concepto: "Bonificación", precio: 0, indicador_facturacion: 3 },
+    ];
+
+    // Con IVA adentro: $1.000 − $200 son $800 cobrados, ni un peso más.
+    const brutos = calcularTotales(parse({ ...BASE, montos_brutos: 1, items }));
+    expect(brutos.total).toBe(800);
+    expect(brutos.subtotal).toBe(655.74);
+    expect(brutos.total_iva).toBe(144.26);
+    expect(brutos.iva_por_tasa).toEqual({ "22": 144.26 });
+
+    // Sin IVA adentro: el 22% se calcula sobre los $800 netos.
+    const netos = calcularTotales(parse({ ...BASE, montos_brutos: 0, items }));
+    expect(netos.subtotal).toBe(800);
+    expect(netos.total_iva).toBe(176);
+    expect(netos.total).toBe(976);
+    expect(netos.iva_por_tasa).toEqual({ "22": 176 });
+
+    // Y el descuento aparece escrito en el preview: un número que no está en
+    // ninguna fila es un número que el usuario no puede revisar.
+    expect(formatearTotales(brutos)).toContain("Descuento fidelidad");
+  });
+
+  it("un comprobante que da NEGATIVO se avisa: eso es una nota de crédito, no una venta", () => {
+    // Un descuento más grande que la venta da vuelta el signo del comprobante
+    // entero, y el preview lo mostraba como una venta normal con un número
+    // raro. El tope de monto tampoco lo frena: compara en valor absoluto.
+    const t = calcularTotales(
+      parse({
+        ...BASE,
+        montos_brutos: 0,
+        items: [
+          { cantidad: 1, concepto: "Harina", precio: 100, indicador_facturacion: 3 },
+          { cantidad: 1, concepto: "Descuentazo", precio: -5000, indicador_facturacion: 3 },
+        ],
+      }),
+    );
+    expect(t.total).toBe(-5978);
+    // Se asserta sobre el MENSAJE RENDERIZADO, que es lo único que el humano
+    // lee — y con la misma convención de signo que las filas de arriba: el
+    // preview decía "TOTAL −$5.978" y dos renglones abajo "(-5978)", guión
+    // ASCII y sin moneda, que es la misma plata escrita de dos formas.
+    const texto = formatearTotales(t);
+    expect(texto).toContain("nota de crédito");
+    expect(texto).toContain("negativo (−$5.978)");
+    expect(texto).not.toContain("(-5978)");
+  });
+
+  it("un bucket de IVA íntegramente negativo se muestra Y se avisa", () => {
+    // Se muestra: esconder plata del preview es peor que mostrar un número
+    // incómodo. Y se avisa, porque casi siempre es una devolución cargada como
+    // línea suelta en vez de como nota de crédito.
+    const t = calcularTotales(
+      parse({
+        ...BASE,
+        montos_brutos: 0,
+        items: [
+          { cantidad: 1, concepto: "Harina", precio: 1000, indicador_facturacion: 3 },
+          { cantidad: 1, concepto: "Devolución leche", precio: -100, indicador_facturacion: 2 },
+        ],
+      }),
+    );
+    expect(t.iva_por_tasa).toEqual({ "22": 220, "10": -10 });
+    // "solo hay líneas que restan" era falso: hay una que suma y el NETO da
+    // negativo. Y el importe va con la moneda y el signo de siempre.
+    const texto = formatearTotales(t);
+    expect(texto).toContain("El IVA neto de la tasa 10% queda negativo (−$10)");
+  });
+
+  it("el signo va SIEMPRE adelante del símbolo, en todas las filas", () => {
+    // Dos convenciones en filas contiguas del mismo mensaje ("−$1.300" arriba y
+    // "$-4.900" abajo) se leen como dos monedas distintas.
+    const t = calcularTotales(
+      parse({
+        ...BASE,
+        montos_brutos: 0,
+        items: [
+          { cantidad: 1, concepto: "Harina", precio: 100, indicador_facturacion: 3 },
+          { cantidad: 1, concepto: "Descuentazo", precio: -5000, indicador_facturacion: 3 },
+        ],
+      }),
+    );
+    const texto = formatearTotales(t);
+    expect(texto).toContain("−$5.978");
+    expect(texto).not.toContain("$-");
+  });
+
+  it("una línea exenta NO abre una fila 'IVA 0%'", () => {
+    // Es lo que la guarda vieja protegía, y se conserva: la condición pasó a
+    // ser la TASA, no el signo del importe.
+    const t = calcularTotales(
+      parse({
+        ...BASE,
+        montos_brutos: 0,
+        items: [
+          { cantidad: 1, concepto: "Leche", precio: 100, indicador_facturacion: 1 },
+          { cantidad: 1, concepto: "Pelota", precio: 200, indicador_facturacion: 3 },
+        ],
+      }),
+    );
+    expect(t.iva_por_tasa).toEqual({ "22": 44 });
+    expect(formatearTotales(t)).not.toContain("IVA 0%");
+  });
+
   it("desagrega el IVA hacia atrás cuando montos_brutos es verdadero", () => {
     const t = calcularTotales(
       parse({

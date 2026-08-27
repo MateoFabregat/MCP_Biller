@@ -61,7 +61,10 @@ import {
   construirSubmenuIva,
   hoyDgi,
   interpretarPaso,
+  indiceItemEnCurso,
   interpretarRespuestaLibre,
+  itemSinNada,
+  itemsVigentes,
   separarDireccionCiudad,
   siguientePaso,
   sugiereDolares,
@@ -544,7 +547,10 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     // Lo que el extractor pudo leer del texto, DESPUÉS de lo copiado y de lo
     // explícito: llena huecos y nada más. Ver `rellenarDesdePedido`.
     if (pedido !== null) {
-      const puestos = rellenarDesdePedido(estado, pedido);
+      const { puestos, avisos } = rellenarDesdePedido(estado, pedido);
+      // Lo que el extractor NO volcó y por qué. Un dato que se lee y se
+      // descarta en silencio es indistinguible de uno que no se leyó.
+      warnings.push(...avisos);
       if (puestos.length > 0) {
         warnings.push(
           `Del texto del usuario salieron ${puestos.length} dato(s) que no venían en los parámetros ` +
@@ -586,6 +592,9 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     let pidioOtroCliente = false;
     let pidioOtraFecha = false;
     let pidioOtraTasa = false;
+    // El toque tardío de "🗑️ Sacar $X" sobre un borrador que ya cambió. No
+    // descarta nada, y por eso mismo tiene que CONTESTAR algo.
+    let descarteVencido = false;
     if (a.mensaje !== undefined) {
       // Primero el id del botón; si no era un botón, se lee como texto CONTRA
       // LA PREGUNTA QUE ESTABA ABIERTA.
@@ -637,16 +646,72 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
         case "item_listo":
           estado.items_cerrados = true;
           break;
-        case "item_cancelar":
-          // "↩️ Volver así": se descarta el ítem vacío que se abrió por error y
-          // el flujo vuelve al preview. Solo se saca si está VACÍO — un ítem a
-          // medio cargar es trabajo del usuario, no basura.
-          if ((estado.items ?? []).length > 1) {
-            const ultimo = estado.items![estado.items!.length - 1]!;
-            if (Object.keys(ultimo).length === 0) estado.items = estado.items!.slice(0, -1);
+        case "item_cancelar": {
+          // "↩️ Volver así": se descartan los ítems que se abrieron por error y
+          // el flujo vuelve al preview. Se sacan los que no tienen NADA cargado
+          // —ni descripción ni precio—, estén al final o en el medio: un ítem
+          // con plata adentro es trabajo del usuario y se le pregunta, no se
+          // tira (ver `itemSinNada`).
+          //
+          // El del MEDIO importa desde que el flujo dejó de esconderlo: si no se
+          // pudiera descartar, la pregunta por su descripción no tendría salida
+          // tocable. Y sacarlo del ESTADO —y no de una vista— es lo que mantiene
+          // la alineación por posición, porque el borrador se arma después, de
+          // este mismo estado ya compactado.
+          const actuales = estado.items ?? [];
+          if (actuales.length > 1) {
+            const quedan = actuales.filter((i) => !itemSinNada(i));
+            // Si no quedó ninguno, el flujo arranca de nuevo por el primer
+            // concepto: es lo mismo que pasaba antes con el array vacío.
+            estado.items = quedan;
           }
           estado.items_cerrados = true;
           break;
+        }
+        case "item_descartar": {
+          // "🗑️ Sacar $250": el usuario decidió, LEYENDO EL MONTO, que esa
+          // línea no va. Es lo único que puede sacar un ítem con plata cargada,
+          // y por eso es un botón propio: `item_cancelar` tiene prohibido
+          // hacerlo, justamente para que no se pierda sin querer.
+          //
+          // Se saca EL QUE SE ESTÁ PREGUNTANDO —el primero sin descripción—, no
+          // el último: es el que nombra la pregunta que el usuario acaba de
+          // leer. Se saca del ESTADO, así que el borrador se arma después ya sin
+          // él y la alineación por posición con los ítems guardados se mantiene.
+          const actuales = estado.items ?? [];
+          // Se resuelve con las MISMAS dos funciones con las que el flujo eligió
+          // qué preguntar, sobre la misma lista: si acá se buscara "el primero
+          // sin concepto" a mano, un estado donde el ítem en curso es otro
+          // haría que este botón sacara una línea que nadie nombró.
+          const vigentes = itemsVigentes(estado);
+          const enCurso = indiceItemEnCurso(vigentes);
+          const candidato =
+            enCurso !== -1 && (vigentes[enCurso]!.concepto ?? "") === "" ? enCurso : -1;
+
+          // EL BOTÓN TIENE QUE SACAR LA LÍNEA QUE EL USUARIO LEYÓ, O NINGUNA.
+          //
+          // El id trae la posición y el precio que decía el mensaje. Si el
+          // borrador cambió entre la pregunta y el toque —otro mensaje, la
+          // línea ya completada, un ➕ en el medio—, lo que hay ahí ya no es lo
+          // que él vio, así que no se toca nada. Y NO SE CALLA: un botón que no
+          // hace nada ni contesta es el modo de falla que este repo ya arregló
+          // dos veces (el número mudo).
+          const coincide =
+            candidato !== -1 &&
+            (r.posicion === undefined || r.posicion === candidato + 1) &&
+            (r.precio === undefined || r.precio === vigentes[candidato]!.precio);
+
+          if (coincide) {
+            estado.items = actuales.filter((_, i) => i !== candidato);
+            warnings.push(
+              `Se descartó la línea ${candidato + 1}, la que no tenía descripción: el usuario lo ` +
+                "pidió con el botón que decía cuánto sacaba. Las demás siguen en su orden.",
+            );
+          } else {
+            descarteVencido = true;
+          }
+          break;
+        }
         case "iva":
           estado.indicador_facturacion = r.indicador_facturacion;
           break;
@@ -779,6 +844,16 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       siguiente = { ...siguiente, paso: "iva", listo: false };
     }
 
+    // El descarte que llegó tarde: se contesta lo que pasó y se vuelve a hacer
+    // la pregunta que corresponda al estado de AHORA, que puede ser otra.
+    if (descarteVencido) {
+      warnings.push(
+        "Llegó un 🗑️ para una línea que ya no está como estaba (se completó, se sacó, o el " +
+          "borrador cambió): NO se descartó nada. Decíselo al usuario con estas palabras antes " +
+          "de seguir.",
+      );
+    }
+
     const tipo =
       siguiente.tipo ??
       (estado.clase_receptor === undefined
@@ -799,6 +874,9 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       // y la condición vieja hacía que este botón dejara de contestar nada.
       interactivo = null;
       pregunta = "Dale, ¿qué fecha? Escribímela como dd/mm/aaaa.";
+    } else if (descarteVencido) {
+      pregunta = `Esa línea ya no está como estaba, así que no saqué nada. ${siguiente.pregunta}`;
+      interactivo = siguiente.interactivo;
     } else if (pidioOtraTasa) {
       // "🔢 Otro IVA": el paso sigue siendo el mismo (el IVA está sin resolver),
       // cambia el mensaje — de los tres botones fusionados a las tres tasas.
@@ -981,7 +1059,28 @@ async function responder(p: {
   // misma jerarquía —algo que el usuario no dijo— y sale por el mismo lugar,
   // el borrador que después arma el preview.
   const { estado: conDefaults, aplicados, del_perfil } = aplicarDefaults(estado);
-  const { borrador, completar } = borradorComprobante(conDefaults, tipo?.tipo_comprobante ?? null);
+  const { borrador, completar, incompletos } = borradorComprobante(
+    conDefaults,
+    tipo?.tipo_comprobante ?? null,
+  );
+
+  // UN ÍTEM A MEDIO CARGAR ES UN WARNING, NO UNA LÍNEA MENOS EN SILENCIO.
+  //
+  // Con el arreglo de `siguientePaso` este estado ya no llega a `listo`, así
+  // que el camino normal no pasa por acá. Se avisa igual porque el borrador se
+  // devuelve en TODOS los pasos —el agente lo puede tomar de cualquiera— y
+  // porque `warnings` es lo que el agente mira antes de emitir, mientras que
+  // `completar` lo lee cuando va a completar. El modo de falla que se está
+  // tapando no es un 422: es una línea de un CFE real con la descripción de
+  // otra (ver `borradorComprobante`).
+  if (incompletos.length > 0) {
+    warnings.push(
+      `Hay ${incompletos.length} ítem(s) a medio cargar: ` +
+        incompletos.map((i) => `el ${i.posicion} (sin ${i.falta.join(" ni ")})`).join(", ") +
+        ". El comprobante_borrador corta en el primero, así que NO están todas las líneas. " +
+        "Terminá de cargarlos antes de emitir.",
+    );
+  }
   const perfil = estado.perfil_casa ?? null;
 
   const notaSesion =
@@ -1124,6 +1223,15 @@ async function prellenarDesdeUltimaVenta(
   }
 
   const r = estadoDesdeComprobante(detalle);
+  // EL PRECIO DE UN ÍTEM COPIADO YA ESTÁ DICHO, INCLUIDO EL 0.
+  //
+  // Sale de un CFE que se emitió de verdad, así que un 0 ahí es una línea
+  // bonificada y no un hueco. Sin la marca, "lo de siempre" sobre una factura
+  // con bonificación quedaba trancado pidiendo el precio de esa línea, sin
+  // botones y sin ninguna respuesta que sirviera. Ver `precio_copiado`.
+  if (r.estado.items !== undefined) {
+    r.estado.items = r.estado.items.map((i) => ({ ...i, precio_copiado: true }));
+  }
   // Copiado DEBAJO de lo dicho: fusionar con el estado actual encima.
   const fusionado = fusionarEstado(r.estado, estado);
   for (const clave of Object.keys(estado) as Array<keyof EstadoEmision>) delete (estado as Record<string, unknown>)[clave];

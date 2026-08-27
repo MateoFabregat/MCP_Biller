@@ -37,6 +37,10 @@
 
 import {
   clasificarDocumento,
+  indiceItemEnCurso,
+  siguientePaso,
+  itemPuedeViajar,
+  itemsVigentes,
   type EstadoEmision,
   type ItemEnCurso,
 } from "./emision.js";
@@ -44,23 +48,50 @@ import { esPedidoDeEmision, type PedidoEmision } from "./extraerPedido.js";
 import { formatearUy, parsearCantidad, parsearImporte } from "../services/importe.js";
 
 /**
- * Aplica un dato al ítem que se está cargando (el último del array).
+ * Aplica un dato al ítem que se está cargando.
  *
  * Existe porque los botones de un paso de ítem —la cantidad, por ahora— llegan
  * sin decir a QUÉ ítem pertenecen: el id de un botón de WhatsApp no lleva
- * índice. La convención es la misma que usa `siguientePaso`: el ítem en curso
- * es siempre el último. Si no hay ninguno, se crea.
+ * índice. Lo único que se puede hacer es aplicarlo al ítem sobre el que se está
+ * preguntando, y cuál es ese lo contesta `indiceItemEnCurso` — la MISMA
+ * función con la que `siguientePaso` elige qué preguntar.
+ *
+ * Antes decía "el último", igual que `siguientePaso` antes de su arreglo, y era
+ * el mismo modo de falla más barato: con `[{A sin precio}, {B completo}]` el
+ * flujo pregunta por A y la cantidad que contesta el usuario aterrizaba en B.
+ * Una cantidad en la línea equivocada de un CFE es un total equivocado.
+ *
+ * Con todos los ítems completos sigue siendo el último (es el que se acaba de
+ * cargar), y si no hay ninguno, se crea.
  */
 export function aplicarAlItemEnCurso(
   estado: EstadoEmision,
   aplicar: (item: ItemEnCurso) => void,
 ): void {
   const items = [...(estado.items ?? [])];
-  const ultimo = items.length === 0 ? undefined : { ...items[items.length - 1]! };
-  const item = ultimo ?? {};
+  if (items.length === 0) {
+    const item: ItemEnCurso = {};
+    aplicar(item);
+    estado.items = [item];
+    return;
+  }
+  // SE MIDE SOBRE LA MISMA LISTA QUE MIRA `siguientePaso`, y no sobre
+  // `estado.items` crudo: cerrados los ítems, la cola sin nada no se pregunta,
+  // así que tampoco puede recibir la respuesta. Con `[{A, precio:0}, {}]`
+  // cerrados, el flujo pregunta por A y la cantidad aterrizaba en el fantasma
+  // del final. `itemsVigentes` es un PREFIJO, así que sus índices son los de
+  // `estado.items` sin traducción.
+  const vigentes = itemsVigentes(estado);
+  const incompleto = vigentes.length === 0 ? -1 : indiceItemEnCurso(vigentes);
+  const destino =
+    incompleto !== -1
+      ? incompleto
+      : vigentes.length === 0
+        ? items.length - 1
+        : vigentes.length - 1;
+  const item = { ...items[destino]! };
   aplicar(item);
-  if (ultimo === undefined) items.push(item);
-  else items[items.length - 1] = item;
+  items[destino] = item;
   estado.items = items;
 }
 
@@ -173,8 +204,60 @@ export function normalizarItems(items: ReadonlyArray<ItemCrudo> | undefined): {
  * cotizado en dólares sale perfectamente bien formada ante DGI— y un toque de
  * más es barato al lado de eso. Ver `moneda_dudosa` en `emision.ts`.
  */
-export function rellenarDesdePedido(estado: EstadoEmision, pedido: PedidoEmision): string[] {
+/**
+ * ¿Estas dos descripciones hablan de la misma línea?
+ *
+ * Se compara por TOKENS y no por igualdad: "Bolsa de portland" y "bolsas de
+ * portland" son lo mismo dicho dos veces —el agente escribe una y el usuario la
+ * otra— y ahí llenar el hueco es exactamente lo que hay que hacer. Se ignoran
+ * las palabras cortas ("de", "el") y la "s" final, que es todo el plural que
+ * hace falta acá.
+ *
+ * PERO NO ALCANZA CON QUE COMPARTAN UNA PALABRA, y ese fue el primer intento:
+ * con el ítem en curso "Agua tónica" sin precio y el mensaje "3 agua mineral a
+ * 60", el token "agua" declaraba que eran la misma línea y el CFE terminaba
+ * imprimiendo "3 × Agua tónica $60" — la línea que el usuario quería agregar no
+ * existía nunca. En un almacén uruguayo ese patrón es la norma: agua
+ * mineral/agua tónica, coca común/coca zero, queso magro/queso colonia, vino
+ * tinto/vino blanco. La palabra compartida es la CATEGORÍA; la que las
+ * distingue es justamente la que sobra.
+ *
+ * Por eso la condición es de SUBCONJUNTO: una de las dos no puede tener ninguna
+ * palabra propia. "bolsa portland" ⊆ "bolsa portland" (misma línea), "harina" ⊆
+ * "harina 000" (misma línea), pero "agua tónica" y "agua mineral" tienen cada
+ * una la suya y son dos productos distintos.
+ *
+ * Ante la duda dice que SÍ: la respuesta negativa frena un volcado, y frenar de
+ * más deja al usuario repitiendo un dato que ya dijo. Por eso una descripción
+ * sin palabras largas ("2 kg") no se usa para separar nada.
+ */
+function hablanDeLaMismaLinea(a: string, b: string): boolean {
+  const tokens = (texto: string): Set<string> =>
+    new Set(
+      texto
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((t) => t.length >= 3)
+        .map((t) => (t.endsWith("s") ? t.slice(0, -1) : t)),
+    );
+  const ta = tokens(a);
+  const tb = tokens(b);
+  if (ta.size === 0 || tb.size === 0) return true;
+  const contiene = (grande: Set<string>, chico: Set<string>): boolean => {
+    for (const t of chico) if (!grande.has(t)) return false;
+    return true;
+  };
+  return contiene(ta, tb) || contiene(tb, ta);
+}
+
+export function rellenarDesdePedido(
+  estado: EstadoEmision,
+  pedido: PedidoEmision,
+): { puestos: string[]; avisos: string[] } {
   const puestos: string[] = [];
+  const avisos: string[] = [];
 
   if (estado.montos_brutos === undefined && pedido.montos_brutos !== undefined) {
     estado.montos_brutos = pedido.montos_brutos;
@@ -188,12 +271,48 @@ export function rellenarDesdePedido(estado: EstadoEmision, pedido: PedidoEmision
     estado.moneda_dudosa = true;
   }
 
-  if (!esPedidoDeEmision(pedido)) return puestos;
+  if (!esPedidoDeEmision(pedido)) return { puestos, avisos };
 
-  // El NOMBRE, no el documento: quién es ese nombre lo contesta
-  // `biller_resolver_nombre`, que sabe preguntar cuando hay dos candidatos.
+  // DÓNDE EMPIEZA A VOLCARSE LO QUE SE LEYÓ, Y POR QUÉ NO ES SIEMPRE CERO.
+  //
+  // Los ítems del pedido vienen indexados por el MENSAJE que se acaba de
+  // parsear, no por el comprobante. Volcarlos desde 0 le pega la respuesta de
+  // ahora a la primera línea: con `[{Café,1200}, {precio:250}]` y el usuario
+  // contestando "eran 2 medialunas", el 2 aterrizaba como cantidad DEL CAFÉ
+  // —que pasaba a $2.400—, las medialunas no se cargaban nunca y la pregunta se
+  // repetía para siempre. Y como esto solo llena huecos, no fallaba: no había
+  // 422, ni warning, ni forma de notarlo salvo leyendo el total.
+  //
+  // El ancla es el ítem EN CURSO, que es sobre el que el flujo está preguntando
+  // y por lo tanto sobre el que el usuario está contestando. `itemsVigentes` es
+  // un prefijo, así que su índice es directamente el de `estado.items`.
+  const items: ItemEnCurso[] = [...(estado.items ?? [])];
+  const enCurso = indiceItemEnCurso(itemsVigentes(estado));
+
+  // EL CLIENTE SOLO SE LEE MIENTRAS LA ETAPA DEL CLIENTE NO HAYA QUEDADO ATRÁS.
+  //
+  // Y "atrás" no es "ya hay líneas cargadas", que fue el primer intento y dejaba
+  // afuera el caso peor: la PRIMERA pregunta de ítem. Con un e-Ticket sin
+  // receptor y sin ningún ítem, "coca 2 litros" dejaba `nombre_cliente: "coca"`
+  // y `completar` le ordenaba al agente ponerlo en `cliente.razon_social` de un
+  // comprobante que el usuario había pedido SIN identificar: una razón social
+  // inventada en un CFE real.
+  //
+  // Las tres condiciones son la misma pregunta mirada por tres lados: si el
+  // usuario ya dijo que no identifica al receptor, o si el flujo está
+  // preguntando por un ítem, entonces lo que la gramática posicional lee como
+  // "cliente" es un falso positivo — el primer sustantivo de la frase, que acá
+  // es un producto. El nombre dicho de verdad llega por `nombre_cliente`, que
+  // es explícito y no se toca acá.
+  const pasoAbierto = siguientePaso(estado).paso;
+  const etapaDelClienteAtras =
+    estado.sin_receptor === true ||
+    pasoAbierto === "concepto" ||
+    pasoAbierto === "precio" ||
+    items.some((i) => (i.concepto ?? "") !== "");
   if (
     pedido.cliente !== undefined &&
+    !etapaDelClienteAtras &&
     (estado.nombre_cliente ?? "") === "" &&
     (estado.documento ?? "") === ""
   ) {
@@ -201,48 +320,114 @@ export function rellenarDesdePedido(estado: EstadoEmision, pedido: PedidoEmision
     puestos.push("nombre_cliente");
   }
 
-  if (pedido.items.length === 0) return puestos;
-  const items: ItemEnCurso[] = [...(estado.items ?? [])];
-  pedido.items.forEach((leido, i) => {
-    const base: ItemEnCurso = { ...(items[i] ?? {}) };
-    if ((base.concepto ?? "") === "" && leido.concepto !== undefined) {
-      base.concepto = leido.concepto;
-      puestos.push(`items[${i}].concepto`);
-    }
-    if (base.cantidad === undefined && leido.cantidad !== undefined) {
-      base.cantidad = leido.cantidad;
-      puestos.push(`items[${i}].cantidad`);
-    }
-    if (base.precio === undefined && leido.precio !== undefined) {
-      base.precio = leido.precio;
-      // La marca viaja PEGADA al precio, en la misma condición: sin esto, el
-      // "6.50" entraba al estado como 6,5 pelado y el preview mostraba $13 sin
-      // una palabra sobre las otras dos lecturas posibles. Ver `precio_ambiguo`.
-      base.precio_ambiguo = leido.precio_ambiguo === true;
-      puestos.push(`items[${i}].precio`);
-    }
-    items[i] = base;
-  });
+  if (pedido.items.length === 0) return { puestos, avisos };
+
+  // SIN ÍTEM EN CURSO Y CON ÍTEMS CARGADOS, NO SE VUELCA NADA.
+  //
+  // Es el caso de "sumale 3 tortas a 450" cuando el agente YA mandó esa línea
+  // en `items`: el estado está completo y lo que el extractor leyó es un eco
+  // del mismo mensaje. Volcarlo sobre el primer ítem le corría los datos, y
+  // agregarlo como línea nueva cobraría las tortas dos veces. Lo único correcto
+  // es no tocar nada y decirlo: el que quiere agregar una línea abre un ítem
+  // (el botón ➕, o `precios_sin_ubicar` acá abajo).
+  const sinDondeVolcar = enCurso === -1 && items.length > 0;
+  if (sinDondeVolcar) {
+    avisos.push(
+      `El texto nombraba ${pedido.items.length} línea(s) pero no hay ningún ítem a medio cargar: ` +
+        "no se volcó ninguna, para no pisar las que ya estaban ni cobrar la misma dos veces. " +
+        "Si el usuario quiere agregar otra línea, mandala explícita en 'items'.",
+    );
+  }
+  const base = enCurso === -1 ? 0 : enCurso;
+
+  // Cuando no hay dónde volcar no se vuelca nada, pero el bloque de abajo
+  // —el precio que sobró— sigue corriendo: abrir la pregunta por la venta que
+  // no se pudo leer es lo otro que este flujo no puede dejar de hacer.
+  const descartados: number[] = [];
+  if (!sinDondeVolcar) {
+    pedido.items.forEach((leido, k) => {
+      const i = base + k;
+      const item: ItemEnCurso = { ...(items[i] ?? {}) };
+
+      // DOS LÍNEAS DISTINTAS NO SE MEZCLAN.
+      //
+      // Con `[{Café, sin precio}, {tortas, 3, 450}]` y el usuario escribiendo
+      // "sumale 3 tortas a 450", el ítem en curso es el CAFÉ (es al que le
+      // falta el precio) y lo leído habla de las tortas: llenarle el hueco le
+      // ponía al café el precio de la otra línea. Los conceptos están para algo
+      // — cuando los dos existen y no son el mismo, esto no es la respuesta a
+      // la pregunta abierta y no se vuelca nada.
+      if (
+        (item.concepto ?? "") !== "" &&
+        leido.concepto !== undefined &&
+        !hablanDeLaMismaLinea(item.concepto!, leido.concepto)
+      ) {
+        // Y LA PLATA DE ESA LÍNEA NO SE EVAPORA.
+        //
+        // El aviso dura un turno; el borrador dura la conversación. Sin esto,
+        // "2 medialunas a 60 y 3 tortas a 450" sobre `[{Café, sin precio}]`
+        // cargaba las tortas, descartaba las medialunas, y al mensaje siguiente
+        // el flujo decía "ya tengo todo" con los $60 en ningún lado. El precio
+        // descartado entra a la misma lista que los que no se pudieron ubicar,
+        // que es la que abre un ítem vacío y obliga a preguntar.
+        if (leido.precio !== undefined) descartados.push(leido.precio);
+        avisos.push(
+          `El texto habla de otra línea (no de la que se está cargando): no se volcó nada sobre ` +
+            `el ítem ${i + 1}. Si el usuario está corrigiendo o agregando, mandalo explícito en ` +
+            "'items'.",
+        );
+        return;
+      }
+
+      if ((item.concepto ?? "") === "" && leido.concepto !== undefined) {
+        item.concepto = leido.concepto;
+        puestos.push(`items[${i}].concepto`);
+      }
+      if (item.cantidad === undefined && leido.cantidad !== undefined) {
+        item.cantidad = leido.cantidad;
+        puestos.push(`items[${i}].cantidad`);
+      }
+      if (item.precio === undefined && leido.precio !== undefined) {
+        item.precio = leido.precio;
+        // La marca viaja PEGADA al precio, en la misma condición: sin esto, el
+        // "6.50" entraba al estado como 6,5 pelado y el preview mostraba $13
+        // sin una palabra sobre las otras dos lecturas. Ver `precio_ambiguo`.
+        item.precio_ambiguo = leido.precio_ambiguo === true;
+        puestos.push(`items[${i}].precio`);
+      }
+      items[i] = item;
+    });
+  }
 
   // NÚMEROS QUE SOBRARON = VENTA QUE NO SE PUDO LEER.
   //
   // "…3 cajas a 1200 y portland a 6500": el segundo tramo no trae cantidad, así
   // que no hay ítem donde poner los $6.500. Antes se descartaban en silencio y
   // el flujo llegaba a `listo` con media factura. Abrir un ítem vacío es la
-  // forma que ya tiene este flujo de decir "seguí preguntando por otro"
-  // (`siguientePaso` mira siempre el último), y convierte la pérdida silenciosa
-  // en la pregunta que corresponde.
-  if (pedido.precios_sin_ubicar.length > 0) {
+  // forma que ya tiene este flujo de decir "seguí preguntando por otro", y
+  // convierte la pérdida silenciosa en la pregunta que corresponde. Corre
+  // SIEMPRE, incluso cuando no había dónde volcar las líneas leídas: si no, un
+  // mensaje que nombra más venta de la que se entiende terminaba en "confirmar"
+  // con el aviso de que no se confirme.
+  const sinUbicar = [...pedido.precios_sin_ubicar, ...descartados];
+  if (sinUbicar.length > 0) {
     const ultimo = items[items.length - 1];
     if (ultimo === undefined || Object.keys(ultimo).length > 0) {
       items.push({});
       puestos.push(`items[${items.length - 1}] (abierto por un precio sin ubicar)`);
     }
     delete estado.items_cerrados;
+    if (descartados.length > 0) {
+      avisos.push(
+        `⚠️ Quedaron sin línea ${descartados.length} precio(s) del mensaje ` +
+          `(${descartados.join(", ")}): se abrió un ítem para preguntarlos. NO emitas hasta ` +
+          "cargarlos o descartarlos con el usuario.",
+      );
+    }
   }
 
   if (items.length > 0) estado.items = items;
-  return puestos;
+  return { puestos, avisos };
 }
 
 /**
@@ -271,7 +456,19 @@ export function rellenarDesdePedido(estado: EstadoEmision, pedido: PedidoEmision
 export function borradorComprobante(
   estado: EstadoEmision,
   tipo: number | null,
-): { borrador: Record<string, unknown>; completar: string[] } {
+): {
+  borrador: Record<string, unknown>;
+  completar: string[];
+  /**
+   * Los ítems del ESTADO que quedaron a medio cargar, en posición 1-based y con
+   * qué les falta. Vacío en el caso normal.
+   *
+   * Sale del `completar` además de estar escrito adentro porque el llamador lo
+   * necesita como DATO y no como prosa: `emisionGuiada` lo convierte en un
+   * warning propio, que es donde el agente mira antes de emitir.
+   */
+  incompletos: Array<{ posicion: number; falta: string[] }>;
+} {
   const borrador: Record<string, unknown> = {};
   const completar: string[] = [];
 
@@ -345,23 +542,91 @@ export function borradorComprobante(
     );
   }
 
-  const items = (estado.items ?? [])
-    // Un ítem a medio cargar no va al borrador: mandar precio sin concepto
-    // produce un 422 que habla de un campo que el usuario nunca vio.
-    .filter((i) => (i.concepto ?? "") !== "" && typeof i.precio === "number")
-    .map((i) => {
-      const item: Record<string, unknown> = {};
-      if (i.cantidad !== undefined) item["cantidad"] = i.cantidad;
-      if (i.precio !== undefined) item["precio"] = i.precio;
-      const ind = i.indicador_facturacion ?? estado.indicador_facturacion;
-      if (ind !== undefined) item["indicador_facturacion"] = ind;
-      return item;
-    });
+  // EL FILTRO DE ÍTEMS A MEDIO CARGAR, Y POR QUÉ NO ALCANZA CON FILTRAR.
+  //
+  // Un ítem sin concepto o sin precio no puede ir al borrador: produce un 422
+  // que habla de un campo que el usuario nunca vio. Pero SACARLO DEL MEDIO es
+  // peor que el 422, porque no falla — corre una casilla a todas las líneas que
+  // seguían. Y la posición es de lo único que dispone quien completa los
+  // conceptos: el agente, a quien esta misma función le pide abajo que los
+  // ponga en orden, y `completarDesdeSesion` (`write/emitirComprobante.ts`),
+  // que rellena `items[i].concepto` desde `itemsGuardados[i]` sin mirar nada
+  // más. Con `[{A,100}, {B sin precio}, {C,300}]` la línea de $300 salía con el
+  // concepto de B impreso en un CFE real.
+  //
+  // Por eso el borrador CORTA en el primer agujero en vez de saltearlo: un
+  // prefijo de los ítems guardados sigue alineado por posición con ellos, que
+  // es la propiedad que el resto del sistema da por cierta. Se pierde una línea
+  // —visible en el preview, que muestra el comprobante entero— en lugar de
+  // ganar una línea con la descripción de otra cosa.
+  //
+  // Y no se elige mandar el índice original adentro de cada ítem: `items[]` es
+  // el cuerpo REAL que va a `biller_emitir_comprobante`, un campo de más ahí es
+  // un 422 (verificado con `numero_interno`) o, peor, algo que la API acepta y
+  // termina en el CFE. Además no arreglaría nada: quien rellena por posición es
+  // código del server que no lee ese campo.
+  const itemsEstado = estado.items ?? [];
+
+  // "QUÉ FALTA PREGUNTAR" Y "QUÉ LÍNEA NO PUEDE VIAJAR" SON DOS PREGUNTAS
+  // DISTINTAS, Y CONFUNDIRLAS FACTURA DE MENOS.
+  //
+  // `siguientePaso` considera incompleto un precio que no sea un número
+  // POSITIVO, y para preguntar está bien: un ítem que quedó en cero
+  // probablemente es uno al que todavía no se le puso el precio. Pero para
+  // decidir qué línea sale, el criterio tiene que ser el de la API y nada más:
+  // `ItemSchema` (`biller/cfeSchema.ts`) pide un número y NO restringe el signo.
+  //
+  // Una bonificación a $0 y un descuento de -$200 son líneas de mostrador
+  // perfectamente emitibles, y `repetirUltima` las copia tal cual de la factura
+  // anterior (descarta solo `precio === null`) junto con `items_cerrados`. Con
+  // el criterio de preguntar aplicado acá, "repetir lo de siempre" sobre una
+  // factura con una línea bonificada truncaba el borrador EN esa línea: se
+  // emitía $1.000 en vez de $1.300, sin que nadie hubiera pedido nada raro.
+  const loQueFalta = (i: ItemEnCurso): string[] => {
+    const falta: string[] = [];
+    if ((i.concepto ?? "") === "") falta.push("concepto");
+    if (typeof i.precio !== "number") falta.push("precio");
+    return falta;
+  };
+  const incompletos = itemsEstado
+    .map((i, idx) => ({ posicion: idx + 1, falta: loQueFalta(i) }))
+    .filter((x) => x.falta.length > 0);
+  const corte = itemsEstado.findIndex((i) => !itemPuedeViajar(i));
+
+  const items = (corte === -1 ? itemsEstado : itemsEstado.slice(0, corte)).map((i) => {
+    const item: Record<string, unknown> = {};
+    if (i.cantidad !== undefined) item["cantidad"] = i.cantidad;
+    if (i.precio !== undefined) item["precio"] = i.precio;
+    const ind = i.indicador_facturacion ?? estado.indicador_facturacion;
+    if (ind !== undefined) item["indicador_facturacion"] = ind;
+    return item;
+  });
   if (items.length > 0) {
     borrador["items"] = items;
     completar.push(
       "items[].concepto: completá cada ítem con la descripción TEXTUAL que dio el usuario, en el " +
-        "mismo orden en que la dijo. Es el único campo del cuerpo que sale de la conversación.",
+        "mismo orden en que la dijo — items[N] es la N-ésima cosa que dijo, y por eso el borrador " +
+        "corta antes del primer ítem incompleto en vez de saltearlo. Es el único campo del cuerpo " +
+        "que sale de la conversación.",
+    );
+  }
+  // EL FILTRO DEJA DE SER SILENCIOSO.
+  //
+  // El flujo ya no llega a `listo` con un agujero (ver `siguientePaso`), pero
+  // esta función es alcanzable por otros caminos —una emisión directa, un
+  // agente que arme el estado a mano— y ahí no hay nadie preguntando. Que lo
+  // que falta se diga acá es la diferencia entre una línea de menos que se ve y
+  // una línea de más con la descripción equivocada que no se ve.
+  if (incompletos.length > 0) {
+    const primero = incompletos[0]!;
+    const cortadas = itemsEstado.length - items.length;
+    completar.push(
+      `⚠️ NO EMITAS TODAVÍA: el ítem ${primero.posicion} está a medio cargar (le falta ` +
+        `${primero.falta.join(" y ")}). El borrador corta ahí, así que van ${items.length} de ` +
+        `${itemsEstado.length} líneas y quedan ${cortadas} afuera. No las agregues vos por tu ` +
+        "cuenta: los conceptos se completan POR POSICIÓN y correrlas le pone la descripción de " +
+        "una línea a otra. Terminá de cargar ese ítem con biller_emision_guiada y volvé a pedir " +
+        "el borrador.",
     );
   }
 
@@ -374,5 +639,5 @@ export function borradorComprobante(
     );
   }
 
-  return { borrador, completar };
+  return { borrador, completar, incompletos };
 }

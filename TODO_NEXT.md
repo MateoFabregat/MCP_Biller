@@ -33,8 +33,23 @@ mezclar un arreglo de conducta con un refactor de diferencial cero hace
 imposible saber qué movió qué. Los dos terminan en un número o un texto
 equivocado en un documento fiscal.
 
-- [ ] **El resumen y los rankings pueden contestar totales distintos para los
-  mismos comprobantes.** Hay dos `clasificarEstado`:
+- [x] **El resumen y los rankings pueden contestar totales distintos para los
+  mismos comprobantes.** RESUELTO (agosto 2026): quedó UNA sola
+  `clasificarEstado`, en `src/services/estadoDgi.ts`, y el criterio de qué suma
+  vive en `estaAceptado` del mismo archivo — solo "Aceptado DGI", el estado
+  desconocido tampoco cuenta. Cambió el resumen (los rankings ya usaban ese
+  criterio) y también `cobrado_por_moneda`, que ahora filtra igual que el total.
+  La exclusión se avisa en el resumen (cuántos y cuánto sumaban), en los
+  rankings de clientes, sucursales y productos —en los dos primeros el warning
+  decía "se contaron igual" y era falso; el de productos no existía—, en la
+  comparación de períodos, en las cohortes y en la posición de IVA. El aviso del
+  resumen lleva el monto separado en lo que sumaba y lo que restaba, porque una
+  nota de crédito excluida no deja el total corto sino INFLADO. De paso quedó
+  explícito en `alertas.ts` que un estado ausente no se alerta pero un texto
+  irreconocible SÍ (una redacción nueva de rechazo tiene que verse igual). Lo
+  fija `tests/estadoDgi.test.ts`, incluido un test que falla si vuelve a haber
+  dos `clasificarEstado`. Sigue abierto el punto de abajo.
+  Descripción original del bug, para el contexto:
   `src/services/resumenFacturacion.ts:167` y `src/services/estadoDgi.ts:49`. El
   resumen excluye solo lo que sabe rechazado (`=== "no_aceptado"`) y **cuenta el
   estado desconocido**, con el argumento escrito de que "la ausencia del dato no
@@ -47,23 +62,111 @@ equivocado en un documento fiscal.
   viene de un problema de la API y no del comprobante, excluirlo da un total
   bajo sin motivo. Decidir y unificar en un commit propio, con el diferencial
   que muestre qué comprobantes cambian de lado.
-  Relacionado: `esVentaValida` (`estadoDgi.ts`) sostiene que "Envío no
-  corresponde" **debería** contar —"es una venta real y facturada"— y ningún
-  consumidor le hace caso. El propio archivo avisa de la discrepancia.
+- [ ] **"Envío no corresponde" no cuenta en ningún total, y probablemente
+  debería.** `esVentaValida` (`src/services/estadoDgi.ts`) sostiene que es una
+  venta real y facturada, y que excluirla porque no viajó individualmente a DGI
+  es confundir el canal de reporte con la validez del documento. Ningún total le
+  hace caso: todos usan `estaAceptado`, que compara contra "Aceptado DGI" a
+  secas. Se dejó así a propósito en la unificación de criterios de agosto de
+  2026 —cambiar dos criterios fiscales en el mismo commit hace imposible saber
+  cuál movió qué número— y la diferencia está pineada en
+  `tests/estadoDgi.test.ts`. Lo que hay que medir antes de decidir: en un
+  comercio de tickets chicos, los e-Ticket por debajo de 5.000 UI quedan en ese
+  estado, así que contarlos puede mover el total de casi toda la facturación, y
+  hay que confirmar contra el panel de Biller si Biller los cuenta o no.
 
-- [ ] **Un ítem incompleto en el MEDIO le corre los conceptos a las demás
-  líneas.** `borradorComprobante` (`src/kapso/borradorEmision.ts:351`) filtra los
-  ítems sin concepto o sin precio, y el texto de `completar` (:364) le pide al
-  agente los conceptos "en el mismo orden en que la dijo". Con
-  `[{A,100}, {B, sin precio}, {C,300}]` el borrador sale con dos líneas y el
-  agente, copiando por posición, le pone **el concepto B a la línea de C**. Es
-  alcanzable porque `siguientePaso` (`src/kapso/emision.ts:1299`) solo mira el
-  **último** ítem: con el último completo el flujo dice `confirmar` y nada avisa
-  del agujero del medio. Termina en un concepto equivocado sobre una línea de un
-  CFE real. Los dos arreglos posibles cambian conducta: mandar el índice
-  original en cada ítem, o frenar el `listo` cuando se filtró algo.
+- [x] **Un ítem incompleto en el MEDIO le corría los conceptos a las demás
+  líneas.** Resuelto en agosto de 2026. `siguientePaso` miraba solo el ÚLTIMO
+  ítem, así que con `[{A,100},{B sin precio},{C,300}]` decía `confirmar`, el
+  borrador salía con dos líneas y el agente —al que `completar` le pide los
+  conceptos "en el mismo orden en que la dijo"— le ponía el concepto B a la
+  línea de C: un concepto equivocado en una línea de un CFE real.
+  Ahora el ítem en curso es el PRIMERO que falta (`itemsVigentes` +
+  `indiceItemEnCurso`, `src/kapso/emision.ts`), el borrador CORTA en el primer
+  ítem que no puede viajar en vez de saltearlo (`src/kapso/borradorEmision.ts`)
+  —así lo que se entrega es siempre un PREFIJO, que es la propiedad de la que
+  depende `completarDesdeSesion` para rellenar por posición— y el invariante
+  está verificado por fuerza bruta, no declarado.
+  De la misma tanda salieron cuatro cosas que no estaban en el pedido: el IVA de
+  una línea negativa se descartaba (`calcularTotales` acumulaba el neto sin
+  guarda y el IVA detrás de `iva > 0`, así que el preview inflaba el total), una
+  respuesta de texto aterrizaba en el ítem equivocado (`rellenarDesdePedido`
+  indexaba por el ítem del MENSAJE y no por el ítem en curso: "sumale 3 tortas a
+  450" pegaba el 3 en la línea de arriba y dejaba un cliente llamado "sumale"),
+  dos productos que comparten una palabra se mezclaban ("3 agua mineral a 60"
+  sobre "Agua tónica"), y `repetir_ultima_de` sobre una factura con una línea
+  bonificada trancaba el flujo.
+
+## P0 — Lo que quedó abierto de esa tanda (ninguno mueve un número por sí solo)
+
+Salieron de la quinta revisión fiscal. Se anotan en vez de arreglarse porque
+ninguno produce un importe equivocado: trancan el flujo o ecoan feo. El repro de
+cada uno está acá para no tener que volver a encontrarlo.
+
+- [ ] **Una línea a $0 o negativa AL FINAL, mandada por el agente, tranca el
+  flujo.** Con `items: [{Venta,1,"1.000"},{Descuento,1,"-200"}]` el paso queda en
+  `precio`, sin botones, y NO sale con nada: reenviar el precio,
+  `emision:item:listo`, `items_cerrados:true`, el texto "listo", el texto "-200"
+  y `emision:item:cancelar` devuelven los siete la misma pregunta. Es
+  preexistente —`itemIncompleto` exige precio positivo—, y el escape que se
+  agregó (`precio_copiado`) cubre solo el camino de `repetir_ultima_de`. Ojo:
+  hoy está PINEADO como conducta buscada en `tests/emisionGuiada.test.ts` ("del
+  ÚLTIMO sí se sigue preguntando el precio"), así que arreglarlo es cambiar ese
+  test a propósito.
+
+- [ ] **`precio_copiado` no se pierde con `items` explícitos, al revés de lo que
+  promete su propio contrato.** El comentario de `src/kapso/emision.ts` dice que
+  si el agente reenvía `items` la marca se pierde y el flujo vuelve a preguntar;
+  `fusionarItems` (`src/kapso/borradorStore.ts`) fusiona campo por campo y la
+  marca sobrevive. Resultado: una línea a $0 aceptada en silencio, con
+  `warnings: []`. Corrección: si `encima[i].precio !== undefined`, borrar
+  `precio_copiado`.
+
+- [ ] **En el paso `cliente`, un producto queda como razón social.** Con
+  `clase_receptor: "consumidor_final"`, sin `sin_receptor` y sin ítems,
+  "coca 2 litros" deja `nombre_cliente: "coca"` e `items[0].concepto: "litros"`,
+  y `completar` le ordena al agente ponerlo en `cliente.razon_social`. Es la pata
+  que quedó de la guarda de etapa; la de `sin_receptor` sí está cerrada.
+
+- [ ] **`$-200` en la pregunta y en el botón de descarte.** Con una línea sin
+  descripción y precio negativo sale "Me falta saber qué era la línea de $-200" y
+  `🗑️ Sacar $-200`. Es la convención que la misma entrega prohibió y testeó en
+  `calcularTotales` (`not.toContain("$-")`). Usar el mismo helper.
+
+- [ ] **Los precios huérfanos se ecoan crudos.** `src/kapso/borradorEmision.ts`
+  arma el aviso con `descartados.join(", ")`, así que $6.500 sale como "(6500)".
+  El mismo changeset escribió que "un eco escrito '5000' en un país que escribe
+  '5.000' es un eco que el usuario no puede verificar".
+
+- [ ] **Sobreconteo cosmético en los avisos de estado.** `cohortes.ts` y
+  `comparacion.ts` incrementan `sinEstado` ANTES del filtro de `total`/`moneda`
+  nulos, así que el aviso puede nombrar comprobantes que igual quedaban afuera
+  por otro motivo. No mueve ningún total.
 
 ## P1 — Mejoras prioritarias
+
+- [ ] **El texto crudo no contesta las preguntas de `concepto` ni de `precio`.**
+  `interpretarRespuestaLibre` (`src/kapso/emision.ts`) entiende las respuestas de
+  los pasos con botones —receptor, cliente, moneda, IVA, fecha, tasa de cambio—
+  y para `concepto` y `precio` cae en `default → ninguna`. O sea: si el usuario
+  escribe "medialunas" cuando se le pregunta qué vendió, o "60" cuando se le
+  pregunta el precio, el server no hace nada con eso. **El camino que sí anda es
+  el normal**: el agente manda `items: [{ concepto: "medialunas", precio: 60 }]`
+  explícito, que es su trabajo y lo hace bien.
+  Se intentó al revés en agosto de 2026 —dos ramas nuevas acá— y se revirtió: que
+  el server parsee castellano libre duplica un trabajo que ya hace el modelo, y
+  cada filtro que hay que agregarle es un modo de falla FISCAL nuevo. Lo que rompió,
+  y que es la especificación de lo que tiene que aguantar el día que se haga bien:
+  · "no sé", "ni idea", "no me acuerdo", "nada" → quedaban impresos como la
+    descripción de una línea de un CFE real.
+  · "bolsas 25kg", "leche 1L", "harina 000" → el filtro de dígitos (puesto para
+    frenar "eran 3 no 2") los rechazaba, y la conversación se trancaba en
+    silencio en la pregunta más común del flujo.
+  · un mensaje de más de 80 caracteres (el largo de `items.concepto` en Biller)
+    → rechazado sin decir por qué.
+  Además hay que resolver, sin enumerar frases a mano, la colisión con lo que el
+  flujo ya usa para otra cosa: "listo" cierra los ítems, "a crédito" es la forma
+  de pago, "en dólares" la moneda, "no" contesta el IVA.
 
 - [x] **Tool de PDF** (`GET /v2/comprobantes/pdf`) — hecha: `biller_obtener_pdf`
   en `src/tools/obtenerPdf.ts`. También es la que alimenta el documento adjunto

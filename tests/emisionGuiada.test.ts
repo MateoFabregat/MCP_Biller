@@ -21,6 +21,7 @@ import {
   construirSubmenuMoneda,
   construirSubmenuReceptor,
   interpretarPaso,
+  interpretarRespuestaLibre,
   separarDireccionCiudad,
   siguientePaso,
   sugiereDolares,
@@ -359,6 +360,323 @@ describe("qué preguntar ahora", () => {
     // tiene el comprobante entero delante.
     expect(segundoCompleto.paso).toBe("confirmar");
     expect(segundoCompleto.listo).toBe(true);
+  });
+
+  // --- El agujero en el MEDIO -------------------------------------------
+  //
+  // Regresión de un bug fiscal real. `siguientePaso` miraba SOLO el último
+  // ítem, así que con `[{A,100}, {B sin precio}, {C,300}]` decía "confirmar,
+  // listo" — el último estaba completo—. El borrador salía con dos líneas (A y
+  // C, porque la del medio se filtra), y el agente, al que `completar` le pide
+  // los conceptos "en el mismo orden en que la dijo", le ponía el concepto B a
+  // la línea de C: un concepto equivocado sobre una línea de un CFE real ante
+  // DGI, y nada avisaba.
+  //
+  // La propiedad que sostienen estos tres tests es una sola: el flujo no puede
+  // decir "confirmar" con un ítem incompleto en NINGUNA posición.
+  const BASE_ITEMS: EstadoEmision = {
+    clase_receptor: "consumidor_final",
+    sin_receptor: true,
+    fecha_emision: HOY,
+    moneda: "UYU",
+    forma_pago: 1,
+    montos_brutos: true,
+    indicador_facturacion: 3,
+  };
+
+  it("un ítem sin precio EN EL MEDIO no deja pasar a confirmar", () => {
+    const s = siguientePaso({
+      ...BASE_ITEMS,
+      items: [
+        { concepto: "Bolsa de harina", cantidad: 2, precio: 100 },
+        { concepto: "Portland", cantidad: 1 },
+        { concepto: "Arena", cantidad: 1, precio: 300 },
+      ],
+    });
+    expect(s.paso).toBe("precio");
+    expect(s.listo).toBe(false);
+    // Y la pregunta tiene que señalar CUÁL: "el ítem 2", no el último.
+    expect(s.pregunta).toContain("ítem 2");
+    expect(s.pregunta).not.toContain("ítem 3");
+  });
+
+  it("un ítem sin concepto EN EL MEDIO se pregunta por su precio, que es lo que el usuario reconoce", () => {
+    const s = siguientePaso({
+      ...BASE_ITEMS,
+      items: [
+        { concepto: "Bolsa de harina", cantidad: 2, precio: 100 },
+        { cantidad: 1, precio: 250 },
+        { concepto: "Arena", cantidad: 1, precio: 300 },
+      ],
+    });
+    expect(s.paso).toBe("concepto");
+    expect(s.listo).toBe(false);
+    // El que carga desde el mostrador no reconoce "el ítem 2"; reconoce el
+    // precio que acaba de decir. El concepto NO se puede ecoar (ver el
+    // comentario de `siguientePaso`), así que el ancla es el número.
+    expect(s.pregunta).toContain("250");
+  });
+
+  it("la cola cerrada se descarta solo si NO tiene nada: una línea con precio no se tira sola", () => {
+    // El descarte de la cola existe para que abrir un ítem por error no trance
+    // el flujo. Descartaba toda la cola SIN CONCEPTO, y eso se llevaba puesta
+    // la línea con precio: `[{Café,1200},{precio:250}]` cerrado decía
+    // "confirmar, listo" y facturaba $1.200 en vez de $1.450, sin una palabra.
+    const conPlata = siguientePaso({
+      ...BASE_ITEMS,
+      items_cerrados: true,
+      items: [
+        { concepto: "Café", cantidad: 1, precio: 1200 },
+        { cantidad: 1, precio: 250 },
+      ],
+    });
+    expect(conPlata.listo).toBe(false);
+    expect(conPlata.paso).toBe("concepto");
+    // La pregunta la nombra por su plata, y la salida tocable dice cuánto saca:
+    // un descarte de plata tiene que ser una decisión leída.
+    expect(conPlata.pregunta).toContain("250");
+    // El id lleva a QUÉ línea apunta —posición y precio—, para que un toque
+    // tardío sobre un borrador ya cambiado no saque otra cosa.
+    expect(conPlata.interactivo?.botones.map((b) => b.id)).toEqual([
+      "emision:item:descartar:2:250",
+    ]);
+    expect(conPlata.interactivo?.botones[0]?.titulo).toContain("250");
+
+    // La cola VACÍA se sigue descartando igual que siempre: es el ➕ tocado por
+    // error, y no hay nada que perder.
+    const colaVacia = siguientePaso({
+      ...BASE_ITEMS,
+      items_cerrados: true,
+      items: [{ concepto: "Café", cantidad: 1, precio: 1200 }, {}],
+    });
+    expect(colaVacia.paso).toBe("confirmar");
+    expect(colaVacia.listo).toBe(true);
+  });
+
+  it("el texto crudo NO contesta las preguntas de ítem: eso lo manda el agente", () => {
+    // Se probó al revés —ramas de `concepto` y `precio` en
+    // `interpretarRespuestaLibre`— y salió caro: "no sé" y "ni idea" quedaban
+    // impresos como la descripción de una línea de un CFE, "bolsas 25kg" (que
+    // lleva dígitos) trancaba la conversación en silencio, y cada frase que el
+    // flujo usa para otra cosa había que enumerarla a mano. Que el server
+    // parsee castellano es trabajo que el modelo ya hace bien: el camino es que
+    // el agente mande `items: [{ concepto: "bolsas 25kg" }]`.
+    //
+    // Este test fija esa frontera para que no vuelva por accidente. El hueco
+    // que deja está anotado en TODO_NEXT.md (P1), con los casos que tendría que
+    // aguantar el día que se haga bien.
+    for (const texto of ["medialunas", "60", "bolsas 25kg", "no sé"]) {
+      expect(interpretarRespuestaLibre(texto, "concepto").paso, texto).toBe("ninguna");
+      expect(interpretarRespuestaLibre(texto, "precio").paso, texto).toBe("ninguna");
+    }
+  });
+
+  it("un 🗑️ que llega tarde no saca la línea equivocada NI se queda mudo", async () => {
+    // El id del botón lleva la posición y el precio que decía el mensaje. Si el
+    // borrador cambió en el medio, no se toca nada — y se contesta, que es la
+    // otra mitad: un botón que no hace nada ni dice nada es el número mudo.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const SESION = "+59899151620";
+    await handleEmisionGuiada(
+      {
+        sesion: SESION,
+        clase_receptor: "consumidor_final",
+        sin_receptor: true,
+        montos_brutos: true,
+        indicador_facturacion: 3,
+        items: [{ concepto: "Café", cantidad: 1, precio: 1200 }, { precio: "250" }],
+      },
+      ctx,
+    );
+    // El agente manda la descripción que el usuario dictó, y RECIÉN DESPUÉS
+    // llega el 🗑️ que había quedado arriba en el chat.
+    await handleEmisionGuiada(
+      { sesion: SESION, items: [{ concepto: "Café" }, { concepto: "Medialunas" }] },
+      ctx,
+    );
+    const tarde = JSON.parse(
+      (
+        await handleEmisionGuiada({ sesion: SESION, mensaje: "emision:item:descartar:2:250" }, ctx)
+      ).content[0]!.text,
+    );
+    // Las dos líneas siguen: no se sacó ninguna.
+    expect(tarde.comprobante_borrador.items).toHaveLength(2);
+    expect(tarde.pregunta).toContain("ya no está");
+    expect(tarde.warnings.join(" ")).toContain("NO se descartó nada");
+  });
+
+  it("el mismo estado pasando por '↩️ Volver así' tampoco pierde los $250", async () => {
+    // Los dos arreglos no se pueden contradecir: `item_cancelar` conserva a
+    // propósito el ítem con precio, y antes ponía `items_cerrados` — que era
+    // justo lo que hacía que el flujo lo tirara. El botón que decía proteger la
+    // plata la condenaba.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const SESION = "+59899151617";
+    await handleEmisionGuiada(
+      {
+        sesion: SESION,
+        clase_receptor: "consumidor_final",
+        sin_receptor: true,
+        montos_brutos: true,
+        indicador_facturacion: 3,
+        items: [{ concepto: "Café", cantidad: 1, precio: 1200 }, { cantidad: 1, precio: "250" }],
+      },
+      ctx,
+    );
+    const vuelto = JSON.parse(
+      (
+        await handleEmisionGuiada({ sesion: SESION, mensaje: "emision:item:cancelar" }, ctx)
+      ).content[0]!.text,
+    );
+    expect(vuelto.listo_para_requisitos).toBe(false);
+    expect(vuelto.paso).toBe("concepto");
+    expect(vuelto.pregunta).toContain("250");
+
+    // Y si el usuario decide que esa línea no va, la saca LEYENDO el monto.
+    const descartado = JSON.parse(
+      (
+        await handleEmisionGuiada({ sesion: SESION, mensaje: "emision:item:descartar" }, ctx)
+      ).content[0]!.text,
+    );
+    expect(descartado.paso).toBe("confirmar");
+    expect(descartado.comprobante_borrador.items).toEqual([
+      { cantidad: 1, precio: 1200, indicador_facturacion: 3 },
+    ]);
+    expect(descartado.warnings.join(" ")).toContain("descartó");
+  });
+
+  it('"lo de siempre" con una BONIFICACIÓN al final no tranca ni la infla', async () => {
+    // La bonificación se escribe al final de una factura de verdad, así que
+    // repetirla dejaba el flujo pidiendo el precio de una línea que ya valía
+    // $0: "0" no salía del paso, "listo" y "no va" tampoco, y el paso `precio`
+    // no tiene botones — el número mudo. Y la única salida que funcionaba era
+    // peor: contestar "60" convertía la bonificación en una línea de $60 y "lo
+    // de siempre" salía $13.060 en vez de $13.000.
+    const ventaCopiada = {
+      id: 1,
+      tipo_comprobante: 111,
+      moneda: "UYU",
+      total: 13_000,
+      estado: "Aceptado DGI",
+      fecha_emision: "2026-08-10 10:00:00",
+      cliente: { documento: "210000000011", razon_social: "PEREZ SA" },
+      montos_brutos: 1,
+      items: [
+        { cantidad: 2, concepto: "bolsas de harina", precio: 6500, indicador_facturacion: 3 },
+        { cantidad: 1, concepto: "Bonificación", precio: 0, indicador_facturacion: 3 },
+      ],
+    };
+    const { ctx } = makeCtx({ impl: () => [ventaCopiada] });
+    const r = JSON.parse(
+      (
+        await handleEmisionGuiada(
+          { sesion: "+59899151621", repetir_ultima_de: "210000000011", forma_pago: 1 },
+          ctx,
+        )
+      ).content[0]!.text,
+    );
+    expect(r.paso).toBe("confirmar");
+    expect(r.listo_para_requisitos).toBe(true);
+    // Y las DOS líneas viajan, la bonificada incluida y con su $0 intacto.
+    expect(r.comprobante_borrador.items).toEqual([
+      { cantidad: 2, precio: 6500, indicador_facturacion: 3 },
+      { cantidad: 1, precio: 0, indicador_facturacion: 3 },
+    ]);
+  });
+
+  it("una bonificación a $0 en el medio NO es un agujero: el flujo sigue de largo", () => {
+    // La contracara de la regla: del ítem del medio importa lo que hace daño
+    // —que el borrador no lo pueda mandar—, y una línea a $0 se manda. Frenar
+    // ahí sería preguntarle el precio a algo que el usuario ya contestó, y peor
+    // todavía: "0" no puede sacarlo de esa pregunta. Es el estado que deja
+    // `repetir_ultima_de` sobre una factura con una línea bonificada.
+    const s = siguientePaso({
+      ...BASE_ITEMS,
+      items: [
+        { concepto: "Servicio", cantidad: 1, precio: 1000 },
+        { concepto: "Bonificación", cantidad: 1, precio: 0 },
+        { concepto: "Flete", cantidad: 1, precio: 300 },
+      ],
+    });
+    expect(s.paso).toBe("confirmar");
+    expect(s.listo).toBe(true);
+
+    // Y del ÚLTIMO sí se sigue preguntando el precio, igual que siempre: ese
+    // puede ser uno recién abierto al que todavía no se le puso nada.
+    const alFinal = siguientePaso({
+      ...BASE_ITEMS,
+      items: [
+        { concepto: "Servicio", cantidad: 1, precio: 1000 },
+        { concepto: "Bonificación", cantidad: 1, precio: 0 },
+      ],
+    });
+    expect(alFinal.paso).toBe("precio");
+  });
+
+  it("con items_cerrados el agujero del MEDIO tampoco pasa: la cola se descarta, el medio no", () => {
+    // H1 de la revisión fiscal. `siguientePaso` filtraba TODOS los ítems sin
+    // concepto cuando el usuario ya había tocado "listo", así que veía dos
+    // ítems completos y decía "confirmar" — mientras `borradorComprobante`, que
+    // no mira `items_cerrados`, cortaba en el del medio y mandaba UNA línea de
+    // tres. El CFE salía por $100 en vez de $450 después de leer "ya tengo
+    // todo".
+    const conAgujero: EstadoEmision = {
+      ...BASE_ITEMS,
+      items_cerrados: true,
+      items: [
+        { concepto: "Bolsa de harina", cantidad: 2, precio: 100 },
+        { cantidad: 1, precio: 250 },
+        { concepto: "Arena", cantidad: 1, precio: 300 },
+      ],
+    };
+    const s = siguientePaso(conAgujero);
+    expect(s.listo).toBe(false);
+    expect(s.paso).toBe("concepto");
+    expect(s.pregunta).toContain("250");
+
+    // Lo mismo con un ítem vacío en el medio, que además lleva salida tocable:
+    // sin ella la pregunta no tendría cómo contestarse con un toque.
+    const conVacio = siguientePaso({
+      ...conAgujero,
+      items: [
+        { concepto: "Bolsa de harina", cantidad: 2, precio: 100 },
+        {},
+        { concepto: "Arena", cantidad: 1, precio: 300 },
+      ],
+    });
+    expect(conVacio.listo).toBe(false);
+    expect(conVacio.interactivo?.botones.map((b) => b.id)).toEqual(["emision:item:cancelar"]);
+
+    // Y la COLA se sigue descartando igual que siempre: es lo que evita que
+    // abrir un ítem por error trance el flujo para siempre.
+    const conColaAbierta = siguientePaso({
+      ...conAgujero,
+      items: [{ concepto: "Bolsa de harina", cantidad: 2, precio: 100 }, {}],
+    });
+    expect(conColaAbierta.paso).toBe("confirmar");
+    expect(conColaAbierta.listo).toBe(true);
+  });
+
+  it("dos agujeros se preguntan de a uno, en el orden en que el usuario los dijo", () => {
+    const conDos: EstadoEmision = {
+      ...BASE_ITEMS,
+      items: [
+        { concepto: "Bolsa de harina", cantidad: 2 },
+        { concepto: "Portland", cantidad: 1, precio: 200 },
+        { cantidad: 1, precio: 300 },
+      ],
+    };
+    const primero = siguientePaso(conDos);
+    expect(primero.paso).toBe("precio");
+    expect(primero.pregunta).toContain("ítem 1");
+
+    // Tapado el primero, aparece el segundo. Sin esto, un flujo que arregla un
+    // agujero por vez podría declarar listo al tapar el primero.
+    const items = [...conDos.items!];
+    items[0] = { ...items[0]!, precio: 100 };
+    const segundo = siguientePaso({ ...conDos, items });
+    expect(segundo.paso).toBe("concepto");
+    expect(segundo.listo).toBe(false);
   });
 
   it("NUNCA se queda sin próximo paso, para cualquier estado parcial", () => {
@@ -1072,6 +1390,54 @@ describe("➕ Otro ítem: del preview al ítem siguiente y de vuelta", () => {
     expect(listo.paso).toBe("confirmar");
     expect(listo.comprobante_borrador.items).toHaveLength(2);
     expect(listo.comprobante_borrador.items[1]).toMatchObject({ precio: 50, cantidad: 3 });
+  });
+
+  it("un ítem vacío EN EL MEDIO también tiene salida, y no se lleva la plata puesta", async () => {
+    // Desde que el flujo dejó de esconder los agujeros del medio, un ítem que
+    // quedó abierto ahí adentro tiene que poder descartarse de un toque: si no,
+    // la pregunta por su descripción se repite sin salida tocable. Y el mismo
+    // toque NO puede tirar un ítem que ya tiene precio: esa plata la dijo el
+    // usuario.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const SESION = "+59899151617";
+    const trancado = JSON.parse(
+      (
+        await handleEmisionGuiada(
+          {
+            sesion: SESION,
+            clase_receptor: "consumidor_final",
+            sin_receptor: true,
+            montos_brutos: true,
+            indicador_facturacion: 3,
+            items_cerrados: true,
+            items: [
+              { concepto: "Café", cantidad: 1, precio: 100 },
+              {},
+              { concepto: "Medialuna", cantidad: 2, precio: 60 },
+            ],
+          },
+          ctx,
+        )
+      ).content[0]!.text,
+    );
+    expect(trancado.paso).toBe("concepto");
+    expect(trancado.listo_para_requisitos).toBe(false);
+    // El borrador corta en el agujero, y lo dice.
+    expect(trancado.comprobante_borrador.items).toHaveLength(1);
+    expect(trancado.warnings.join(" ")).toContain("medio cargar");
+
+    const vuelto = JSON.parse(
+      (
+        await handleEmisionGuiada({ sesion: SESION, mensaje: "emision:item:cancelar" }, ctx)
+      ).content[0]!.text,
+    );
+    // Descartado el vacío del medio, las dos líneas reales viajan — y en su
+    // orden, que es lo que sostiene el copiado de conceptos por posición.
+    expect(vuelto.paso).toBe("confirmar");
+    expect(vuelto.comprobante_borrador.items).toEqual([
+      { cantidad: 1, precio: 100, indicador_facturacion: 3 },
+      { cantidad: 2, precio: 60, indicador_facturacion: 3 },
+    ]);
   });
 
   it("tocar ➕ por error tiene salida: el flujo no se tranca", async () => {

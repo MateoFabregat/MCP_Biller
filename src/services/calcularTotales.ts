@@ -152,7 +152,26 @@ export function calcularTotales(body: ComprobanteBody): TotalesEstimados {
       if (indicador !== null) {
         netoPorIndicador.set(indicador, (netoPorIndicador.get(indicador) ?? 0) + neto);
       }
-      if (iva > 0) {
+      // LA CONDICIÓN ES SOBRE LA TASA, NO SOBRE EL SIGNO DEL IVA.
+      //
+      // Decía `iva > 0`, y lo que esa guarda quería evitar está bien: sin
+      // ninguna condición, una línea exenta (indicador 1, 5, 10…) o una con
+      // tasa indeterminable (indicador 4, `tasa === null` → 0) abre la clave
+      // "0" y el preview imprime una fila "IVA 0%: $0" que no significa nada
+      // (`formatearTotales` hace una fila por entrada de `iva_por_tasa`).
+      //
+      // Pero preguntando por el IMPORTE también se descartaba el IVA NEGATIVO,
+      // y eso ya no es cosmético: desde que una línea con precio negativo puede
+      // viajar —un descuento de mostrador, que `ItemSchema` acepta porque no
+      // restringe el signo—, su neto restaba del subtotal y su IVA se perdía.
+      // $1.000 menos un descuento de $200 al 22% daba TOTAL 836,07 en vez de
+      // 800: el humano aprueba por WhatsApp un total que no es el del CFE, el
+      // tope de `write/limiteMonto.ts` se evalúa contra el número inflado, y el
+      // IVA discriminado que se muestra está mal.
+      //
+      // Con la tasa como condición, la línea exenta sigue sin abrir bucket y el
+      // descuento al 22% suma su IVA negativo en el bucket del 22%.
+      if (tasaEfectiva > 0) {
         const clave = String(round2(tasaEfectiva * 100));
         ivaPorTasa[clave] = round2((ivaPorTasa[clave] ?? 0) + iva);
       }
@@ -253,6 +272,38 @@ export function calcularTotales(body: ComprobanteBody): TotalesEstimados {
     supuestos.push("montos_brutos activo: los precios ya incluían IVA y se desagregó hacia atrás.");
   }
 
+  // UN COMPROBANTE CON TOTAL NEGATIVO NO ES UNA VENTA.
+  //
+  // Desde que una línea negativa puede viajar, un descuento más grande que la
+  // venta da vuelta el signo del comprobante entero. Eso no es un e-Ticket: lo
+  // que devuelve plata al cliente es una NOTA DE CRÉDITO, con su propio tipo de
+  // CFE y su propia numeración ante DGI. El preview lo mostraba como una venta
+  // normal con un número raro, y el tope de monto no lo frena porque compara en
+  // valor absoluto. No se bloquea acá —esta función estima, no autoriza— pero
+  // el que aprueba tiene que leerlo antes del total.
+  const totalEstimado = subtotal + totalIva;
+  if (totalEstimado < 0) {
+    advertencias.push(
+      `El TOTAL da negativo (${importe(round2(totalEstimado), body.moneda ?? null)}): los ` +
+        "descuentos superan a la venta. Un comprobante que devuelve plata NO es una factura ni un " +
+        "e-Ticket, es una nota de crédito (tipo 102/112). Revisá las líneas con precio negativo " +
+        "antes de emitir.",
+    );
+  }
+  // Un bucket de IVA íntegramente negativo: hay líneas a esa tasa y todas
+  // restan. Se MUESTRA igual —esconder plata del preview es peor que mostrar un
+  // número incómodo— pero se dice, porque casi siempre es una devolución
+  // cargada como línea suelta en vez de como nota de crédito.
+  for (const [tasa, monto] of Object.entries(ivaPorTasa)) {
+    if (monto < 0) {
+      advertencias.push(
+        `El IVA neto de la tasa ${tasa}% queda negativo ` +
+          `(${importe(monto, body.moneda ?? null)}): a esa tasa las líneas que restan pesan más ` +
+          "que las que suman. Si era una devolución, corresponde una nota de crédito.",
+      );
+    }
+  }
+
   return {
     moneda: body.moneda ?? null,
     subtotal: round2(subtotal),
@@ -260,7 +311,7 @@ export function calcularTotales(body: ComprobanteBody): TotalesEstimados {
     total_iva: round2(totalIva),
     ajustes_globales: round2(ajustesGlobales),
     detalle_ajustes_globales: detalleAjustes,
-    total: round2(subtotal + totalIva),
+    total: round2(totalEstimado),
     total_retenciones_percepciones: round2(totalRetenciones),
     lineas,
     exacto,
@@ -352,6 +403,21 @@ const MAX_CHARS_PREVIEW = 900;
 const MAX_CONCEPTO_PREVIEW = 24;
 
 /** "$" o "U$S". Mismo criterio que `simboloMoneda` de la emisión guiada. */
+/**
+ * Un importe como se escribe en Uruguay, con el SIGNO ADELANTE DEL SÍMBOLO:
+ * "−$1.300", nunca "$-1.300".
+ *
+ * Vive al lado del símbolo y no adentro de `formatearTotales` porque lo usan los
+ * dos lados: las filas del preview y las advertencias que van abajo. Cuando cada
+ * uno tenía el suyo, el mensaje decía "TOTAL −$400" y dos renglones más abajo
+ * "(-400)" —guión ASCII, sin moneda—, que es la misma plata escrita de dos
+ * formas en el mismo mensaje.
+ */
+function importe(n: number, moneda: string | null): string {
+  const sim = simbolo(moneda);
+  return n < 0 ? `−${sim}${formatearUy(-n)}` : `${sim}${formatearUy(n)}`;
+}
+
 function simbolo(moneda: string | null): string {
   const m = (moneda ?? "UYU").toUpperCase();
   if (m === "USD") return "U$S";
@@ -419,10 +485,15 @@ export function describirSupuestos(ctx: ContextoPreview): string {
  * que el mensaje se trunque justo donde está el total.
  */
 export function formatearTotales(t: TotalesEstimados, ctx: ContextoPreview = {}): string {
-  const sim = simbolo(t.moneda);
-  const plata = (n: number): string => `${sim}${formatearUy(n)}`;
   // El signo va ADELANTE del símbolo, como se escribe: "−$1.300", no "$−1.300".
-  const conSigno = (n: number): string => (n < 0 ? `−${plata(-n)}` : `+${plata(n)}`);
+  // Vale para TODAS las filas y no solo para la del ajuste global: las dos salen
+  // en el mismo mensaje, muchas veces pegadas, y dos convenciones de signo en
+  // filas contiguas se leen como dos monedas distintas. Es el MISMO helper que
+  // usan las advertencias del cálculo, por lo mismo.
+  const plata = (n: number): string => importe(n, t.moneda);
+  // Lo mismo, pero declarando también el "+": un ajuste sin signo no se
+  // distingue de una línea más.
+  const conSigno = (n: number): string => (n < 0 ? plata(n) : `+${plata(n)}`);
 
   const visibles = t.lineas.slice(0, ctx.max_lineas ?? MAX_LINEAS_PREVIEW);
   const ocultas = t.lineas.length - visibles.length;

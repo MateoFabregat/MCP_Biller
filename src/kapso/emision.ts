@@ -121,6 +121,25 @@ export interface ItemEnCurso {
    * resumen de confirmación (ver `ContextoPreview.precios_ambiguos`).
    */
   precio_ambiguo?: boolean;
+  /**
+   * true cuando el precio NO es un hueco: salió de un comprobante ya emitido.
+   *
+   * Lo pone `repetir_ultima_de` sobre los ítems que copia, y existe por un solo
+   * caso que sin él no tiene salida: la línea BONIFICADA. Una factura con
+   * "Bonificación $0" al final se repite tal cual, pero `itemIncompleto` trata
+   * un precio 0 como "todavía no me lo dijeron" y el flujo pedía el precio de
+   * esa línea… que ya estaba dicho. Contestar "0" no salía del paso, "listo" y
+   * "no va" tampoco, y el paso `precio` no tiene botones: el número mudo. Y la
+   * salida que sí funcionaba era peor —contestar "60" convertía la bonificación
+   * en una línea de $60 y "lo de siempre" salía $13.060 en vez de $13.000—.
+   *
+   * NO es un campo del CFE y no entra al borrador. Y no lo puede mandar el
+   * agente: no está en el schema de la tool, lo pone solo el server al copiar.
+   * Si el agente reenvía `items` explícitos, la marca se pierde y el flujo
+   * vuelve a preguntar — que es lo correcto: ese precio ya no viene de la
+   * factura vieja sino del modelo.
+   */
+  precio_copiado?: boolean;
 }
 
 /**
@@ -570,6 +589,63 @@ export function construirSubmenuConceptoExtra(): InteractivoBotones {
 }
 
 /**
+ * La salida de una línea que tiene plata cargada y no tiene descripción.
+ *
+ * Es OTRO botón que "↩️ Volver así", y la diferencia es la que importa: aquel
+ * descarta un ítem donde no se cargó nada, así que no puede perder nada; este
+ * saca una línea que el usuario mencionó. Por eso el botón NOMBRA lo que saca
+ * —"🗑️ Sacar $250"— en vez de decir "volver": un descarte de plata tiene que
+ * ser una decisión leída, no el efecto lateral de un botón genérico.
+ *
+ * Sin este botón la pregunta no tiene salida tocable: "↩️ Volver así" no puede
+ * sacar un ítem con precio (y hace bien), así que el usuario que no se acuerda
+ * qué era esa línea se queda en la misma pregunta para siempre.
+ */
+export function construirSubmenuLineaSinDescripcion(
+  plata: string | null,
+  ubicacion?: { posicion: number; precio?: number },
+): InteractivoBotones {
+  // EL MONTO NO SE RECORTA NUNCA. NI UN DÍGITO.
+  //
+  // El título de un botón de WhatsApp son 20 caracteres, y esto decía
+  // `\`🗑️ Sacar ${plata}\`.slice(0, 20)`. Con "$12.500.000" eso deja
+  // "🗑️ Sacar $12.500.00", que en Uruguay —donde el punto es de miles— se lee
+  // $12.500,00: el usuario toca un botón que dice doce mil quinientos y saca
+  // una línea de doce millones y medio. Es exactamente el error de lectura que
+  // `services/importe.ts` existe para prevenir, reintroducido en el eco.
+  //
+  // Por eso lo que se achica es el TEXTO, en dos escalones, y si ni así entra
+  // se cae al genérico: el monto sigue escrito entero en el cuerpo, que no
+  // tiene tope de 20.
+  const titulo = ((): string => {
+    if (plata === null) return "🗑️ Sacar esa línea";
+    for (const candidato of [`🗑️ Sacar ${plata}`, `🗑️ ${plata}`]) {
+      if (candidato.length <= 20) return candidato;
+    }
+    return "🗑️ Sacar esa línea";
+  })();
+
+  // El id ata el botón a la línea que el usuario está leyendo. Ver `interpretarPaso`.
+  const id =
+    ubicacion === undefined
+      ? `${PREFIJO_PASO}item:descartar`
+      : `${PREFIJO_PASO}item:descartar:${ubicacion.posicion}:` +
+        `${ubicacion.precio === undefined ? "" : ubicacion.precio}`;
+
+  return {
+    tipo: "botones",
+    encabezado: "¿Qué era esa línea?",
+    cuerpo:
+      plata === null
+        ? "Me quedó una línea sin descripción. Decime qué era y la pongo en el comprobante.\n\n" +
+          "Si no va, la saco."
+        : `Me quedó una línea de ${plata} sin descripción. Decime qué era y la pongo en el ` +
+          `comprobante.\n\nSi esa línea no va, la saco y seguimos.`,
+    botones: [{ id, titulo }],
+  };
+}
+
+/**
  * Contado o crédito. Define si la factura entra en la cuenta corriente.
  *
  * YA NO ES UN PASO: el default es contado y sale escrito en el preview. Se
@@ -741,6 +817,7 @@ export type RespuestaPaso =
   | { paso: "item_otro" }
   | { paso: "item_listo" }
   | { paso: "item_cancelar" }
+  | { paso: "item_descartar"; posicion?: number; precio?: number }
   | { paso: "iva_otro" }
   | { paso: "iva"; indicador_facturacion: number }
   | { paso: "moneda"; moneda: string }
@@ -894,6 +971,27 @@ export function interpretarPaso(raw: string): RespuestaPaso {
       if (valor === "otro") return { paso: "item_otro" };
       if (valor === "listo") return { paso: "item_listo" };
       if (valor === "cancelar") return { paso: "item_cancelar" };
+      // "🗑️ Sacar $250": el descarte EXPLÍCITO de una línea con plata. Es un id
+      // propio y no un `cancelar` con otro texto justamente porque hace algo
+      // que `cancelar` tiene prohibido hacer.
+      //
+      // Y LLEVA ADENTRO A QUÉ LÍNEA APUNTABA: `descartar:2:250` es la línea 2,
+      // la de $250. Es la misma idea que el `confirmation_token` adentro del
+      // botón de emitir —el id ata lo que se toca a lo que se leyó—, en chico:
+      // sin eso, un botón tocado diez minutos después, con el borrador ya
+      // cambiado, sacaba lo que hubiera quedado en esa posición o no hacía
+      // nada y el chat quedaba mudo.
+      if (valor === "descartar") return { paso: "item_descartar" };
+      if (valor.startsWith("descartar:")) {
+        const partes = valor.split(":");
+        const posicion = Number(partes[1]);
+        const precio = partes[2] === "" || partes[2] === undefined ? NaN : Number(partes[2]);
+        return {
+          paso: "item_descartar",
+          ...(Number.isInteger(posicion) && posicion > 0 ? { posicion } : {}),
+          ...(Number.isFinite(precio) ? { precio } : {}),
+        };
+      }
       return { paso: "ninguna" };
     case "iva": {
       const codigo = Number(valor);
@@ -1134,6 +1232,112 @@ export function aplicarDefaults(
 
 // --- Qué sigue --------------------------------------------------------------
 
+/**
+ * ¿Esta línea puede ir al CFE? Concepto cargado y precio numérico.
+ *
+ * EL SIGNO NO SE MIRA, Y ES A PROPÓSITO: `ItemSchema` (`biller/cfeSchema.ts`)
+ * no lo restringe, y una bonificación a $0 o un descuento de -$200 son líneas
+ * de mostrador perfectamente emitibles —`repetirUltima` las copia tal cual de
+ * la factura anterior—. Es la condición con la que `borradorComprobante` decide
+ * dónde cortar, y por eso vive acá: si el flujo y el borrador tuvieran cada uno
+ * la suya, volvería a existir un ítem que uno da por listo y el otro descarta.
+ */
+export function itemPuedeViajar(item: ItemEnCurso): boolean {
+  return (item.concepto ?? "") !== "" && typeof item.precio === "number";
+}
+
+/**
+ * ¿Le queda algo por preguntar a este ítem?
+ *
+ * Es una pregunta DISTINTA de la de arriba y por eso son dos funciones: acá el
+ * precio tiene que ser positivo, porque un ítem que quedó en cero es
+ * probablemente uno al que todavía no se le puso el precio y vale la pena
+ * repreguntarlo. Confundir las dos —usar esta para decidir qué línea sale—
+ * trunca el borrador en una línea bonificada y factura de menos.
+ */
+export function itemIncompleto(item: ItemEnCurso): boolean {
+  if (!itemPuedeViajar(item)) return true;
+  // Un precio 0 es un hueco… salvo que venga de un comprobante real, donde 0 es
+  // una bonificación que alguien ya escribió. Ver `precio_copiado`.
+  return (item.precio ?? 0) <= 0 && item.precio_copiado !== true;
+}
+
+/**
+ * Un ítem donde el usuario no dijo NADA: ni descripción, ni precio, ni cantidad.
+ *
+ * Es el que se abre por error tocando ➕, y el único que se puede descartar sin
+ * preguntarle a nadie, porque no hay nada que perder. Todo lo demás —un precio,
+ * o incluso solo una cantidad que alguien tipeó— se pregunta o se descarta con
+ * un botón que dice qué está sacando.
+ *
+ * LA CANTIDAD CUENTA, aunque no sea plata: `[{A,100}, {cantidad:2}, {C,300}]`
+ * pasando por "↩️ Volver así" hacía desaparecer el "2" que el usuario había
+ * tipeado. Un dato dicho no se descarta en silencio ni cuando es barato.
+ */
+export function itemSinNada(item: ItemEnCurso): boolean {
+  return (
+    (item.concepto ?? "") === "" &&
+    typeof item.precio !== "number" &&
+    typeof item.cantidad !== "number"
+  );
+}
+
+/**
+ * Los ítems que el flujo y el borrador consideran vivos, en su orden original.
+ *
+ * ES UN PREFIJO DE `estado.items`, SIEMPRE, y de ahí sale toda la seguridad de
+ * este módulo: los conceptos se copian por posición (el agente desde
+ * `completar`, y `completarDesdeSesion` desde el borrador guardado), así que
+ * cualquier cosa que saque un ítem DEL MEDIO le pone la descripción de una
+ * línea a otra en un CFE real. Sacar de la cola no mueve ninguna posición.
+ *
+ * Qué se saca: cerrados los ítems ("listo"), la cola de los que no tienen NADA
+ * cargado. Ni uno más. Antes se descartaba toda la cola sin concepto, y eso se
+ * llevaba puesto el ítem con precio y sin descripción: `[{Café,1200},
+ * {precio:250}]` decía "ya tengo todo" y facturaba $1.200 en vez de $1.450.
+ *
+ * La usan `siguientePaso` (para decidir qué preguntar) y `aplicarAlItemEnCurso`
+ * (para decidir a quién le pertenece un botón sin índice). Que sea UNA función
+ * es el punto: cuando cada una recortaba distinto, el flujo preguntaba por un
+ * ítem y el dato aterrizaba en otro.
+ */
+export function itemsVigentes(estado: EstadoEmision): ItemEnCurso[] {
+  const todos = estado.items ?? [];
+  if (estado.items_cerrados !== true) return [...todos];
+  let hasta = todos.length;
+  while (hasta > 0 && itemSinNada(todos[hasta - 1]!)) hasta -= 1;
+  return todos.slice(0, hasta);
+}
+
+/**
+ * Cuál es el ítem que se está cargando. -1 si no falta nada.
+ *
+ * ES LA DEFINICIÓN ÚNICA DE "EL ÍTEM EN CURSO", y existe como función exportada
+ * para que no haya una segunda: `siguientePaso` decide qué preguntar con esto y
+ * `aplicarAlItemEnCurso` decide a quién aplicarle un botón sin índice con esto
+ * mismo. Cuando cada uno tenía la suya —"el último"— un dato podía aterrizar en
+ * una línea distinta de la que el usuario estaba contestando.
+ *
+ * LOS DEL MEDIO Y EL ÚLTIMO NO SE MIDEN CON LA MISMA VARA, y no es un parche:
+ *
+ *   · De los del MEDIO importa una sola cosa, que es la que hace daño: que el
+ *     borrador no los pueda mandar. Ahí se corren las posiciones y una línea
+ *     termina con la descripción de otra. Un ítem del medio a $0 no es eso: el
+ *     usuario dijo cero y siguió cargando, o sea que ya lo contestó, y el
+ *     borrador lo manda igual.
+ *   · Del ÚLTIMO importa además que el precio sea positivo, porque puede ser
+ *     uno recién abierto al que todavía no se le puso nada.
+ *
+ * Así el flujo solo frena por lo mismo que corta el borrador, más la pregunta
+ * de siempre sobre el que se está cargando.
+ */
+export function indiceItemEnCurso(items: ReadonlyArray<ItemEnCurso>): number {
+  const enElMedio = items.findIndex((i, idx) => idx < items.length - 1 && !itemPuedeViajar(i));
+  if (enElMedio !== -1) return enElMedio;
+  const ultimo = items[items.length - 1];
+  return ultimo !== undefined && itemIncompleto(ultimo) ? items.length - 1 : -1;
+}
+
 export interface SiguientePaso {
   paso: PasoEmision;
   /** La pregunta, en castellano, para el caso en que no se mande el interactivo. */
@@ -1287,22 +1491,118 @@ export function siguientePaso(
   // preview la muestra como "1 × concepto". El que dice "2 bolsas" ya la trajo;
   // el que no la dijo casi siempre está vendiendo una.
   //
-  // Si el usuario ya cerró los ítems, los que quedaron a medio cargar se
-  // descartan. Sin esto el flujo se trancaba PARA SIEMPRE: abrir un ítem por
-  // error deja uno vacío, y el chequeo de `concepto` va ANTES que el de
-  // `items_cerrados`. Hoy la salida de ese callejón es el botón "↩️ Volver así"
-  // de `construirSubmenuConceptoExtra`, pero el filtro se conserva: los
-  // borradores viejos traen `items_cerrados` y el invariante vale igual.
-  const items = (estado.items ?? []).filter(
-    (i) => estado.items_cerrados !== true || (i.concepto ?? "") !== "",
-  );
-  const enCurso = items.length === 0 ? undefined : items[items.length - 1];
-  const ordinal = items.length <= 1 ? "" : ` del ítem ${items.length}`;
+  // CERRADOS LOS ÍTEMS SE DESCARTA LA COLA, Y SOLO LA COLA.
+  //
+  // El descarte existe para no trancar el flujo PARA SIEMPRE: abrir un ítem por
+  // error deja uno vacío, el chequeo de `concepto` va ANTES que el de
+  // `items_cerrados`, y sin esto se le pregunta su descripción hasta el fin de
+  // los tiempos. Hoy además está el botón "↩️ Volver así"
+  // (`construirSubmenuConceptoExtra`), pero los borradores guardados traen
+  // `items_cerrados` de antes y el invariante vale igual.
+  //
+  // LO QUE SÍ CAMBIÓ ES EL ALCANCE: antes se filtraba TODO ítem sin concepto,
+  // en cualquier posición, y eso escondía el agujero del medio justo en el
+  // camino donde el usuario ya tocó "listo". Con
+  // `[{Harina,100}, {sin concepto,250}, {Arena,300}]` y `items_cerrados`, esta
+  // función veía dos ítems completos y decía "confirmar, listo" mientras
+  // `borradorComprobante` —que NO filtra por `items_cerrados`— cortaba en el
+  // del medio y mandaba UNA línea de tres: el CFE salía por $100 en vez de
+  // $450, y el usuario había leído "ya tengo todo".
+  //
+  // Descartando solo la COLA las dos funciones vuelven a coincidir por
+  // construcción, y no por casualidad: las dos se quedan con un PREFIJO de
+  // `estado.items`. Sacar del final no corre ninguna posición; sacar del medio
+  // las corre todas, que es la raíz de esta familia de bugs.
+  const items = itemsVigentes(estado);
+
+  // EL ÍTEM EN CURSO ES EL PRIMERO QUE FALTA, NO EL ÚLTIMO.
+  //
+  // Miraba solo el último, y ese era un bug fiscal con nombre y apellido: con
+  // `[{A,100}, {B sin precio}, {C,300}]` el último está completo, así que esto
+  // devolvía "confirmar, listo". El borrador sale con DOS líneas —la del medio
+  // la filtra `borradorComprobante`, porque un ítem sin precio produce un 422—
+  // y entonces la correspondencia por posición entre el borrador y los ítems
+  // guardados se corre una casilla. Esa correspondencia es de lo único que
+  // disponen tanto el agente (a quien `completar` le pide los conceptos "en el
+  // mismo orden en que la dijo") como `completarDesdeSesion`, que rellena
+  // `items[i].concepto` desde `itemsGuardados[i]`: la línea de $300 terminaba
+  // con el concepto de B impreso en un CFE real ante DGI, y nada avisaba.
+  //
+  // EL INVARIANTE, DICHO CON PRECISIÓN: `listo` solo puede salir cuando el
+  // borrador va a llevar TODAS las líneas que quedaron después de descartar la
+  // cola cerrada. O sea: ningún ítem incompleto ENTRE medio de otros. Lo que se
+  // descarta al cerrar es un sufijo, y descartar un sufijo no le cambia la
+  // posición a ninguna línea que sí viaja.
+  //
+  // Y el primero es el que hay que preguntar, no el último: el que carga desde
+  // el mostrador dijo las cosas en un orden, y preguntar salteado obliga a
+  // reconstruir de cuál se está hablando.
+  const indice = indiceItemEnCurso(items);
+  const enCurso = indice === -1 ? items[items.length - 1] : items[indice];
+  // Cuando el agujero está al final —el ítem recién abierto con ➕, que es el
+  // caso de todos los días— la pregunta es EXACTAMENTE la de antes. El
+  // diferencial de este cambio cae solo sobre los estados con un agujero en el
+  // medio, que hasta ahora no se preguntaban nunca.
+  const interior = indice !== -1 && indice < items.length - 1;
+  const ordinal = interior
+    ? // Con un agujero en el medio, el total importa: "el ítem 2" a secas se
+      // confunde con "el segundo que estás cargando ahora".
+      ` del ítem ${indice + 1} de ${items.length}`
+    : items.length <= 1
+      ? ""
+      : ` del ítem ${items.length}`;
 
   if (enCurso === undefined || (enCurso.concepto ?? "") === "") {
-    // Con un ítem completo atrás, este paso es "tocaste ➕": la pregunta lleva
-    // su propia salida. Con ninguno, es la primera pregunta del comprobante y
-    // no hay a qué volver.
+    // UN ÍTEM CON ALGO CARGADO Y SIN DESCRIPCIÓN SE PREGUNTA POR SU PLATA, Y SE
+    // DESCARTA NOMBRÁNDOLA. En cualquier posición, incluida la última.
+    //
+    // Antes el último caía en "¿qué es lo que agregás?" con "↩️ Volver así", y
+    // con los ítems cerrados ni siquiera se preguntaba: se descartaba solo y el
+    // flujo decía "ya tengo todo". `[{Café,1200}, {precio:250}]` facturaba
+    // $1.200 en vez de $1.450 sin una palabra. Ahora el descarte de la cola se
+    // limita a lo que no tiene NADA cargado, así que esta pregunta existe — y
+    // tiene que poder contestarse de un toque sin que el toque tire plata en
+    // silencio: el botón dice cuánto saca.
+    //
+    // EL ANCLA ES EL PRECIO, NO EL CONCEPTO, Y NO POR ESTILO: el concepto no
+    // puede salir del server. Está en `CAMPOS_NO_CONFIABLES` y puede haber
+    // entrado al estado desde la API (`repetir_ultima_de` copia los ítems de un
+    // comprobante ya emitido), así que ecoarlo en `pregunta` —que no lleva
+    // clave envuelta— es justo el agujero que la barrera de salida existe para
+    // tapar. El número lo calculamos nosotros y el usuario lo reconoce igual.
+    if (enCurso !== undefined && !itemSinNada(enCurso)) {
+      const cual = items.length <= 1 ? "" : ` (el ítem ${indice + 1} de ${items.length})`;
+      const plata =
+        typeof enCurso.precio === "number"
+          ? `${simboloMoneda(estado.moneda)}${formatearUy(enCurso.precio)}`
+          : null;
+      return paso({
+        paso: "concepto",
+        pregunta:
+          plata === null
+            ? `Me quedó una línea sin descripción${cual}, con ${enCurso.cantidad} de cantidad. ` +
+              "¿Qué era? Decime solo qué es."
+            : `Me falta saber qué era la línea de ${plata}${cual}. ¿De qué era? Decime solo qué es.`,
+        interactivo: construirSubmenuLineaSinDescripcion(plata, {
+          posicion: indice + 1,
+          ...(typeof enCurso.precio === "number" ? { precio: enCurso.precio } : {}),
+        }),
+      });
+    }
+    if (interior) {
+      // Un ítem del medio sin NADA cargado: se abrió por error y no hay ninguna
+      // plata que perder. La salida de un toque es la misma de siempre.
+      return paso({
+        paso: "concepto",
+        pregunta:
+          `Me quedó vacío el ítem ${indice + 1} de ${items.length}. ¿Qué le vendiste ahí? ` +
+          "Decime solo qué es.",
+        interactivo: construirSubmenuConceptoExtra(),
+      });
+    }
+    // Ítem vacío AL FINAL, que es el caso de todos los días: con uno completo
+    // atrás esto es "tocaste ➕" y la pregunta lleva su propia salida; con
+    // ninguno, es la primera pregunta del comprobante y no hay a qué volver.
     const esAgregado = items.length > 1;
     return paso({
       paso: "concepto",
@@ -1313,7 +1613,13 @@ export function siguientePaso(
     });
   }
 
-  if (typeof enCurso.precio !== "number" || enCurso.precio <= 0) {
+  // EL PRECIO SE PREGUNTA CUANDO HAY UN ÍTEM EN CURSO, y `indiceItemEnCurso` es
+  // quien decide eso. Repetir acá la condición ("precio <= 0") era tener dos
+  // definiciones de lo mismo, y la de acá no sabía de la línea BONIFICADA: un
+  // ítem copiado de una factura real con precio $0 no volvía a `indice` —bien—
+  // pero caía igual en esta pregunta, que no tiene botones y que "0" no
+  // contesta. El número mudo, por una condición duplicada.
+  if (indice !== -1 && (typeof enCurso.precio !== "number" || enCurso.precio <= 0)) {
     return paso({
       paso: "precio",
       pregunta: `¿A qué precio por unidad${ordinal}? Solo el número.`,
@@ -1331,14 +1637,21 @@ export function siguientePaso(
   // con una mitad resuelta: por `repetir_ultima_de`, que copia el indicador de
   // la venta anterior, o por el propio botón "🔢 Otro IVA", que fija la tasa y
   // deja el criterio de precio pendiente.
+  // El precio con el que se pregunta el IVA: el del ítem en curso, salvo que sea
+  // una línea sin plata (una bonificación copiada a $0). "Los $0 que me
+  // pasaste, ¿ya tienen el IVA adentro?" no es una pregunta.
+  const precioMuestra =
+    (enCurso.precio ?? 0) > 0
+      ? enCurso.precio!
+      : (items.find((i) => (i.precio ?? 0) > 0)?.precio ?? enCurso.precio ?? 0);
   const indicador = enCurso.indicador_facturacion ?? estado.indicador_facturacion;
   if (estado.montos_brutos === undefined && indicador === undefined) {
     return paso({
       paso: "iva",
       pregunta:
-        `Los ${simboloMoneda(estado.moneda)}${formatearUy(enCurso.precio)} que me pasaste, ` +
+        `Los ${simboloMoneda(estado.moneda)}${formatearUy(precioMuestra)} que me pasaste, ` +
         "¿ya tienen el IVA adentro? (tomo tasa básica 22% salvo que me digas otra cosa)",
-      interactivo: construirSubmenuIvaFusionado(enCurso.precio, estado.moneda ?? "UYU"),
+      interactivo: construirSubmenuIvaFusionado(precioMuestra, estado.moneda ?? "UYU"),
     });
   }
   if (indicador === undefined) {
@@ -1352,9 +1665,9 @@ export function siguientePaso(
     return paso({
       paso: "precio_incluye_iva",
       pregunta:
-        `Los ${simboloMoneda(estado.moneda)}${formatearUy(enCurso.precio)} que me pasaste, ` +
+        `Los ${simboloMoneda(estado.moneda)}${formatearUy(precioMuestra)} que me pasaste, ` +
         "¿ya tienen el IVA adentro?",
-      interactivo: construirSubmenuMontosBrutos(enCurso.precio, estado.moneda ?? "UYU"),
+      interactivo: construirSubmenuMontosBrutos(precioMuestra, estado.moneda ?? "UYU"),
     });
   }
 

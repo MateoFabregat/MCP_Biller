@@ -421,6 +421,36 @@ Cuatro reglas que sostienen todo lo demás:
    no es un default: es una suposición nuestra impresa en un documento fiscal.
 4. **La jerarquía es una sola y no se invierte:** lo que dijo el usuario > lo
    leído de su texto > el perfil de la casa > el default duro.
+5. **Ningún ítem incompleto en el medio llega a `confirmar`.** El concepto de
+   cada línea se copia POR POSICIÓN (el agente desde `completar`, y
+   `completarDesdeSesion` desde el borrador guardado), así que filtrar uno del
+   medio le pone la descripción de una línea a otra en un CFE real. Por eso
+   `siguientePaso` mira el primer ítem que no podría viajar —no el último— y
+   `borradorComprobante` CORTA ahí en vez de saltearlo. Lo que se descarta al
+   cerrar los ítems es un **sufijo**, y solo de ítems donde no se cargó **nada**
+   (`itemSinNada`): sacar del final no mueve ninguna posición, pero una línea
+   con precio y sin descripción se pregunta —nombrando el monto— y solo se
+   descarta con un botón que dice cuánto saca. Descartarla sola facturaba $1.200
+   en vez de $1.450 sin una palabra.
+   Ojo con el criterio: "¿qué le falta preguntar?" (precio positivo) y "¿esta
+   línea puede viajar?" (precio numérico, sin mirar el signo) son dos preguntas
+   distintas — confundirlas trunca el borrador en una bonificación a $0 y
+   factura de menos. Y si una línea negativa viaja, `calcularTotales` tiene que
+   sumarle su IVA negativo: el neto se acumulaba sin guarda y el IVA detrás de
+   `iva > 0`, así que el total del preview no era el del CFE.
+6. **Lo que se lee del texto va al ítem EN CURSO.** Los ítems que devuelve
+   `extraerPedido` están indexados por el MENSAJE, no por el comprobante:
+   volcarlos desde 0 le pega la respuesta de ahora a la primera línea, y como
+   solo llena huecos no falla por ningún lado. Ancla en
+   `indiceItemEnCurso(itemsVigentes(estado))`, no se mezclan dos líneas con
+   conceptos distintos —por subconjunto de tokens: "agua tónica" y "agua
+   mineral" no son la misma— y sin ítem en curso no se vuelca nada. El `cliente`
+   del texto solo vale mientras la etapa del cliente no haya quedado atrás, y la
+   primera pregunta de ítem ya es "atrás".
+7. **El server no parsea castellano libre para llenar un ítem.** Las preguntas
+   de `concepto` y `precio` las contesta el agente mandando `items` explícito.
+   Se intentó lo contrario y se revirtió: ver `TODO_NEXT.md` (P1) para los siete
+   casos que rompieron, que son la especificación del día que se haga bien.
 
 ### Tocar los números
 
