@@ -224,6 +224,17 @@ export type DgiActividad = z.infer<typeof DgiActividadSchema>;
 export const DgiCertificadoSchema = z.object({
   flag: z.string().nullable(),
   rut: z.string().nullable(),
+  /** Cuerpo del certificado, con o sin la envoltura `RespuestaOK`. */
   certificado: z.unknown().nullable(),
+  /**
+   * Texto de DGI. Valores vistos: "Certificado de Vigencia Anual Habilitado.",
+   * "NO existe Certificado de Vigencia Anual". Es un TERCER estado además de
+   * vigente/vencido: no tener certificado no es lo mismo que tenerlo vencido.
+   */
+  estado: z.string().nullable(),
+  emision: z.string().nullable(),
+  vencimiento: z.string().nullable(),
+  denominacion: z.string().nullable(),
+  tipo_contribuyente: z.string().nullable(),
 });
 export type DgiCertificado = z.infer<typeof DgiCertificadoSchema>;

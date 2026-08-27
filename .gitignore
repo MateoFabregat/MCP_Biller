@@ -16,3 +16,31 @@ biller-mcp-audit.log
 *.log
 .idea/
 .vscode/
+
+# Duplicados de sync (iCloud/Drive)
+*\ 2.ts
+*\ 2.json
+*\ 2.md
+*\ 2.mjs
+*\ 2.yml
+*\ 2.xml
+*\ 2.example
+
+# Logs de auditoría e idempotencia (datos fiscales)
+.biller/
+
+# Stores locales con datos del negocio.
+# `data/` es donde apuntan por defecto BILLER_IDEMPOTENCY_LOG_PATH y
+# BILLER_BORRADOR_STORE_PATH. El de borradores guarda el CONTENIDO de lo que se
+# está por facturar —qué se vendió, a quién, la adenda—: eso no va a un repo.
+data/
+*.jsonl
+!evals/*.jsonl
+
+# Skills de terceros: se restauran con `npx skills add` desde skills-lock.json,
+# que SÍ se versiona (mismo criterio que package-lock vs node_modules). El
+# contenido vendorizado no entra al repo: no lo escribimos nosotros y no lo
+# revisamos en cada diff.
+.agents/
+.claude/skills/
+.claude/settings.local.json

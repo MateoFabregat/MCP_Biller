@@ -11,9 +11,11 @@ import type { BillerConfig } from "../config.js";
 import { logger } from "../logger.js";
 import { BillerApiError, BillerIdempotencyError } from "../utils/errors.js";
 import type { RateLimitClass } from "../utils/rateLimit.js";
+import { enmascararTelefono } from "../security/remitentes.js";
 import type { AuditEntry, AuditSink } from "./audit.js";
 import { payloadHash } from "./confirm.js";
 import { evaluateWriteGate } from "./gate.js";
+import { verificarLimiteMonto, type MontoExplicito } from "./limiteMonto.js";
 import { BillerProductionBlockedError, BillerWriteDisabledError } from "../utils/errors.js";
 import type { IdempotencyStore } from "./idempotency.js";
 import type { PostResult, BillerWriteClient } from "./writeClient.js";
@@ -33,6 +35,20 @@ export interface WriteExecInput {
   idempotencyKey: string;
   allowProduction: boolean;
   rateLimitClass?: RateLimitClass;
+  /**
+   * Teléfono de quien pidió la operación, tal como llegó. Se enmascara acá — una
+   * sola vez y en el borde — para que ningún llamador tenga que acordarse de
+   * hacerlo, que es como termina un número completo en un archivo de log.
+   */
+  remitente?: string;
+  /**
+   * El total de la operación, cuando el payload no lo lleva en la raíz.
+   *
+   * Es el caso de la emisión: un CFE no tiene campo `total`, lo tiene calculado
+   * `calcularTotales`. Sin esto, el tope de monto no aplicaba a la única
+   * operación para la que se escribió. Ver `verificarLimiteMonto`.
+   */
+  montoExplicito?: MontoExplicito;
 }
 
 export interface WriteExecResult {
@@ -48,6 +64,10 @@ export async function executeWrite(
 ): Promise<WriteExecResult> {
   const environment = c.config.environment;
   const payloadSha256 = payloadHash({ payload: input.payload, query: input.query ?? null });
+  const remitente =
+    input.remitente === undefined || input.remitente.trim() === ""
+      ? undefined
+      : enmascararTelefono(input.remitente.replace(/\D/g, ""));
 
   // 1. Gate
   const gate = evaluateWriteGate(c.config, { allowProduction: input.allowProduction });
@@ -60,12 +80,32 @@ export async function executeWrite(
       payloadSha256,
       idempotencyKey: input.idempotencyKey,
       outcome: gate.reason,
+      remitente,
     });
     if (gate.reason === "write_disabled") throw new BillerWriteDisabledError();
     throw new BillerProductionBlockedError();
   }
 
-  // 2. Idempotencia
+  // 2. Tope de monto — antes de la idempotencia a propósito: una operación
+  //    rechazada por monto NO debe consumir la idempotency_key, así el usuario
+  //    puede corregir el importe y reintentar con la misma key.
+  try {
+    verificarLimiteMonto(input.payload, c.config.maxMontos, input.montoExplicito);
+  } catch (err) {
+    c.auditor.record({
+      tool: input.tool,
+      endpoint: input.endpoint,
+      environment,
+      phase: "blocked",
+      payloadSha256,
+      idempotencyKey: input.idempotencyKey,
+      outcome: "monto_excedido",
+      remitente,
+    });
+    throw err;
+  }
+
+  // 3. Idempotencia
   if (c.idempotency.has(input.idempotencyKey)) {
     c.auditor.record({
       tool: input.tool,
@@ -75,11 +115,12 @@ export async function executeWrite(
       payloadSha256,
       idempotencyKey: input.idempotencyKey,
       outcome: "idempotency_replayed",
+      remitente,
     });
     throw new BillerIdempotencyError(input.idempotencyKey);
   }
 
-  // 3. POST — solo el POST queda en el catch que relanza
+  // 4. POST — solo el POST queda en el catch que relanza
   let postResult: PostResult;
   try {
     postResult = await c.writeClient.post({
@@ -100,6 +141,7 @@ export async function executeWrite(
       idempotencyKey: input.idempotencyKey,
       httpStatus: err instanceof BillerApiError ? err.status : undefined,
       outcome: "error",
+      remitente,
     });
     throw err;
   }
@@ -118,6 +160,7 @@ export async function executeWrite(
       idempotencyKey: input.idempotencyKey,
       httpStatus: postResult.status,
       outcome: "ok",
+      remitente,
     });
   } catch (auditErr) {
     logger.warn("No se pudo registrar el audit post-POST.", {
@@ -134,6 +177,7 @@ export async function executeWrite(
       idempotency_key: input.idempotencyKey,
       http_status: postResult.status,
       outcome: "ok",
+      remitente,
     };
   }
 

@@ -1,7 +1,6 @@
 {
   "name": "biller-mcp-server",
   "version": "0.1.0",
-  "private": true,
   "description": "MCP server local, read-only, para la API REST de Biller (facturación electrónica de Uruguay). Solo llamadas HTTP GET.",
   "license": "MIT",
   "type": "module",
@@ -16,13 +15,19 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "start": "node dist/index.js",
+    "start:local": "node --env-file=.env dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "check:readonly": "node scripts/check-readonly.mjs",
-    "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js"
+    "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js",
+    "evals": "npm run build && node scripts/evals-enrutador.mjs",
+    "diagnostico": "npm run build && node --env-file=.env scripts/simular-whatsapp.mjs",
+    "conversar": "npm run build && node --env-file=.env scripts/conversar.mjs",
+    "contrato": "node --env-file=.env scripts/contrato.mjs",
+    "prepack": "npm run build && npm run check:readonly"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -33,5 +38,18 @@
     "tsx": "^4.16.0",
     "typescript": "^5.5.0",
     "vitest": "^2.1.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MateoFabregat/MCP_Biller.git"
+  },
+  "keywords": [
+    "mcp",
+    "biller",
+    "facturacion",
+    "cfe",
+    "dgi",
+    "uruguay",
+    "model-context-protocol"
+  ]
 }

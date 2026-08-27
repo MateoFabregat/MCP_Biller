@@ -6,11 +6,30 @@
 //   ventas      -> suman   (+1)
 //   notas crédito -> restan (-1)
 //   notas débito  -> suman  (+1)
+//   cobranzas   -> NO se suman: son cobro de algo ya facturado (0)
 //   especiales  -> NO se suman automáticamente sin validación (0)
 //   desconocido -> NO se suma; se reporta como warning (0)
+//
+// ⚠️ EL TIPO NO ALCANZA PARA CLASIFICAR. Un recibo (comprobante de cobranza) se
+// emite como e-Ticket (101) o e-Factura (111): mirando solo `tipo_comprobante`
+// es indistinguible de una venta. Lo que lo distingue es
+// `indicador_cobranza_propia = 1`, documentado en GET /v2/comprobantes/obtener:
+//
+//   "Para identificar comprobantes de cobranza, habrá un campo
+//    `indicador_cobranza_propia` que estará en 1 cuando el comprobante
+//    obtenido sea un recibo."
+//
+// Sin ese chequeo, facturar $100 a crédito y cobrarlo con un recibo reporta
+// $200 facturados. Por eso `classifyCfe` recibe el indicador y NO el tipo solo.
 // =============================================================================
 
-export type CfeCategoria = "venta" | "nota_credito" | "nota_debito" | "especial" | "desconocido";
+export type CfeCategoria =
+  | "venta"
+  | "nota_credito"
+  | "nota_debito"
+  | "cobranza"
+  | "especial"
+  | "desconocido";
 
 export interface CfeClassification {
   tipo: number | null;
@@ -55,23 +74,48 @@ const ESPECIALES: Record<number, string> = {
   124: "eRemito de exportación",
 };
 
-/**
- * Familia e-Factura (factura, su NC y su ND, incluyendo exportación y venta por
- * cuenta ajena). En estos tipos DGI exige receptor identificado con RUT. La
- * familia e-Ticket (101/102/103 y similares) admite receptor opcional.
- */
-const EFACTURA_FAMILIA = new Set<number>([
-  111, 112, 113, // e-Factura, NC, ND
-  121, 122, 123, // e-Factura de exportación, NC, ND
-  141, 142, 143, // e-Factura venta por cuenta ajena, NC, ND
-]);
+// NOTA: la familia e-Factura (receptor obligatorio ante DGI) vive en
+// `FAMILIA_EFACTURA` de src/biller/cfeSchema.ts, junto al resto de las reglas de
+// emisión. Este módulo solo clasifica para el resumen de facturación.
 
-/** true si el tipo pertenece a la familia e-Factura (receptor obligatorio). */
-export function esEFactura(tipo: number | null | undefined): boolean {
-  return typeof tipo === "number" && EFACTURA_FAMILIA.has(tipo);
+/**
+ * true cuando el comprobante es un recibo (comprobante de cobranza propia).
+ *
+ * Se compara contra 1 y no por "truthy" porque el campo llega como 0/1 y el 0
+ * es el caso normal: cualquier laxitud acá convierte ventas en cobranzas.
+ */
+export function esCobranza(indicadorCobranzaPropia: number | null | undefined): boolean {
+  return indicadorCobranzaPropia === 1;
 }
 
-export function classifyCfe(tipo: number | null): CfeClassification {
+/** Nombre del tipo, sin clasificar. "" si el tipo no está en ninguna tabla. */
+function etiquetaTipo(tipo: number): string {
+  return VENTAS[tipo] ?? NOTAS_CREDITO[tipo] ?? NOTAS_DEBITO[tipo] ?? ESPECIALES[tipo] ?? "";
+}
+
+/**
+ * @param tipo  `tipo_comprobante` del CFE.
+ * @param indicadorCobranzaPropia  `indicador_cobranza_propia`: 1 = es un recibo.
+ *   Omitirlo hace que un recibo se clasifique como venta (doble conteo): pasalo
+ *   siempre que estés clasificando un comprobante real de la API.
+ */
+export function classifyCfe(
+  tipo: number | null,
+  indicadorCobranzaPropia?: number | null,
+): CfeClassification {
+  // Va primero: el recibo se emite como e-Ticket/e-Factura, así que el tipo lo
+  // clasificaría como venta. El indicador manda sobre la tabla de tipos.
+  if (esCobranza(indicadorCobranzaPropia)) {
+    const base = typeof tipo === "number" && Number.isFinite(tipo) ? etiquetaTipo(tipo) : "";
+    return {
+      tipo,
+      categoria: "cobranza",
+      signo: 0,
+      etiqueta: base === "" ? "Recibo (comprobante de cobranza)" : `Recibo de ${base}`,
+      suma_en_resumen: false,
+    };
+  }
+
   if (tipo === null || tipo === undefined || !Number.isFinite(tipo)) {
     return {
       tipo,

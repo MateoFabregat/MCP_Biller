@@ -10,6 +10,7 @@
 // - Parseo robusto: Biller a veces responde JSON con content-type text/plain.
 // =============================================================================
 
+import { createHash } from "node:crypto";
 import type { BillerConfig } from "../config.js";
 import { logger } from "../logger.js";
 import {
@@ -52,10 +53,30 @@ export class BillerClient {
   private readonly fetchImpl: FetchImpl;
   private readonly rateLimiters: RateLimiters;
 
+  /**
+   * Identidad OPACA de este cliente, para usar como parte de una clave de cache.
+   *
+   * Es un hash de (base URL + token), no el token. Dos motivos: con
+   * multi-empresa, cachear sin distinguir la credencial le serviría a una
+   * empresa los comprobantes de otra —el peor bug posible acá, y silencioso—; y
+   * una clave de cache puede terminar en un log de diagnóstico, donde un token
+   * no tiene nada que hacer.
+   *
+   * Vive en el cliente y no en el llamador a propósito: hay una docena de
+   * lugares que consultan períodos, y "acordate de pasar la clave" es una
+   * convención que alguien va a olvidar. Derivándola de quien hace la request,
+   * no se puede omitir.
+   */
+  readonly cacheId: string;
+
   constructor(
     private readonly config: BillerConfig,
     deps: BillerClientDeps = {},
   ) {
+    this.cacheId = createHash("sha256")
+      .update(`${config.apiBaseUrl}\u0000${config.apiToken}`)
+      .digest("hex")
+      .slice(0, 32);
     this.fetchImpl = deps.fetchImpl ?? globalThis.fetch;
     if (typeof this.fetchImpl !== "function") {
       throw new BillerNetworkError(

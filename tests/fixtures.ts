@@ -3,7 +3,13 @@
 // Fuente: https://francodest-biller-v3-docs.apidocumentation.com/openapi.json
 // =============================================================================
 
-import { detectEnvironment, type BillerConfig } from "../src/config.js";
+import {
+  detectEnvironment,
+  DEFAULT_HTTP_MAX_SESSIONS,
+  DEFAULT_HTTP_SESSION_TTL_MS,
+  TENANT_IMPLICITO,
+  type BillerConfig,
+} from "../src/config.js";
 
 export const TEST_TOKEN = "test-token-SUPER-SECRETO-123";
 
@@ -11,10 +17,26 @@ export function makeConfig(overrides: Partial<BillerConfig> = {}): BillerConfig 
   const base = {
     apiBaseUrl: "https://test.biller.uy",
     apiToken: TEST_TOKEN,
+    sucursales: {},
     timeoutMs: 30_000,
     logLevel: "error",
     writeEnabled: false,
     allowProductionWrites: false,
+    capabilityMode: "read_only" as const,
+    enableIvaEstimado: false,
+    maxMontos: {},
+    httpPort: 8848,
+    httpHost: "127.0.0.1",
+    httpAllowedHosts: [],
+    // Sin Kapso, la barrera de entrada no exige remitente: el default de los
+    // tests es el server de escritorio, no el canal de WhatsApp.
+    remitentesAutorizados: [],
+    wireLiviano: false,
+    // La empresa del proceso: los tests son mono-tenant salvo que digan otra cosa.
+    tenantId: TENANT_IMPLICITO,
+    cacheEnabled: true,
+    httpSessionTtlMs: DEFAULT_HTTP_SESSION_TTL_MS,
+    httpMaxSessions: DEFAULT_HTTP_MAX_SESSIONS,
     ...overrides,
   };
   return {

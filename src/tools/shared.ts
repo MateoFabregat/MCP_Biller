@@ -4,7 +4,9 @@
 
 import { z, type ZodError } from "zod";
 import type { BillerClient } from "../biller/client.js";
-import type { BillerConfig } from "../config.js";
+import type { BillerConfig, ConfigInspection } from "../config.js";
+import type { BorradorStore } from "../kapso/borradorStore.js";
+import type { Metricas } from "../observabilidad/metricas.js";
 import { redactSecrets, toSafeError } from "../utils/errors.js";
 import type { WriteExecContext } from "../write/execute.js";
 
@@ -26,6 +28,49 @@ export interface ToolContext {
   getClient: () => BillerClient;
   /** Contexto de escritura (writeClient + auditor + idempotencia). Lanza si la config es inválida. */
   getWriteContext: () => WriteExecContext;
+  /**
+   * Métricas de uso de ESTA empresa.
+   *
+   * Va en el contexto y no en un singleton por el mismo motivo que el store de
+   * idempotencia: el contexto ya es por tenant. Un registro global haría que la
+   * tool de métricas de una empresa mostrara cuánto usa el sistema la otra, que
+   * es información comercial de un tercero.
+   *
+   * Nunca es `undefined`: cuando no hay que medir, es `METRICAS_NULAS`. Un
+   * `if (metricas)` repetido en quince lugares es la forma más segura de que en
+   * el dieciseisavo falte.
+   */
+  metricas: Metricas;
+  /**
+   * Borradores de emisión a medio cargar de ESTA empresa.
+   *
+   * Por tenant por el mismo motivo que las métricas y la idempotencia, pero acá
+   * el motivo es más duro: un store compartido dejaría que una empresa leyera,
+   * con solo adivinar una clave de sesión, qué está por facturarle otra y a
+   * quién. Es el dato comercial más sensible que maneja el server.
+   */
+  getBorradorStore: () => BorradorStore;
+  /**
+   * Diagnóstico de la configuración DE ESTA EMPRESA, ya sin secretos.
+   *
+   * POR QUÉ ESTÁ ACÁ Y NO EN UNA ESTRUCTURA LATERAL. El `env` con el que se
+   * construyó un contexto es parte de lo que ese contexto ES: en multi-empresa
+   * cada tenant es un overlay de variables, y `inspectConfig()` sin argumento
+   * lee `process.env`. Una tool que quiera diagnosticarse y no encuentre esto en
+   * la interfaz va a caer en `process.env` — y el health check de una empresa va
+   * a contestar con el RUT, la URL de la API y la ruta del audit log de otra.
+   * Ese fue el bug; que el dato viva en la interfaz es lo que impide repetirlo.
+   *
+   * POR QUÉ `ConfigInspection` Y NO EL `env` CRUDO. Exponer el env sería la
+   * versión trivial y la peor: `env.BILLER_API_TOKEN` queda al alcance de
+   * cualquiera de las treinta y cuatro tools, y con él la posibilidad de que un
+   * token se cuele en una respuesta, en un warning o en un log. `ConfigInspection`
+   * ya nace sin secretos (el token viaja como `hasToken: boolean`) y es
+   * exactamente lo que el diagnóstico necesita: la decisión de qué es seguro
+   * mostrar se toma UNA vez, en `config.ts`, y no en cada consumidor. Interfaz
+   * chica, decisión adentro.
+   */
+  inspeccionar: () => ConfigInspection;
 }
 
 export const WRITE_ANNOTATIONS = {

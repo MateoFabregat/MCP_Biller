@@ -26,8 +26,16 @@ jobs:
       - name: Read-only guard (sin POST/PUT/PATCH/DELETE)
         run: npm run check:readonly
 
-      - name: Typecheck + build
+      - name: Typecheck (src + tests)
+        run: npm run typecheck
+
+      - name: Build
         run: npm run build
 
       - name: Tests
         run: npm test
+
+      # El benchmark del enrutador (V5.3): un score, no un pass/fail por frase.
+      # El corpus son mensajes reales; si un cambio lo baja del 95%, no entra.
+      - name: Evals del enrutador (score >= 95%)
+        run: node scripts/evals-enrutador.mjs --min 95

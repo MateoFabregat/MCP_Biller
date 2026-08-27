@@ -30,7 +30,7 @@ describe("BillerClient", () => {
     await client.get({ path: "/v2/comprobantes/obtener", query: { sucursal: "1" } });
 
     expect(fetchImpl).toHaveBeenCalledOnce();
-    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(init.method).toBe("GET");
     expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TEST_TOKEN}`);
     expect(url).toBe("https://test.biller.uy/v2/comprobantes/obtener?sucursal=1");

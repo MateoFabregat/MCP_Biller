@@ -87,13 +87,50 @@ export class BillerNetworkError extends BillerError {
   }
 }
 
+/**
+ * Traduce el cuerpo de un 422 de Biller a texto legible.
+ *
+ * Formato documentado:
+ *   [{ "field": "Comprobantes[cliente_sucursal]",
+ *      "message": ["Debe especificar receptor por ser mayor a 5000 UI."] }]
+ *
+ * Devuelve `null` si el cuerpo no tiene esa forma (entonces se usa el snippet crudo).
+ */
+export function parseValidationBody(body: string | undefined): string | null {
+  if (!body) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+
+  const partes: string[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const e = entry as { field?: unknown; message?: unknown };
+    const campo = typeof e.field === "string" ? e.field : "(campo)";
+    const mensajes = Array.isArray(e.message)
+      ? e.message.filter((m): m is string => typeof m === "string")
+      : typeof e.message === "string"
+        ? [e.message]
+        : [];
+    if (mensajes.length === 0) return null;
+    partes.push(`${campo}: ${mensajes.join(" ")}`);
+  }
+  return partes.length > 0 ? partes.join(" | ") : null;
+}
+
 /** Respuesta no-2xx de la API de Biller, con mensaje claro por código. */
 export class BillerApiError extends BillerError {
   public readonly status: number;
   public readonly bodySnippet?: string;
 
   constructor(status: number, bodySnippet?: string) {
-    super("api", BillerApiError.messageForStatus(status));
+    const base = BillerApiError.messageForStatus(status);
+    const detalle = status === 422 ? parseValidationBody(bodySnippet) : null;
+    super("api", detalle !== null ? `${base} Biller reportó: ${detalle}` : base);
     this.status = status;
     this.bodySnippet = bodySnippet;
   }

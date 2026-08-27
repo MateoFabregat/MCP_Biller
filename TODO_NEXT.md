@@ -2,6 +2,9 @@
 
 Cosas pendientes para la siguiente iteración, ordenadas por prioridad.
 
+Lo que ya está hecho queda marcado `[x]` con el archivo donde vive, en vez de
+borrarse: saber qué se resolvió y dónde vale más que una lista corta.
+
 ## P0 — Antes de poner en producción
 
 - [ ] **Validar endpoints de escritura contra la API real de test.**
@@ -9,6 +12,10 @@ Cosas pendientes para la siguiente iteración, ordenadas por prioridad.
   Hacer una emisión real en `test.biller.uy` con `biller_emitir_comprobante`
   (dry-run → confirm) y confirmar que Biller acepta el payload.
   Idem para `biller_crear_cliente`, `biller_crear_recibo`, etc.
+  Parcial: los preview salieron contra el server real (dry-run, 28/07) y de ahí
+  salieron hallazgos que contradicen al OpenAPI —`direccion`/`ciudad`
+  obligatorias, 422 por `numero_interno` inexistente— anotados en
+  [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) §7. Falta el `confirm` real.
 
 - [ ] **Confirmar soporte server-side del header `Idempotency-Key`.**
   El MCP envía el header pero no hay garantía de que Biller lo procese.
@@ -19,18 +26,172 @@ Cosas pendientes para la siguiente iteración, ordenadas por prioridad.
   Cambiar `private: true` en `package.json` cuando se quiera distribuir.
   Agregar `README` con instrucciones de instalación global (`npm i -g biller-mcp`).
 
+## P0 — Hallazgos fiscales sin resolver (encontrados agosto 2026, NO tocados)
+
+Los dos salieron de la ola de refactors y ninguno se arregló ahí a propósito:
+mezclar un arreglo de conducta con un refactor de diferencial cero hace
+imposible saber qué movió qué. Los dos terminan en un número o un texto
+equivocado en un documento fiscal.
+
+- [x] **El resumen y los rankings pueden contestar totales distintos para los
+  mismos comprobantes.** RESUELTO (agosto 2026): quedó UNA sola
+  `clasificarEstado`, en `src/services/estadoDgi.ts`, y el criterio de qué suma
+  vive en `estaAceptado` del mismo archivo — solo "Aceptado DGI", el estado
+  desconocido tampoco cuenta. Cambió el resumen (los rankings ya usaban ese
+  criterio) y también `cobrado_por_moneda`, que ahora filtra igual que el total.
+  La exclusión se avisa en el resumen (cuántos y cuánto sumaban), en los
+  rankings de clientes, sucursales y productos —en los dos primeros el warning
+  decía "se contaron igual" y era falso; el de productos no existía—, en la
+  comparación de períodos, en las cohortes y en la posición de IVA. El aviso del
+  resumen lleva el monto separado en lo que sumaba y lo que restaba, porque una
+  nota de crédito excluida no deja el total corto sino INFLADO. De paso quedó
+  explícito en `alertas.ts` que un estado ausente no se alerta pero un texto
+  irreconocible SÍ (una redacción nueva de rechazo tiene que verse igual). Lo
+  fija `tests/estadoDgi.test.ts`, incluido un test que falla si vuelve a haber
+  dos `clasificarEstado`. Sigue abierto el punto de abajo.
+  Descripción original del bug, para el contexto:
+  `src/services/resumenFacturacion.ts:167` y `src/services/estadoDgi.ts:49`. El
+  resumen excluye solo lo que sabe rechazado (`=== "no_aceptado"`) y **cuenta el
+  estado desconocido**, con el argumento escrito de que "la ausencia del dato no
+  es evidencia de rechazo". Las otras siete implementaciones —rankings,
+  comparación, cohortes, posición IVA, y la regla unificada de
+  `comprobanteFilters`— filtran con `!== "aceptado"` y **lo excluyen**. Un
+  comprobante con `estado: null` suma en un lado y no en el otro. Falta la
+  decisión: el criterio fijado es contar solo "Aceptado DGI" para coincidir con
+  lo que muestra Biller, lo que da la razón a los rankings, pero si el `null`
+  viene de un problema de la API y no del comprobante, excluirlo da un total
+  bajo sin motivo. Decidir y unificar en un commit propio, con el diferencial
+  que muestre qué comprobantes cambian de lado.
+- [ ] **"Envío no corresponde" no cuenta en ningún total, y probablemente
+  debería.** `esVentaValida` (`src/services/estadoDgi.ts`) sostiene que es una
+  venta real y facturada, y que excluirla porque no viajó individualmente a DGI
+  es confundir el canal de reporte con la validez del documento. Ningún total le
+  hace caso: todos usan `estaAceptado`, que compara contra "Aceptado DGI" a
+  secas. Se dejó así a propósito en la unificación de criterios de agosto de
+  2026 —cambiar dos criterios fiscales en el mismo commit hace imposible saber
+  cuál movió qué número— y la diferencia está pineada en
+  `tests/estadoDgi.test.ts`. Lo que hay que medir antes de decidir: en un
+  comercio de tickets chicos, los e-Ticket por debajo de 5.000 UI quedan en ese
+  estado, así que contarlos puede mover el total de casi toda la facturación, y
+  hay que confirmar contra el panel de Biller si Biller los cuenta o no.
+
+- [x] **Un ítem incompleto en el MEDIO le corría los conceptos a las demás
+  líneas.** Resuelto en agosto de 2026. `siguientePaso` miraba solo el ÚLTIMO
+  ítem, así que con `[{A,100},{B sin precio},{C,300}]` decía `confirmar`, el
+  borrador salía con dos líneas y el agente —al que `completar` le pide los
+  conceptos "en el mismo orden en que la dijo"— le ponía el concepto B a la
+  línea de C: un concepto equivocado en una línea de un CFE real.
+  Ahora el ítem en curso es el PRIMERO que falta (`itemsVigentes` +
+  `indiceItemEnCurso`, `src/kapso/emision.ts`), el borrador CORTA en el primer
+  ítem que no puede viajar en vez de saltearlo (`src/kapso/borradorEmision.ts`)
+  —así lo que se entrega es siempre un PREFIJO, que es la propiedad de la que
+  depende `completarDesdeSesion` para rellenar por posición— y el invariante
+  está verificado por fuerza bruta, no declarado.
+  De la misma tanda salieron cuatro cosas que no estaban en el pedido: el IVA de
+  una línea negativa se descartaba (`calcularTotales` acumulaba el neto sin
+  guarda y el IVA detrás de `iva > 0`, así que el preview inflaba el total), una
+  respuesta de texto aterrizaba en el ítem equivocado (`rellenarDesdePedido`
+  indexaba por el ítem del MENSAJE y no por el ítem en curso: "sumale 3 tortas a
+  450" pegaba el 3 en la línea de arriba y dejaba un cliente llamado "sumale"),
+  dos productos que comparten una palabra se mezclaban ("3 agua mineral a 60"
+  sobre "Agua tónica"), y `repetir_ultima_de` sobre una factura con una línea
+  bonificada trancaba el flujo.
+
+## P0 — Lo que quedó abierto de esa tanda (ninguno mueve un número por sí solo)
+
+Salieron de la quinta revisión fiscal. Se anotan en vez de arreglarse porque
+ninguno produce un importe equivocado: trancan el flujo o ecoan feo. El repro de
+cada uno está acá para no tener que volver a encontrarlo.
+
+- [ ] **Una línea a $0 o negativa AL FINAL, mandada por el agente, tranca el
+  flujo.** Con `items: [{Venta,1,"1.000"},{Descuento,1,"-200"}]` el paso queda en
+  `precio`, sin botones, y NO sale con nada: reenviar el precio,
+  `emision:item:listo`, `items_cerrados:true`, el texto "listo", el texto "-200"
+  y `emision:item:cancelar` devuelven los siete la misma pregunta. Es
+  preexistente —`itemIncompleto` exige precio positivo—, y el escape que se
+  agregó (`precio_copiado`) cubre solo el camino de `repetir_ultima_de`. Ojo:
+  hoy está PINEADO como conducta buscada en `tests/emisionGuiada.test.ts` ("del
+  ÚLTIMO sí se sigue preguntando el precio"), así que arreglarlo es cambiar ese
+  test a propósito.
+
+- [ ] **`precio_copiado` no se pierde con `items` explícitos, al revés de lo que
+  promete su propio contrato.** El comentario de `src/kapso/emision.ts` dice que
+  si el agente reenvía `items` la marca se pierde y el flujo vuelve a preguntar;
+  `fusionarItems` (`src/kapso/borradorStore.ts`) fusiona campo por campo y la
+  marca sobrevive. Resultado: una línea a $0 aceptada en silencio, con
+  `warnings: []`. Corrección: si `encima[i].precio !== undefined`, borrar
+  `precio_copiado`.
+
+- [ ] **En el paso `cliente`, un producto queda como razón social.** Con
+  `clase_receptor: "consumidor_final"`, sin `sin_receptor` y sin ítems,
+  "coca 2 litros" deja `nombre_cliente: "coca"` e `items[0].concepto: "litros"`,
+  y `completar` le ordena al agente ponerlo en `cliente.razon_social`. Es la pata
+  que quedó de la guarda de etapa; la de `sin_receptor` sí está cerrada.
+
+- [ ] **`$-200` en la pregunta y en el botón de descarte.** Con una línea sin
+  descripción y precio negativo sale "Me falta saber qué era la línea de $-200" y
+  `🗑️ Sacar $-200`. Es la convención que la misma entrega prohibió y testeó en
+  `calcularTotales` (`not.toContain("$-")`). Usar el mismo helper.
+
+- [ ] **Los precios huérfanos se ecoan crudos.** `src/kapso/borradorEmision.ts`
+  arma el aviso con `descartados.join(", ")`, así que $6.500 sale como "(6500)".
+  El mismo changeset escribió que "un eco escrito '5000' en un país que escribe
+  '5.000' es un eco que el usuario no puede verificar".
+
+- [ ] **Sobreconteo cosmético en los avisos de estado.** `cohortes.ts` y
+  `comparacion.ts` incrementan `sinEstado` ANTES del filtro de `total`/`moneda`
+  nulos, así que el aviso puede nombrar comprobantes que igual quedaban afuera
+  por otro motivo. No mueve ningún total.
+
 ## P1 — Mejoras prioritarias
 
-- [ ] **Tool de PDF** (`GET /v2/comprobantes/pdf`) — devolver base64 como resource MCP.
-  Útil para descargar/previsualizar un comprobante emitido directamente desde Claude.
+- [ ] **El texto crudo no contesta las preguntas de `concepto` ni de `precio`.**
+  `interpretarRespuestaLibre` (`src/kapso/emision.ts`) entiende las respuestas de
+  los pasos con botones —receptor, cliente, moneda, IVA, fecha, tasa de cambio—
+  y para `concepto` y `precio` cae en `default → ninguna`. O sea: si el usuario
+  escribe "medialunas" cuando se le pregunta qué vendió, o "60" cuando se le
+  pregunta el precio, el server no hace nada con eso. **El camino que sí anda es
+  el normal**: el agente manda `items: [{ concepto: "medialunas", precio: 60 }]`
+  explícito, que es su trabajo y lo hace bien.
+  Se intentó al revés en agosto de 2026 —dos ramas nuevas acá— y se revirtió: que
+  el server parsee castellano libre duplica un trabajo que ya hace el modelo, y
+  cada filtro que hay que agregarle es un modo de falla FISCAL nuevo. Lo que rompió,
+  y que es la especificación de lo que tiene que aguantar el día que se haga bien:
+  · "no sé", "ni idea", "no me acuerdo", "nada" → quedaban impresos como la
+    descripción de una línea de un CFE real.
+  · "bolsas 25kg", "leche 1L", "harina 000" → el filtro de dígitos (puesto para
+    frenar "eran 3 no 2") los rechazaba, y la conversación se trancaba en
+    silencio en la pregunta más común del flujo.
+  · un mensaje de más de 80 caracteres (el largo de `items.concepto` en Biller)
+    → rechazado sin decir por qué.
+  Además hay que resolver, sin enumerar frases a mano, la colisión con lo que el
+  flujo ya usa para otra cosa: "listo" cierra los ítems, "a crédito" es la forma
+  de pago, "en dólares" la moneda, "no" contesta el IVA.
+
+- [x] **Tool de PDF** (`GET /v2/comprobantes/pdf`) — hecha: `biller_obtener_pdf`
+  en `src/tools/obtenerPdf.ts`. También es la que alimenta el documento adjunto
+  de WhatsApp (subida multipart a Kapso + `media_id`).
 
 - [ ] **Validar paginación.** `pagination_supported: false` es conservador.
   Confirmar con Biller si `/v2/comprobantes/obtener` pagina y con qué parámetros.
   Si hay paginación nativa, el `limit` local pasa a ser innecesario.
 
 - [ ] **`biller_listar_clientes`** — pendiente de endpoint GET documentado.
-  Cuando Biller documente un endpoint GET de clientes propios, agregar la tool
-  siguiendo el mismo patrón que las otras de lectura.
+  Vive declarada en `PENDING_TOOLS` (`src/tools/register.ts`) justamente para que
+  "no registrada" sea una decisión visible y no un olvido. Cuando Biller documente
+  el GET de clientes propios, agregarla con el patrón de las otras de lectura.
+
+- [ ] **Webhook de Kapso multi-empresa.** `atenderWebhook`
+  (`src/transport/http.ts`) usa la config **del proceso**: el capability mode y
+  la allowlist de remitentes con los que decide son los de la empresa de las
+  variables de arriba, no los de la empresa a la que le escribieron. En un
+  despliegue con varios números eso es la barrera de entrada de A validando un
+  mensaje dirigido a B. El dato para resolverlo ya llega: el `phone_number_id`
+  del receptor viene en `value.metadata` del evento de Kapso, y `normalizarEvento`
+  (`src/kapso/webhook.ts`) lo **descarta**. Falta leerlo, mapearlo al tenant por
+  su `KAPSO_PHONE_NUMBER_ID` y atender con el contexto de esa empresa —y decidir
+  qué hacer con un `phone_number_id` que no mapea a ninguna, que tiene que ser
+  ignorar, no caer al proceso.
 
 - [ ] **Filtros nativos de moneda/cliente en emitidos.**
   Confirmar si la API acepta `moneda` o `rut_receptor` como query params;
@@ -38,20 +199,70 @@ Cosas pendientes para la siguiente iteración, ordenadas por prioridad.
 
 ## P2 — Robustez y observabilidad
 
-- [ ] **Audit log persistente entre sesiones.**
-  Actualmente el `IdempotencyStore` es in-memory. Para producción se puede
-  serializar el store a disco (mismo archivo que `BILLER_AUDIT_LOG_PATH`).
+- [x] **Audit log persistente entre sesiones.** Hecho: `FileIdempotencyStore`
+  (append-only en disco, `BILLER_IDEMPOTENCY_LOG_PATH`) en
+  `src/write/idempotency.ts`, y el audit log en `src/write/audit.ts`
+  (`BILLER_AUDIT_LOG_PATH`). El archivo guarda key + timestamp, nunca el payload.
+  Ojo: en serverless el disco no sobrevive — ver `src/transport/serverless.ts`.
 
 - [ ] **Rate-limit configurable por env.**
   Los límites actuales (1 req/seg DGI, 30 req/seg resto) están hardcodeados en
   `src/utils/rateLimit.ts`. Podrían exponerse como variables opcionales.
 
-- [ ] **Transporte Streamable HTTP** (además de stdio).
-  Permite desplegar el MCP como servicio HTTP para integraciones sin subprocess.
+- [x] **Transporte Streamable HTTP** (además de stdio). Hecho:
+  `src/transport/http.ts` (sesiones + Bearer propio `BILLER_HTTP_AUTH_TOKEN`,
+  `/healthz` sin auth) y `src/transport/serverless.ts` para el despliegue sin
+  proceso largo. Es el transporte por el que entra el Agent Node de Kapso.
+  Ampliado en agosto de 2026: las sesiones ya no viven para siempre. `RegistroSesiones`
+  (mismo archivo) les pone TTL de 30 min sin uso y techo de 200 con LRU, y al
+  desalojar **cierra** el transporte —sacarlo del mapa sin cerrarlo es la misma
+  fuga con el contador bajando—. Antes solo se soltaban con el cierre limpio del
+  cliente, así que cada túnel cortado dejaba un transporte y un `McpServer` vivos
+  para siempre.
 
-- [ ] **Resource MCP con catálogo de tipos de CFE.**
-  Exponer la tabla de tipos (101 e-Ticket, 111 e-Factura, etc.) como un resource
-  para que el asistente pueda consultarla sin hacer una llamada a la API.
+- [x] **Aislamiento entre empresas del overlay de tenants.** Hecho:
+  `src/tenants/registry.ts`. Lo que un tenant no declara ya no se hereda en
+  silencio: lo sensible se **borra** (`VARIABLES_QUE_NO_SE_HEREDAN`), las rutas
+  de persistencia y los topes `BILLER_MAX_MONTO_*` son **fatales al arrancar** si
+  el proceso los define y el tenant no, y `BILLER_API_TOKEN` o un archivo de
+  persistencia repetidos entre tenants tampoco arrancan. Alrededor: el health
+  check reporta la config del tenant y degrada sin remitente verificado
+  (`src/tools/health.ts` + `ToolContext.inspeccionar` en `src/tools/shared.ts`), la
+  barrera de entrada inyecta el remitente verificado en el input
+  (`src/security/entrada.ts`) y el borrador de emisión se ata a él
+  (`identidadDeConversacion` en `src/security/remitentes.ts`). El presupuesto del
+  cache es por empresa (`src/biller/cacheVentanas.ts`) y la línea de log de
+  métricas lleva `empresa` (`src/observabilidad/metricas.ts`).
+
+- [ ] **Llevar a `config.ts` lo que hoy se lee suelto del entorno.** Dos cosas
+  quedaron leyéndose con un helper local en `src/transport/http.ts`
+  (`BILLER_HTTP_SESSION_TTL_MS`, `BILLER_HTTP_MAX_SESSIONS`), fuera de la
+  configuración validada y por lo tanto fuera del overlay de tenants. Hoy no
+  duele —son parámetros del proceso, no de una empresa—, pero es el mismo camino
+  por el que `BILLER_CACHE_ENABLED` se volvió la única variable imposible de
+  pisar.
+
+- [ ] **Enchufar la habilitación de cache por empresa.**
+  `registrarHabilitacionCache` (`src/services/periodo.ts`) está exportada y
+  **nadie la llama**: el mecanismo quedó listo y el comportamiento de hoy
+  intacto, o sea que `BILLER_CACHE_ENABLED` sigue siendo del proceso. Falta que
+  quien arma el registro de tenants la registre resolviendo por `cacheId`.
+  Mientras tanto, apagar el cache para diagnosticar un total que no cierra en una
+  empresa lo apaga para las veinte.
+
+- [ ] **Derivar las rutas de persistencia de un `BILLER_DATA_DIR` + `tenant.id`.**
+  Hoy cada tenant tiene que declarar las tres a mano (`BILLER_AUDIT_LOG_PATH`,
+  `BILLER_IDEMPOTENCY_LOG_PATH`, `BILLER_BORRADOR_STORE_PATH`) y el registro se
+  limita a verificar que no falten ni se repitan. Con un directorio base y el id
+  del tenant, el caso correcto sale solo y la validación pasa a ser la red y no
+  la única defensa: ahora mismo, dar de alta una empresa son tres rutas que
+  alguien escribe a mano y una de ellas se puede copiar de la entrada de arriba.
+
+- [ ] **Resource MCP con catálogo de tipos de CFE.** Sigue pendiente como
+  *resource*: no hay ni un `registerResource` en `src/`. Lo que sí existe son dos
+  tools que responden lo mismo sin pegarle a la API (`biller_catalogo_datos`,
+  `biller_requisitos_comprobante`), así que el valor que queda es el de la forma
+  —un resource se cachea del lado del cliente—, no el del dato.
 
 - [ ] **Tests de integración contra `test.biller.uy`** (ci opcional).
   Un suite separado con token real y `process.env.CI_INTEGRATION=true` que
@@ -59,13 +270,17 @@ Cosas pendientes para la siguiente iteración, ordenadas por prioridad.
 
 ## P3 — Deuda técnica conocida
 
-- [ ] **Campo `estado`/`anulacion` en emitidos** — Biller no lo expone en el GET.
-  El `resumen_facturacion_periodo` no puede excluir anulados confiablemente.
-  Warning documentado; resolver cuando Biller agregue el campo.
+- [x] **Campo `estado` en emitidos** — sí viene en el GET y ya se usa:
+  `src/biller/normalize.ts` lo mapea y `solo_aceptados` (default `true`) cuenta
+  solo "Aceptado DGI", que es el criterio con el que Biller arma sus totales.
+  Queda abierto lo otro: no hay un campo de **anulación**, así que una venta
+  anulada por NC se descuenta por el signo negativo de la nota, no por estado.
 
-- [ ] **Estructura de `cliente` en emitidos** — a veces `[]`, a veces objeto.
-  El filtro `cliente_rut` falla silenciosamente si la estructura cambia.
-  Normalizar cuando se confirme la forma estable.
+- [x] **Estructura de `cliente` en emitidos** — normalizado: `extractFromCliente`
+  en `src/biller/normalize.ts` tolera las dos formas (`[]` y objeto), así que el
+  filtro `cliente_rut` ya no depende de cuál mande la API.
 
 - [ ] **`defaultSucursalId` en tools de escritura** — aplicado en `emitirComprobante`,
-  pendiente de evaluar si aplica también a `crearRecibo`.
+  pendiente de evaluar si aplica también a `crearRecibo`. (Verificado: en las
+  tools de lectura el fallback `a.sucursal ?? config.defaultSucursalId` está en
+  todas; en `src/tools/write/` no.)

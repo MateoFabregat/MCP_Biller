@@ -1,0 +1,11 @@
+{
+  "name": "biller",
+  "owner": { "name": "Biller", "email": "mateo@biller.uy" },
+  "plugins": [
+    {
+      "name": "biller",
+      "source": "./",
+      "description": "Facturación electrónica de Biller (Uruguay) en lenguaje normal. Requiere BILLER_API_TOKEN en el entorno."
+    }
+  ]
+}

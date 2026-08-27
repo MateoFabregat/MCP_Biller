@@ -236,11 +236,11 @@ export function normalizeComprobantesEmitidos(raw: unknown): ComprobanteEmitido[
 }
 
 /**
- * Mejor esfuerzo para extraer un RUT del campo `cliente` (estructura NO
+ * Busca la primera clave presente de `candidates` dentro de `cliente`, que puede
+ * venir como objeto o como array de un elemento (la estructura NO está
  * documentada). Devuelve null si no se puede determinar de forma confiable.
  */
-export function extractClienteRut(cliente: unknown): string | null {
-  const candidates = ["rut", "ruc", "RUT", "RUC", "documento", "rut_receptor", "doc"];
+function extractFromCliente(cliente: unknown, candidates: string[]): string | null {
   const search = (obj: Record<string, unknown>): string | null => {
     for (const key of candidates) {
       if (key in obj) {
@@ -260,6 +260,35 @@ export function extractClienteRut(cliente: unknown): string | null {
     }
   }
   return null;
+}
+
+/** Mejor esfuerzo para extraer un RUT del campo `cliente`. */
+export function extractClienteRut(cliente: unknown): string | null {
+  return extractFromCliente(cliente, [
+    "rut",
+    "ruc",
+    "RUT",
+    "RUC",
+    "documento",
+    "rut_receptor",
+    "doc",
+  ]);
+}
+
+/**
+ * Mejor esfuerzo para extraer el nombre del receptor. Sin esto los reportes de
+ * cobranzas solo pueden mostrar un RUT, que no le sirve a nadie para llamar por
+ * teléfono. Se prefiere la razón social sobre el nombre de fantasía.
+ */
+export function extractClienteNombre(cliente: unknown): string | null {
+  return extractFromCliente(cliente, [
+    "razon_social",
+    "razonSocial",
+    "RazonSocial",
+    "nombre",
+    "nombre_fantasia",
+    "nombreFantasia",
+  ]);
 }
 
 // --- Comprobantes recibidos -------------------------------------------------
@@ -340,11 +369,38 @@ function extractActividades(value: unknown): DgiActividad["actividades"] {
   });
 }
 
+/**
+ * Certificado único de DGI.
+ *
+ * DOS FORMAS, y la que documenta el OpenAPI no es la que devuelve la API.
+ *
+ *   Documentada: { Flag: "OK", RUT, RespuestaOK: { Estado, Emision, Vencimiento, … } }
+ *   Real (verificada contra test.biller.uy el 2026-07-28):
+ *                { RUT, Denominacion, DomicilioFiscal, TipoContribuyente,
+ *                  Estado, Emision, Vencimiento }   ← PLANA, sin envoltura
+ *
+ * Leer solo `RespuestaOK` —como hacía este normalizador— devolvía `certificado:
+ * null` contra la API real: se perdía el payload entero, en silencio y sin
+ * error. Por eso ahora se acepta la envoltura si está, y si no se toma el
+ * objeto tal cual.
+ *
+ * Los campos de fecha llegan como `"\n\t\t\t\t\t"` cuando no hay certificado
+ * emitido; `toStringOrNull` los trimea a null, que es lo correcto: un string de
+ * espacios no es una fecha.
+ */
 export function normalizeDgiCertificado(raw: unknown): DgiCertificado {
   const r = asRecord(raw);
+  const cuerpo = asRecord(r.RespuestaOK);
+  const datos = Object.keys(cuerpo).length > 0 ? cuerpo : r;
+
   return {
     flag: toStringOrNull(r.Flag),
-    rut: toStringOrNull(r.RUT),
-    certificado: emptyToNull(r.RespuestaOK),
+    rut: toStringOrNull(r.RUT ?? datos.RUT),
+    certificado: emptyToNull(datos),
+    estado: toStringOrNull(datos.Estado),
+    emision: toStringOrNull(datos.Emision),
+    vencimiento: toStringOrNull(datos.Vencimiento),
+    denominacion: toStringOrNull(datos.Denominacion),
+    tipo_contribuyente: toStringOrNull(datos.TipoContribuyente),
   };
 }

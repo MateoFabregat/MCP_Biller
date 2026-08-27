@@ -4,23 +4,18 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ProductoSchema, validarProducto } from "../../biller/operacionesSchema.js";
+import { WRITE_PATHS } from "../../constants.js";
 import { WRITE_ANNOTATIONS, validationErrorResult, type ToolContext, type ToolResult } from "../shared.js";
 import { runWriteOperation, writeControlShape, writeOutputShape } from "./shared.js";
 
-const ENDPOINT = "/v2/productos/cargar";
+const ENDPOINT = WRITE_PATHS.productosCargar;
 
 const inputShape = {
-  producto: z
-    .object({
-      codigo: z.string().min(1),
-      nombre: z.string().min(1),
-      moneda: z.string().min(1),
-      precio: z.union([z.string(), z.number()]),
-      indicador_facturacion: z.number().int(),
-      es_servicio: z.boolean(),
-    })
-    .passthrough()
-    .describe("Datos del producto/servicio: descripcion, inventario, etc."),
+  producto: ProductoSchema.describe(
+    "Datos del producto/servicio: codigo, nombre, descripcion, moneda, precio, indicador_facturacion, " +
+      "inventario (solo productos) y es_servicio.",
+  ),
   ...writeControlShape,
 };
 
@@ -40,7 +35,9 @@ export async function handleCargarProducto(args: unknown, ctx: ToolContext): Pro
     confirmationToken: a.confirmation_token,
     idempotencyKey: a.idempotency_key,
     allowProduction: a.allow_production,
+    remitente: a.remitente,
     rateLimitClass: "default",
+    warnings: validarProducto(a.producto),
   });
 }
 
