@@ -746,7 +746,115 @@ export type RespuestaPaso =
   | { paso: "moneda"; moneda: string }
   | { paso: "forma_pago"; forma_pago: number }
   | { paso: "montos_brutos"; incluye_iva: boolean }
+  | { paso: "tasa_cambio"; tasa: number }
   | { paso: "ninguna" };
+
+/** Saca tildes, baja a minúsculas y colapsa espacios. Para comparar lo que se escribió. */
+function normalizarLibre(texto: string): string {
+  return texto
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Interpreta lo que el usuario ESCRIBIÓ, no lo que tocó, acotado al paso en curso.
+ *
+ * POR QUÉ HACE FALTA. `interpretarPaso` solo entiende ids de botón. Eso alcanza
+ * mientras el usuario toque, y no siempre toca: el botón quedó arriba en el
+ * chat, contesta desde el reloj, o simplemente escribe porque está apurado.
+ * Cuando eso pasaba, el mensaje no matcheaba nada, el estado no cambiaba y el
+ * flujo volvía a hacer LA MISMA PREGUNTA. Para siempre.
+ *
+ * Y el caso peor era el que la propia pregunta invitaba: en el paso `cliente` el
+ * texto dice —textual— 'decime "sin identificar" y sigo'. Escribir exactamente
+ * eso no hacía nada. Una pregunta que rechaza su propia respuesta sugerida es la
+ * peor forma de este bug, porque el usuario no tiene ninguna razón para dudar de
+ * lo que escribió.
+ *
+ * VA ACOTADO AL PASO, y ahí está la seguridad de esto: "sin identificar" solo
+ * significa algo cuando lo que se preguntó fue el cliente, y "no" significa
+ * cosas distintas según dónde caiga. Interpretar texto libre sin saber qué se
+ * preguntó es adivinar; interpretarlo contra una pregunta concreta es leer.
+ *
+ * Devuelve `ninguna` ante la duda: que el agente repregunte es barato, y que un
+ * texto ambiguo mueva el flujo solo, no.
+ */
+export function interpretarRespuestaLibre(raw: string, paso: string): RespuestaPaso {
+  const t = normalizarLibre(raw);
+  if (t === "") return { paso: "ninguna" };
+  const es = (...frases: string[]): boolean => frases.includes(t);
+
+  switch (paso) {
+    case "receptor":
+      if (es("consumidor final", "final", "consumidor", "mostrador", "a consumidor final"))
+        return { paso: "receptor", clase: "consumidor_final" };
+      if (es("empresa", "a una empresa", "con rut", "rut", "una empresa"))
+        return { paso: "receptor", clase: "empresa" };
+      if (es("no se", "no sé", "ni idea", "no tengo idea")) return { paso: "receptor_no_se" };
+      return { paso: "ninguna" };
+
+    case "cliente":
+      // La frase que la pregunta sugiere, y las que dice la gente en su lugar.
+      if (es("sin identificar", "sin datos", "no tiene", "no tengo", "sin cliente", "no", "mostrador"))
+        return { paso: "cliente_sin_identificar" };
+      if (es("otro", "otro cliente", "no es ese")) return { paso: "cliente_otro" };
+      return { paso: "ninguna" };
+
+    case "moneda":
+      if (es("pesos", "peso", "uyu", "en pesos", "pesos uruguayos"))
+        return { paso: "moneda", moneda: "UYU" };
+      if (es("dolares", "dolar", "usd", "en dolares")) return { paso: "moneda", moneda: "USD" };
+      return { paso: "ninguna" };
+
+    case "montos_brutos":
+      // La pregunta del mostrador uruguayo: ¿el precio que dijiste ya lleva IVA?
+      if (es("si", "con iva", "iva incluido", "ya incluye", "incluye iva", "si ya incluye"))
+        return { paso: "montos_brutos", incluye_iva: true };
+      if (es("no", "sin iva", "no incluye", "mas iva", "sin el iva"))
+        return { paso: "montos_brutos", incluye_iva: false };
+      return { paso: "ninguna" };
+
+    case "item":
+      if (es("listo", "nada mas", "ya esta", "eso es todo", "no mas", "terminamos"))
+        return { paso: "item_listo" };
+      if (es("otro", "otro mas", "agrego otro", "uno mas")) return { paso: "item_otro" };
+      return { paso: "ninguna" };
+
+    case "fecha":
+      if (es("hoy", "de hoy", "hoy mismo")) return { paso: "fecha_hoy" };
+      return { paso: "ninguna" };
+
+    case "tasa_cambio": {
+      // "PESOS" ACÁ NO ES RUIDO: ES UNA CORRECCIÓN.
+      //
+      // A este paso se llega porque la moneda quedó en USD —muchas veces por el
+      // `perfil_casa`, que la heredó de los últimos comprobantes de la empresa,
+      // no porque nadie la haya dicho—. Si el usuario contesta "pesos", está
+      // arreglando eso, y sin esto se lo ignoraba y se le seguía pidiendo una
+      // cotización que no corresponde. Peor: si después tipeaba un número, ese
+      // número quedaba como tasa y la venta salía en dólares. "2 bolsas a 480"
+      // a 40 pesos por dólar son $38.400 en vez de $960.
+      if (es("pesos", "peso", "uyu", "en pesos", "son pesos", "es en pesos")) {
+        return { paso: "moneda", moneda: "UYU" };
+      }
+      // La pregunta dice "Decime cuántos pesos vale uno (por ejemplo 40)", así
+      // que un número pelado es LA respuesta esperada, no una casualidad.
+      //
+      // Se lee del RAW y no de `normalizarLibre`, que borra los signos: "40,5"
+      // quedaba como "40 5" y se leía NaN. Y acá la coma es el separador
+      // decimal, así que perderla no es perder un signo — es perder el precio.
+      const n = Number(raw.trim().replace(/\s/g, "").replace(",", "."));
+      return Number.isFinite(n) && n > 0 ? { paso: "tasa_cambio", tasa: n } : { paso: "ninguna" };
+    }
+
+    default:
+      return { paso: "ninguna" };
+  }
+}
 
 /**
  * Interpreta el id que vuelve de un botón o fila de la emisión guiada.

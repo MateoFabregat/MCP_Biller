@@ -43,6 +43,7 @@ import {
   construirSubmenuIva,
   hoyDgi,
   interpretarPaso,
+  interpretarRespuestaLibre,
   separarDireccionCiudad,
   siguientePaso,
   sugiereDolares,
@@ -719,7 +720,16 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     let pidioOtraFecha = false;
     let pidioOtraTasa = false;
     if (a.mensaje !== undefined) {
-      const r = interpretarPaso(a.mensaje);
+      // Primero el id del botón; si no era un botón, se lee como texto CONTRA
+      // LA PREGUNTA QUE ESTABA ABIERTA.
+      //
+      // El paso se calcula acá, ANTES de aplicar el mensaje: es el paso que el
+      // usuario estaba contestando. Calcularlo después daría el paso siguiente,
+      // y "sin identificar" se leería contra la pregunta que todavía no vio.
+      let r = interpretarPaso(a.mensaje);
+      if (r.paso === "ninguna") {
+        r = interpretarRespuestaLibre(a.mensaje, siguientePaso(estado).paso);
+      }
       switch (r.paso) {
         case "receptor":
           estado.clase_receptor = r.clase;
@@ -738,6 +748,9 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
           break;
         case "fecha_hoy":
           estado.fecha_emision = hoyDgi();
+          break;
+        case "tasa_cambio":
+          estado.tasa_cambio = r.tasa;
           break;
         case "fecha_otra":
           // Tocó "otra fecha": no hay dato todavía, solo la intención. El paso
