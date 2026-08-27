@@ -1,0 +1,18 @@
+{
+  "name": "biller",
+  "version": "0.1.0",
+  "description": "Consultá tu facturación electrónica de Biller (Uruguay) en lenguaje normal: cuánto vendiste, quién te debe, qué vence, qué compraste. Solo lectura por defecto.",
+  "author": { "name": "Biller", "email": "mateo@biller.uy" },
+  "mcpServers": {
+    "biller": {
+      "command": "npx",
+      "args": ["-y", "biller-mcp-server"],
+      "env": {
+        "BILLER_API_BASE_URL": "${BILLER_API_BASE_URL:-https://test.biller.uy}",
+        "BILLER_API_TOKEN": "${BILLER_API_TOKEN}",
+        "BILLER_CAPABILITY_MODE": "read_only",
+        "BILLER_WRITE_ENABLED": "false"
+      }
+    }
+  }
+}

@@ -28,6 +28,31 @@ Tiene **dos modos operativos** (controlados por `BILLER_CAPABILITY_MODE`):
 
 ---
 
+## Instalación (usuarios)
+
+**Claude Desktop / Claude Code** — un solo comando, contesta tres preguntas
+(ambiente, token, dónde registrarlo) y escribe la configuración por vos:
+
+```bash
+npx biller-mcp-server init
+```
+
+Queda en **solo lectura** contra el ambiente que elijas. La escritura se
+habilita a mano, a conciencia (ver [Modos operativos](#qué-hace)).
+
+**Como plugin de Claude Code** (trae además el skill de vocabulario
+`biller-consultas`): dentro de `claude`, con `BILLER_API_TOKEN` en tu entorno:
+
+```
+/plugin marketplace add <owner>/<repo>
+/plugin install biller@biller
+```
+
+**ChatGPT / Claude web y móvil** todavía no: requieren un servidor remoto con
+OAuth (en el roadmap). Este paquete corre local por stdio.
+
+---
+
 ## Qué hace
 
 **Lectura**

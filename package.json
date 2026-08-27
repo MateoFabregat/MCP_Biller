@@ -1,7 +1,6 @@
 {
   "name": "biller-mcp-server",
   "version": "0.1.0",
-  "private": true,
   "description": "MCP server local, read-only, para la API REST de Biller (facturación electrónica de Uruguay). Solo llamadas HTTP GET.",
   "license": "MIT",
   "type": "module",
@@ -27,7 +26,8 @@
     "evals": "npm run build && node scripts/evals-enrutador.mjs",
     "diagnostico": "npm run build && node --env-file=.env scripts/simular-whatsapp.mjs",
     "conversar": "npm run build && node --env-file=.env scripts/conversar.mjs",
-    "contrato": "node --env-file=.env scripts/contrato.mjs"
+    "contrato": "node --env-file=.env scripts/contrato.mjs",
+    "prepack": "npm run build && npm run check:readonly"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -38,5 +38,18 @@
     "tsx": "^4.16.0",
     "typescript": "^5.5.0",
     "vitest": "^2.1.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/biller-uy/mcp-biller.git"
+  },
+  "keywords": [
+    "mcp",
+    "biller",
+    "facturacion",
+    "cfe",
+    "dgi",
+    "uruguay",
+    "model-context-protocol"
+  ]
 }

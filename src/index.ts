@@ -39,6 +39,14 @@ function parseTransporte(raw: string | undefined): Transporte {
 }
 
 async function main(): Promise<void> {
+  // Subcomando de instalación: `npx biller-mcp-server init`. Se resuelve antes
+  // de tocar la config porque su gracia es correr en una máquina SIN config.
+  if (process.argv[2] === "init") {
+    const { runInit } = await import("./cli/init.js");
+    await runInit();
+    return;
+  }
+
   const inspection = inspectConfig();
   applyLogLevel(inspection.logLevel);
   const transporte = parseTransporte(process.env.BILLER_TRANSPORT);
