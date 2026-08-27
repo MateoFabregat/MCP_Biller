@@ -44,7 +44,7 @@ habilita a mano, a conciencia (ver [Modos operativos](#qué-hace)).
 `biller-consultas`): dentro de `claude`, con `BILLER_API_TOKEN` en tu entorno:
 
 ```
-/plugin marketplace add <owner>/<repo>
+/plugin marketplace add MateoFabregat/MCP_Biller
 /plugin install biller@biller
 ```
 
