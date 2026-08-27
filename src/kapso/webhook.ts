@@ -5,7 +5,7 @@
 // Kapso nos llamaba por MCP. Este módulo agrega el otro sentido — Kapso nos
 // avisa de un mensaje entrante y nosotros decidimos qué hacer con él.
 //
-// TRES DECISIONES QUE DEFINEN EL MÓDULO
+// CUATRO DECISIONES QUE DEFINEN EL MÓDULO
 //
 // 1. SIN SECRETO, NO HAY ENDPOINT. Si `KAPSO_WEBHOOK_SECRET` no está
 //    configurado, la ruta no existe (404). Un endpoint de entrada sin
@@ -13,6 +13,10 @@
 //    haga procesar mensajes inventados con el `from` que quiera — o sea, a
 //    saltear la allowlist de remitentes presentándose como quien quiera.
 //    "Se me olvidó configurarlo" no puede resultar en un endpoint abierto.
+//
+//    CON EMPRESAS CONFIGURADAS ES POR EMPRESA: el secreto que importa es el del
+//    overlay del tenant, y la ruta que no tiene el suyo no existe para nadie.
+//    Ver la decisión 4 y `WEBHOOK_PATH_TENANT` en `transport/http.ts`.
 //
 // 2. EL WEBHOOK NO EJECUTA NADA QUE TOQUE PLATA. Interpreta el mensaje y
 //    devuelve la decisión de ruteo; contesta solo lo que no necesita ni un dato
@@ -27,6 +31,27 @@
 //    a quien sondea que ese número existe y que el otro no. Meta además
 //    reintenta ante cualquier no-2xx, así que un rechazo con error se convierte
 //    en el mismo mensaje llegando cinco veces.
+//
+// 4. LA EMPRESA LA ELIGE EL NÚMERO RECEPTOR, NUNCA EL QUE ESCRIBE. Con varias
+//    empresas en un proceso, "de quién es este mensaje" es la primera pregunta,
+//    y contestarla mal es peor que no contestarla: la allowlist de remitentes de
+//    A validando un mensaje dirigido a B, el capability mode de A decidiendo si
+//    a un usuario de B se le ofrece emitir, y el BorradorStore de A —salado con
+//    el `cacheId` de A— sin encontrar jamás el borrador de B, con lo cual "pará,
+//    eran 3 no 2" en medio de una carga vuelve a contestarse con el menú entero.
+//
+//    El selector es el `phone_number_id` de `value.metadata`: a qué número le
+//    escribieron. Es legítimo por lo mismo que el bearer del MCP — es un hecho
+//    de infraestructura y no un parámetro. El que escribe elige a qué número
+//    manda, pero no puede falsificar en qué número lo recibió Meta, y el dato
+//    viene ADENTRO del cuerpo que la firma cubre. El `from` y el `perfil`, en
+//    cambio, los elige quien escribe: no sirven para esto.
+//
+//    Y no hay fallback al tenant del proceso. Un `phone_number_id` que no mapea
+//    a ninguna empresa se consume con 200 y CERO interpretación, logueado en
+//    `error` —firma válida más número desconocido es un onboarding a medias, no
+//    ruido—. Caer al proceso sería el overlay "completando" en vez de pisando,
+//    que es exactamente la herencia silenciosa que `tenants/registry.ts` corta.
 //
 // El texto del mensaje entrante es DATO, nunca instrucción — la misma regla que
 // para la adenda de un comprobante. Acá se usa solo para elegir una opción de un
@@ -58,6 +83,15 @@ export interface EventoEntrante {
   message_id: string | null;
   /** Nombre del perfil de WhatsApp. NO se usa para decidir nada: lo elige el que escribe. */
   perfil: string | null;
+  /**
+   * A QUÉ NÚMERO LE ESCRIBIERON: el `phone_number_id` de `value.metadata`.
+   *
+   * Es el selector de empresa del webhook (decisión 4 del encabezado). A
+   * diferencia de `from` y de `perfil`, esto NO lo elige quien escribe: es el
+   * número receptor, un hecho de la infraestructura de Meta, y viaja adentro del
+   * cuerpo que la firma cubre. `null` si el evento no lo trae.
+   */
+  phone_number_id: string | null;
 }
 
 /**
@@ -114,6 +148,7 @@ export function normalizarEvento(payload: unknown): EventoEntrante {
     texto: null,
     message_id: null,
     perfil: null,
+    phone_number_id: null,
   };
   if (typeof payload !== "object" || payload === null) return vacio;
 
@@ -125,14 +160,24 @@ export function normalizarEvento(payload: unknown): EventoEntrante {
       : null;
   if (value === null) return vacio;
 
+  // El `metadata` se lee ANTES de cualquier salida temprana: un acuse de estado
+  // también dice a qué número llegó, y el que atiende necesita saber de qué
+  // empresa era aunque después lo ignore.
+  const metadata =
+    typeof value.metadata === "object" && value.metadata !== null
+      ? (value.metadata as Record<string, unknown>)
+      : null;
+  const phoneNumberId = metadata === null ? null : texto(metadata.phone_number_id);
+  const conNumero = { ...vacio, phone_number_id: phoneNumberId };
+
   // Acuse de entrega/lectura: llega por el mismo endpoint y no es un mensaje.
   // Se reconoce explícitamente para no confundirlo con "no lo entendí".
   if (Array.isArray(value.statuses) && value.statuses.length > 0) {
-    return { ...vacio, tipo: "estado" };
+    return { ...conNumero, tipo: "estado" };
   }
 
   const mensaje = primerObjeto(value.messages);
-  if (mensaje === null) return vacio;
+  if (mensaje === null) return conNumero;
 
   const contacto = primerObjeto(value.contacts);
   const perfilObj =
@@ -141,6 +186,7 @@ export function normalizarEvento(payload: unknown): EventoEntrante {
       : null;
 
   const base = {
+    phone_number_id: phoneNumberId,
     from: texto(mensaje.from) === null ? null : normalizarTelefono(String(mensaje.from)),
     message_id: texto(mensaje.id),
     perfil: perfilObj === null ? null : texto(perfilObj.name),

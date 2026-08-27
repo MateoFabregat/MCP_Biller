@@ -17,7 +17,12 @@ import {
   extraerBearer,
   validarTokenDeArranque,
 } from "../src/transport/httpAuth.js";
-import { HEALTH_PATH, MCP_PATH, iniciarTransporteHttp } from "../src/transport/http.js";
+import {
+  HEALTH_PATH,
+  MCP_PATH,
+  RegistroSesiones,
+  iniciarTransporteHttp,
+} from "../src/transport/http.js";
 import { makeConfig } from "./fixtures.js";
 
 const TOKEN_VALIDO = "a".repeat(64);
@@ -276,5 +281,145 @@ describe("server HTTP end-to-end", () => {
     } finally {
       await handle.close();
     }
+  });
+});
+
+// =============================================================================
+// Registro de sesiones: TTL, techo LRU y aislamiento por tenant.
+//
+// La fuga que esto cubre es la única real del proceso largo: cada sesión es un
+// transporte MÁS un McpServer con su ToolContext, y antes solo se sacaba del
+// mapa cuando el cliente cerraba limpio. Un túnel cortado no cierra limpio.
+//
+// Todo con reloj inyectado: nada de sleeps ni timers reales.
+// =============================================================================
+
+describe("registro de sesiones HTTP", () => {
+  /** Doble mínimo: lo único que importa es SI le llamaron a close(). */
+  function transporteFalso(): { cerrado: boolean } & Record<string, unknown> {
+    const t = { cerrado: false, close: () => { t.cerrado = true; return Promise.resolve(); } };
+    return t as never;
+  }
+
+  function registro(ahora: () => number, opts: { ttlMs?: number; techo?: number } = {}) {
+    return new RegistroSesiones({ ahora, ...opts });
+  }
+
+  it("una sesión vencida se CIERRA y se desaloja en el barrido", () => {
+    let t = 0;
+    const reg = registro(() => t, { ttlMs: 1000 });
+    const transporte = transporteFalso();
+    reg.registrar("a:1", transporte as never);
+
+    t = 1001;
+    reg.barrer();
+
+    expect(reg.size).toBe(0);
+    // Sacarla del mapa sin cerrar sería la misma fuga con otra cara.
+    expect(transporte.cerrado).toBe(true);
+  });
+
+  it("una sesión vencida tampoco se devuelve si la piden directo", () => {
+    let t = 0;
+    const reg = registro(() => t, { ttlMs: 1000 });
+    const transporte = transporteFalso();
+    reg.registrar("a:1", transporte as never);
+    t = 5000;
+    expect(reg.obtener("a:1")).toBeUndefined();
+    expect(transporte.cerrado).toBe(true);
+  });
+
+  it("una sesión que se sigue usando NO se cae por el mero paso del tiempo", () => {
+    let t = 0;
+    const reg = registro(() => t, { ttlMs: 1000 });
+    const transporte = transporteFalso();
+    reg.registrar("a:1", transporte as never);
+
+    // Cada 900 ms alguien la usa: nunca llega a estar 1000 ms idle.
+    for (let i = 0; i < 20; i += 1) {
+      t += 900;
+      expect(reg.obtener("a:1")).toBeDefined();
+      reg.barrer();
+    }
+
+    expect(reg.size).toBe(1);
+    expect(transporte.cerrado).toBe(false);
+  });
+
+  it("el techo desaloja la MENOS USADA recientemente, y la cierra", () => {
+    let t = 0;
+    const reg = registro(() => t, { techo: 2 });
+    const vieja = transporteFalso();
+    const media = transporteFalso();
+    reg.registrar("a:vieja", vieja as never);
+    t += 10;
+    reg.registrar("a:media", media as never);
+
+    // Se usa la primera: pasa a ser la MÁS reciente aunque sea la más antigua
+    // de creación. Sin reinserción en el acceso, esto sería FIFO y caería ella.
+    t += 10;
+    expect(reg.obtener("a:vieja")).toBeDefined();
+
+    t += 10;
+    reg.registrar("a:nueva", transporteFalso() as never);
+
+    expect(reg.size).toBe(2);
+    expect(media.cerrado).toBe(true);
+    expect(vieja.cerrado).toBe(false);
+    expect(reg.obtener("a:vieja")).toBeDefined();
+    expect(reg.obtener("a:media")).toBeUndefined();
+  });
+
+  it("el prefijo por tenant aísla: el mismo sessionId de otra empresa no resuelve", () => {
+    const reg = registro(() => 0);
+    const deA = transporteFalso();
+    reg.registrar("empresaA:sesion-1", deA as never);
+
+    // Mismo mcp-session-id, otro tenant autenticado: no hay nada para él.
+    expect(reg.obtener("empresaB:sesion-1")).toBeUndefined();
+    expect(reg.obtener("empresaA:sesion-1")).toBeDefined();
+  });
+
+  it("cerrarTenant cierra SOLO las sesiones de esa empresa (revocación futura)", () => {
+    const reg = registro(() => 0);
+    const a1 = transporteFalso();
+    const a2 = transporteFalso();
+    const b1 = transporteFalso();
+    reg.registrar("empresaA:1", a1 as never);
+    reg.registrar("empresaA:2", a2 as never);
+    reg.registrar("empresaB:1", b1 as never);
+
+    expect(reg.cerrarTenant("empresaA")).toBe(2);
+    expect(a1.cerrado).toBe(true);
+    expect(a2.cerrado).toBe(true);
+    expect(b1.cerrado).toBe(false);
+    expect(reg.size).toBe(1);
+    expect(reg.obtener("empresaB:1")).toBeDefined();
+  });
+
+  it("cerrarTodo no confunde 'empresaAB' con 'empresaA'", () => {
+    const reg = registro(() => 0);
+    const ab = transporteFalso();
+    reg.registrar("empresaAB:1", ab as never);
+    expect(reg.cerrarTenant("empresaA")).toBe(0);
+    expect(ab.cerrado).toBe(false);
+  });
+
+  it("cerrarTodo cierra los transportes, no solo vacía el mapa", () => {
+    const reg = registro(() => 0);
+    const uno = transporteFalso();
+    reg.registrar("a:1", uno as never);
+    reg.cerrarTodo();
+    expect(reg.size).toBe(0);
+    expect(uno.cerrado).toBe(true);
+  });
+
+  it("un close() que rechaza no tumba el proceso ni deja la entrada colgada", () => {
+    let t = 0;
+    const reg = registro(() => t, { ttlMs: 100 });
+    reg.registrar("a:1", { close: () => Promise.reject(new Error("socket roto")) } as never);
+    t = 1000;
+    expect(() => reg.barrer()).not.toThrow();
+    expect(reg.size).toBe(0);
   });
 });
