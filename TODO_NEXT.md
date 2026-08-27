@@ -41,6 +41,18 @@ borrarse: saber qué se resolvió y dónde vale más que una lista corta.
   "no registrada" sea una decisión visible y no un olvido. Cuando Biller documente
   el GET de clientes propios, agregarla con el patrón de las otras de lectura.
 
+- [ ] **Webhook de Kapso multi-empresa.** `atenderWebhook`
+  (`src/transport/http.ts`) usa la config **del proceso**: el capability mode y
+  la allowlist de remitentes con los que decide son los de la empresa de las
+  variables de arriba, no los de la empresa a la que le escribieron. En un
+  despliegue con varios números eso es la barrera de entrada de A validando un
+  mensaje dirigido a B. El dato para resolverlo ya llega: el `phone_number_id`
+  del receptor viene en `value.metadata` del evento de Kapso, y `normalizarEvento`
+  (`src/kapso/webhook.ts`) lo **descarta**. Falta leerlo, mapearlo al tenant por
+  su `KAPSO_PHONE_NUMBER_ID` y atender con el contexto de esa empresa —y decidir
+  qué hacer con un `phone_number_id` que no mapea a ninguna, que tiene que ser
+  ignorar, no caer al proceso.
+
 - [ ] **Filtros nativos de moneda/cliente en emitidos.**
   Confirmar si la API acepta `moneda` o `rut_receptor` como query params;
   si es así, el filtro local pasa a ser secundario (post-filter para compatibilidad).
@@ -61,6 +73,50 @@ borrarse: saber qué se resolvió y dónde vale más que una lista corta.
   `src/transport/http.ts` (sesiones + Bearer propio `BILLER_HTTP_AUTH_TOKEN`,
   `/healthz` sin auth) y `src/transport/serverless.ts` para el despliegue sin
   proceso largo. Es el transporte por el que entra el Agent Node de Kapso.
+  Ampliado en agosto de 2026: las sesiones ya no viven para siempre. `RegistroSesiones`
+  (mismo archivo) les pone TTL de 30 min sin uso y techo de 200 con LRU, y al
+  desalojar **cierra** el transporte —sacarlo del mapa sin cerrarlo es la misma
+  fuga con el contador bajando—. Antes solo se soltaban con el cierre limpio del
+  cliente, así que cada túnel cortado dejaba un transporte y un `McpServer` vivos
+  para siempre.
+
+- [x] **Aislamiento entre empresas del overlay de tenants.** Hecho:
+  `src/tenants/registry.ts`. Lo que un tenant no declara ya no se hereda en
+  silencio: lo sensible se **borra** (`VARIABLES_QUE_NO_SE_HEREDAN`), las rutas
+  de persistencia y los topes `BILLER_MAX_MONTO_*` son **fatales al arrancar** si
+  el proceso los define y el tenant no, y `BILLER_API_TOKEN` o un archivo de
+  persistencia repetidos entre tenants tampoco arrancan. Alrededor: el health
+  check reporta la config del tenant y degrada sin remitente verificado
+  (`src/tools/health.ts` + `ToolContext.inspeccionar` en `src/tools/shared.ts`), la
+  barrera de entrada inyecta el remitente verificado en el input
+  (`src/security/entrada.ts`) y el borrador de emisión se ata a él
+  (`identidadDeConversacion` en `src/security/remitentes.ts`). El presupuesto del
+  cache es por empresa (`src/biller/cacheVentanas.ts`) y la línea de log de
+  métricas lleva `empresa` (`src/observabilidad/metricas.ts`).
+
+- [ ] **Llevar a `config.ts` lo que hoy se lee suelto del entorno.** Dos cosas
+  quedaron leyéndose con un helper local en `src/transport/http.ts`
+  (`BILLER_HTTP_SESSION_TTL_MS`, `BILLER_HTTP_MAX_SESSIONS`), fuera de la
+  configuración validada y por lo tanto fuera del overlay de tenants. Hoy no
+  duele —son parámetros del proceso, no de una empresa—, pero es el mismo camino
+  por el que `BILLER_CACHE_ENABLED` se volvió la única variable imposible de
+  pisar.
+
+- [ ] **Enchufar la habilitación de cache por empresa.**
+  `registrarHabilitacionCache` (`src/services/periodo.ts`) está exportada y
+  **nadie la llama**: el mecanismo quedó listo y el comportamiento de hoy
+  intacto, o sea que `BILLER_CACHE_ENABLED` sigue siendo del proceso. Falta que
+  quien arma el registro de tenants la registre resolviendo por `cacheId`.
+  Mientras tanto, apagar el cache para diagnosticar un total que no cierra en una
+  empresa lo apaga para las veinte.
+
+- [ ] **Derivar las rutas de persistencia de un `BILLER_DATA_DIR` + `tenant.id`.**
+  Hoy cada tenant tiene que declarar las tres a mano (`BILLER_AUDIT_LOG_PATH`,
+  `BILLER_IDEMPOTENCY_LOG_PATH`, `BILLER_BORRADOR_STORE_PATH`) y el registro se
+  limita a verificar que no falten ni se repitan. Con un directorio base y el id
+  del tenant, el caso correcto sale solo y la validación pasa a ser la red y no
+  la única defensa: ahora mismo, dar de alta una empresa son tres rutas que
+  alguien escribe a mano y una de ellas se puede copiar de la entrada de arriba.
 
 - [ ] **Resource MCP con catálogo de tipos de CFE.** Sigue pendiente como
   *resource*: no hay ni un `registerResource` en `src/`. Lo que sí existe son dos

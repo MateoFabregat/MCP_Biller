@@ -197,7 +197,13 @@ comportamiento en un solo lugar. Dos consecuencias que no eran obvias:
   grilla común, la segunda pregunta de una conversación reusa lo que trajo la
   primera.
 - **El hit/miss de cache se cuenta por empresa**, que es la única forma de saber
-  si el cache sirve sin mirar el log de una sola.
+  si el cache sirve sin mirar el log de una sola. Y desde agosto de 2026 el
+  **presupuesto** también es por empresa: 64 ventanas cada una, 16 empresas
+  guardadas a la vez, con LRU real. Antes el techo era uno solo para el proceso
+  (500 entradas) y una consulta de `anio_actual` —53 ventanas— alcanzaba para que
+  tres empresas desalojaran las ventanas calientes de las otras diecisiete: la
+  latencia prometida se caía en silencio, sin romper un test ni levantar una
+  alerta.
 
 `biller/traerDetalles.ts` hace lo mismo con el otro patrón repetido: el listado
 no trae `items`, así que hay que pedir el detalle por id. Ahora eso va en
@@ -260,7 +266,7 @@ Las **27 tools de lectura** se registran siempre (la lista viva es
 
 | Tool | Contesta |
 |---|---|
-| `biller_health_check` | ¿está configurado y apuntando a dónde? |
+| `biller_health_check` | ¿está configurado y apuntando a dónde? (la del **tenant**, y con detalle reducido si quien pregunta no está en la allowlist) |
 | `biller_catalogo_datos` | ¿qué puedo preguntar y qué **no**? |
 | `biller_requisitos_comprobante` | ¿qué datos necesito para emitir X? |
 | `biller_plan_anulacion` | ¿cómo deshago este comprobante? |
@@ -406,6 +412,40 @@ crédito**: los datos fiscales de un cliente ya están en el teléfono de un ter
 Por eso la barrera de WhatsApp no es un ciclo de confirmación sino una allowlist:
 ahí lo irreversible es el destinatario.
 
+### 5.1. La tercera pregunta: ¿de quién es esto?
+
+Autenticar quién pregunta y a dónde sale no alcanza cuando un mismo proceso
+atiende a varias empresas, y cuando dentro de una empresa hay más de un número
+autorizado. Tres cierres que entraron juntos:
+
+- **El overlay de un tenant no hereda lo sensible.** Lo que el tenant no declara
+  se **borra** del entorno del proceso —las `KAPSO_*`, la allowlist de
+  remitentes, los tres flags de escritura, la identidad fiscal— en vez de
+  heredarse. Borrar hace el error imposible; exigir que se declare solo lo hace
+  detectable. Las tres rutas de persistencia y los topes `BILLER_MAX_MONTO_*` van
+  por la puerta opuesta —borrarlas afloja— y por eso son **fatales al arrancar**
+  si el proceso las define y el tenant no. Y dos tenants no pueden compartir el
+  `BILLER_API_TOKEN` (mismo `cacheId` ⇒ mismo espacio de borradores, con la
+  idempotencia separada: un reintento por el otro token duplica un CFE ante DGI)
+  ni un archivo de persistencia. Ver [`tenants/registry.ts`](../src/tenants/registry.ts).
+- **El borrador de emisión es de quien lo carga.** `sesion` lo elige el modelo y
+  acepta un teléfono crudo; la barrera de entrada ya sabía quién escribía y
+  descartaba el dato. Con dos números autorizados en la misma empresa —el dueño y
+  el contador— eso alcanzaba para leer el borrador ajeno, agregarle líneas y
+  emitir un CFE real con los datos del otro. El cruce **entre** empresas lo
+  cerraba la sal del store; este es el intra-empresa, que la sal no puede ver.
+  Hoy la barrera **inyecta** el remitente verificado y normalizado en el input, y
+  `identidadDeConversacion` rechaza un `sesion` que no resuelva a esa misma
+  clave. La decisión vive en un solo lugar
+  ([`security/remitentes.ts`](../src/security/remitentes.ts)) por el mismo motivo
+  por el que las barreras interceptan `registerTool`.
+- **El diagnóstico no identifica gratis a la empresa.** `biller_health_check`
+  sigue exento de la allowlist —una barrera que no se puede diagnosticar se
+  termina apagando entera— pero ahora reporta la config del **tenant**, no la del
+  proceso, y **degrada**: sin remitente verificado, el RUT, la URL de la API y la
+  ruta del audit log salen como booleanos. Antes, cualquiera con el número de
+  WhatsApp confirmaba que la empresa existía, su RUT y si apuntaba a producción.
+
 ---
 
 ## 6. Despliegue
@@ -433,6 +473,19 @@ siguiente, de ahí el modo stateless. Se puede forzar con
 servers externos, pero **rechazan localhost** (protección SSRF). Sin una URL
 pública no hay WhatsApp. Ese fue el único bloqueante entre "una herramienta en la
 compu" y "preguntarle a la contabilidad por WhatsApp".
+
+**Las sesiones HTTP vencen y tienen techo.** Cada entrada del registro es un
+transporte con su socket **más** el `McpServer` que se le conectó, con su
+contexto de tools colgando; antes se soltaba solo con el cierre limpio del
+cliente, así que cada túnel cortado y cada Agent Node que reconecta la dejaba
+viva para siempre y el proceso crecía monótonamente hasta morirse — llevándose el
+server de facturación de todas las empresas por culpa de clientes que ya no
+existen. Hoy: TTL de 30 min sin uso, techo de 200, LRU por acceso, barrido
+perezoso en cada request (un `setInterval` habría que acordarse de `unref()`) y
+—lo que importa— al desalojar se **cierra** el transporte: borrarlo sin cerrar es
+la misma fuga con el contador bajando. La clave es `${tenant.id}:${sessionId}`, y
+ese prefijo es una barrera: sin él, un tenant autenticado que presentara el
+`mcp-session-id` de otro recibiría el server del otro.
 
 ---
 

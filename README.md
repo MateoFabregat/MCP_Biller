@@ -86,7 +86,7 @@ Tiene **dos modos operativos** (controlados por `BILLER_CAPABILITY_MODE`):
 
 | Tool | Endpoint | Notas |
 |---|---|---|
-| `biller_health_check` | — | Diagnóstico. Reporta `mode`/`environment`. Nunca expone el token. |
+| `biller_health_check` | — | Diagnóstico. Reporta `mode`/`environment`. Nunca expone el token, y sin un remitente autorizado tampoco el RUT, la URL de la API ni la ruta del audit log (salen como booleanos). |
 | `biller_buscar_cliente_por_rut` | `/v2/dgi/empresas/*` | Datos DGI. `es_cliente_biller_confirmado` siempre `null`. |
 | `biller_listar_comprobantes_emitidos` | `/v2/comprobantes/obtener` | Filtros locales `moneda`/`cliente_rut`/`limit` y `emitidas_desde`/`emitidas_hasta` (por fecha de **emisión** fiscal). |
 | `biller_listar_comprobantes_recibidos` | `/v2/comprobantes/recibidos/obtener` | Solo montos totales (sin items). |
@@ -532,6 +532,13 @@ Cuatro decisiones que vale la pena conocer:
 - **Un borrador vencido no se reanuda, se descarta** (24 h). Uno de hace tres
   días trae la fecha y los precios de hace tres días: reanudarlo en silencio es
   emitir un comprobante que el usuario cree que es de hoy.
+- **El borrador es de quien lo está cargando.** Con Kapso configurado, `sesion`
+  tiene que resolver al mismo usuario que la barrera de entrada ya verificó: un
+  `sesion` ajeno se rechaza, no se abre. La empresa suele tener dos números
+  autorizados —el dueño y el contador—, y sin esta regla *"seguí la factura que
+  estaba armando el 099…"* alcanzaba para leerle el borrador al otro, agregarle
+  líneas y emitir un CFE real con sus datos. Con `remitente` alcanza: el server
+  ya sabe de quién es el borrador.
 - **Usá el `sesion.id` que devuelve la tool, no el teléfono.** El mismo número
   escrito de dos formas —`099 123 456` y `+598 99 123 456`— son dos sesiones, y
   `config.ts` ya decidió que adivinarle el código de país a un número uruguayo es
@@ -557,6 +564,19 @@ En stdio y en el server HTTP largo la memoria alcanza de sobra.
   producción + idempotencia + audit log.
 - **Token protegido**: nunca se loguea ni se devuelve; se redacta de los errores
   (`[REDACTED]`). El audit guarda un **hash** del payload, no el payload.
+- **Aislamiento entre empresas**: con varias empresas en un proceso, el overlay
+  de un tenant **no hereda** lo sensible que no declara (las `KAPSO_*`, la
+  allowlist de remitentes, los flags de escritura, la identidad fiscal): se borra
+  del entorno base, porque borrar hace el error imposible y exigir que se declare
+  solo lo hace detectable. Las rutas de persistencia y los topes de monto van al
+  revés —borrarlas afloja—, así que si el proceso las define y un tenant no
+  declara la suya, el server **no arranca**. Tampoco arranca con el mismo
+  `BILLER_API_TOKEN` en dos tenants ni con dos apuntando al mismo archivo.
+- **El borrador de emisión es de quien lo carga**: con el canal de WhatsApp
+  abierto, la barrera inyecta el remitente ya verificado y un `sesion` que apunte
+  a otro número se rechaza. Dentro de una misma empresa hay normalmente dos
+  teléfonos autorizados, y sin esto uno podía leer, editar y emitir con el
+  borrador del otro.
 - **stdout reservado** para MCP; los logs van a **stderr**.
 - **Rate limits** (Biller): **1 req/seg** para DGI, recibidos y creación/anulación de
   comprobantes y recibos; **30 req/seg** para el resto. El `429` se mapea claro.

@@ -24,6 +24,9 @@
 //
 //   node scripts/onboard.mjs                 # la empresa del .env del proceso
 //   node scripts/onboard.mjs --tenant=panaderia   # una del registro multi-empresa
+//                                                 # (requiere `npm run build`: el
+//                                                 # entorno del tenant lo arma el
+//                                                 # mismo código que el server)
 //   node scripts/onboard.mjs --json          # salida para un pipeline
 //
 // NO ESCRIBE NADA. Solo GET: no emite, no da de alta, no manda mensajes. Se
@@ -38,7 +41,45 @@ const tenantPedido = (args.find((a) => a.startsWith("--tenant=")) ?? "").split("
 
 // --- Entorno efectivo (con overlay del tenant si se pidió uno) --------------
 
-function cargarEnv() {
+/**
+ * El armado del entorno de un tenant NO se reimplementa acá.
+ *
+ * Este script tenía su propio `{ ...env, ...tenant.env }`, que es la mitad de lo
+ * que hace el registro real y justo la mitad inofensiva. Lo que faltaba:
+ *
+ *   · el BORRADO de lo que un tenant no hereda (las `KAPSO_*`, la allowlist de
+ *     remitentes, los flags de escritura, la identidad fiscal). Con el spread
+ *     propio, esas variables del proceso se colaban en el entorno mostrado, así
+ *     que el operador leía "1 teléfono autorizado" o "Kapso configurado" cuando
+ *     el server real iba a arrancar sin ninguna de las dos. Un alta que parece
+ *     aislada y no lo está es peor que un alta que falla.
+ *   · las validaciones FATALES: `BILLER_API_TOKEN` repetido entre tenants, rutas
+ *     de persistencia repetidas, y las rutas o los topes que el proceso define y
+ *     el tenant no declara. El script daba el visto bueno a un registro con el
+ *     que el server no arranca.
+ *
+ * Pasando por `construirRegistro`/`entornoDe`, lo que se verifica contra la API
+ * es exactamente lo que el server va a usar, y un registro que no arranca falla
+ * acá — en el alta, que es cuando todavía es barato.
+ *
+ * Se importa de `dist/` como el resto de los scripts: el módulo es TypeScript y
+ * no hay forma de leerlo sin compilar. Sin `dist` se dice qué correr, en vez de
+ * caer en un `ERR_MODULE_NOT_FOUND` que no explica nada.
+ */
+async function cargarRegistroTenants() {
+  try {
+    return await import("../dist/tenants/registry.js");
+  } catch (err) {
+    if (err?.code !== "ERR_MODULE_NOT_FOUND") throw err;
+    fatal(
+      "Para verificar una empresa del registro multi-empresa hace falta el build " +
+        "(el armado del entorno de un tenant se lee de `src/tenants/registry.ts`, no se " +
+        "reimplementa acá). Corré `npm run build` y volvé a intentar.",
+    );
+  }
+}
+
+async function cargarEnv() {
   let env = { ...process.env };
 
   // .env no se parsea con dependencias: cuatro líneas alcanzan y este script
@@ -64,15 +105,41 @@ function cargarEnv() {
         "(ni BILLER_TENANTS_JSON ni BILLER_TENANTS_PATH).",
     );
   }
-  const registro = JSON.parse(inline !== "" ? inline : readFileSync(ruta, "utf8"));
-  const tenant = registro.find((t) => t.id === tenantPedido);
+  let crudo;
+  try {
+    crudo = JSON.parse(inline !== "" ? inline : readFileSync(ruta, "utf8"));
+  } catch (err) {
+    fatal(`El registro de empresas no es JSON válido: ${err instanceof Error ? err.message : err}`);
+  }
+
+  const { construirRegistro, entornoDe } = await cargarRegistroTenants();
+
+  // Se valida el registro ENTERO, no solo la entrada pedida, porque así lo valida
+  // el server: un token de Biller duplicado o dos empresas apuntando al mismo
+  // archivo de audit son errores de la LISTA, y no arrancan aunque la empresa que
+  // estás dando de alta esté impecable.
+  let registro;
+  try {
+    registro = construirRegistro(crudo, env);
+  } catch (err) {
+    fatal(
+      `El registro de empresas no arranca, así que este alta no se puede verificar:\n      ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  const tenant = registro.tenants.find((t) => t.id === tenantPedido);
   if (tenant === undefined) {
     fatal(
       `No hay ninguna empresa con id "${tenantPedido}". Las que hay: ` +
-        registro.map((t) => t.id).join(", "),
+        registro.tenants.map((t) => t.id).join(", "),
     );
   }
-  return { env: { ...env, ...tenant.env }, tenant };
+  // El MISMO entorno que le va a llegar a `loadConfig` cuando entre una request
+  // con el `auth_token` de esta empresa: con los borrados aplicados, no un merge
+  // parecido.
+  return { env: entornoDe(tenant, env), tenant };
 }
 
 function fatal(mensaje) {
@@ -118,7 +185,7 @@ function haceDias(dias) {
 }
 
 async function main() {
-  const { env, tenant } = cargarEnv();
+  const { env, tenant } = await cargarEnv();
   const nombre = tenant?.nombre ?? tenant?.id ?? "(la empresa del entorno)";
 
   // 1. Lo mínimo, antes de gastar una request.

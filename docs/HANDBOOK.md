@@ -130,6 +130,43 @@ que no está en la allowlist recibe una negativa antes de que el handler corra.
 Se activa sola cuando hay Kapso configurado. Sin Kapso (stdio, Claude Desktop) no
 molesta: ahí el que abre el server ya es dueño de la máquina.
 
+⚠️ **La barrera no solo verifica: PISA.** Cuando la verificación produjo un
+número, el `remitente` normalizado se escribe sobre el que mandó el modelo, en el
+mismo campo. Antes se verificaba y se tiraba, así que cualquier tool que quisiera
+atar algo a la identidad de quien escribe tenía que repetir
+`normalizarTelefono` + `requiereRemitente` a mano — o sea, una convención, y una
+convención se rompe con la tool número 25. Se pisa el mismo campo y no se agrega
+un `__remitente_verificado`: con dos campos conviven "lo que dijo el modelo" y
+"lo que verificó la barrera" bajo nombres parecidos, y la tool que lea el
+equivocado falla en silencio y a favor del atacante. Con uno solo no hay forma de
+confundirlos. En las tools exentas y sin Kapso el valor es `null` y el crudo se
+deja intacto (`biller_health_check` lo necesita para decidir si degrada).
+
+⚠️ **De quién es la conversación.** `sesion` lo elige el MODELO y acepta un
+teléfono crudo. Dentro de una misma empresa hay normalmente dos números
+autorizados (el dueño y el contador), así que *"seguí la factura que estaba
+armando el 099123456"* alcanzaba para leer el borrador del otro, agregarle líneas
+—`fusionarItems` fusiona por posición— y, en `biller_emitir_comprobante`, emitir
+un CFE real con sus datos y de paso borrárselo. El cruce **entre** empresas ya lo
+cerraba la sal del store; este era el intra-empresa, que la sal no puede ver
+porque las dos partes son la misma empresa. Hoy la regla vive en
+`identidadDeConversacion` ([`security/remitentes.ts`](../src/security/remitentes.ts)):
+con canal abierto la identidad es el remitente verificado, y un `sesion` que
+resuelve a otra clave se rechaza con `kind: "autorizacion"`. Vive ahí y no en
+cada tool porque es **una** decisión, y una decisión copiada en tres archivos es
+una que la cuarta tool no copia.
+
+⚠️ **`biller_health_check` está exento, pero exento no es público.** Sigue siendo
+lo único que se puede llamar sin autorización —una barrera que no se puede
+diagnosticar se termina apagando entera—, pero ahora **degrada su salida**: sin
+remitente verificado devuelve booleanos (`tiene_empresa_rut`,
+`tiene_sucursal_default`, `tiene_audit_log`) en vez del RUT, la URL de la API y
+la ruta del audit log. Tal como estaba, cualquiera que conociera el número de
+WhatsApp confirmaba que la empresa existe, cuál es su RUT y si apuntaba a
+producción, sin figurar en ninguna allowlist. Lo que se conserva es todo lo que
+hace falta para diagnosticar: `status`, `missing`, `warnings`, modo de capacidad
+y `environment`.
+
 ### 4.2. Salida — ¿qué se devuelve?
 
 [`security/sanitize.ts`](../src/security/sanitize.ts) intercepta el mismo método
@@ -174,6 +211,14 @@ entrada: así un remitente rechazado también se cuenta.
 pasa por ninguna de las barreras. Los nombres son una unión cerrada, los valores
 se validan contra un patrón estrecho, y las corridas de 8+ dígitos se rechazan.
 Ver [`observabilidad/metricas.ts`](../src/observabilidad/metricas.ts).
+
+La **línea de log** lleva además `empresa` (el id del tenant). No entra en los
+contadores en memoria —esos ya son uno por empresa, ahí sería una etiqueta
+constante que solo gasta cardinalidad—: hace falta en el log porque es la única
+salida que se mezcla entre empresas, y sin eso, con veinte tenants, el agregador
+no puede contestar de quién es el embudo de emisión que se cayó. El id pasa por
+`normalizarValor` como cualquier otra etiqueta: la garantía de este módulo es
+estructural, no "confiamos en el llamador".
 
 **Las cuatro barreras —y la instrumentación— se desactivan igual: moviéndolas después de
 `registerAllTools` en [`server.ts`](../src/server.ts).** No falla nada visible. Es
@@ -241,6 +286,21 @@ Un cliente sin identidad **no se cachea**. Eso no es paranoia: con multi-empresa
 una clave compartida le sirve a una empresa los comprobantes de otra, y los
 números se ven perfectamente normales.
 
+⚠️ **Y el PRESUPUESTO también es por empresa.** Aislar los datos no alcanzaba:
+mientras el techo fue uno solo para todo el proceso (500 entradas), las empresas
+competían por él, y como una consulta de `anio_actual` son 53 ventanas, tres
+empresas preguntando eso a la vez desalojaban las ventanas calientes de las otras
+diecisiete. El modo de falla es el peor: no rompe ningún test, no salta ninguna
+alerta, y la promesa medida de la tabla de arriba —4 ms— se degrada a segundos en
+silencio. Hoy el cache es un mapa de mapas: **64 ventanas por empresa** (el
+working set de la consulta más cara entra completo) y un techo de **16 empresas**
+guardadas a la vez, con LRU de verdad —se reinserta **en el acceso**, así que lo
+que se cae es lo que nadie mira, no lo más viejo de creación— y desalojando
+siempre dentro del mapa de la empresa que acaba de escribir. El techo cuenta
+entradas, no bytes: una empresa de mucho volumen pesa mucho más que otra con el
+mismo número de ventanas, y ese es el próximo lugar a mirar si el proceso crece
+de memoria.
+
 ---
 
 ## 6. Recetas
@@ -270,6 +330,11 @@ Las barreras ya te cubren: no hay que hacer nada para eso.
 node scripts/onboard.mjs --tenant=<id>
 ```
 
+El script pasa el `env` del tenant por el mismo `construirRegistro`/`entornoDe`
+que usa el server, así que lo que te muestra es exactamente lo que el server va a
+usar — y si la configuración es de las que no arrancan, te lo dice acá y no a las
+siete de la tarde.
+
 Un tenant es un **overlay de variables de entorno** sobre las del proceso
 ([`tenants/registry.ts`](../src/tenants/registry.ts)). No hay un modelo de
 configuración nuevo: lo que vale para una empresa vale para todas.
@@ -277,6 +342,34 @@ configuración nuevo: lo que vale para una empresa vale para todas.
 El `auth_token` es a la vez la credencial **y** el selector de empresa. No hay
 header de tenant a propósito: con un token compartido, cualquiera cambiaría de
 empresa cambiando un string.
+
+⚠️ **El overlay NO es herencia pura, y ese es el punto.** Lo que el tenant no
+declara no lo hereda: lo sensible se **borra** del entorno base
+(`VARIABLES_QUE_NO_SE_HEREDAN` — las cuatro `KAPSO_*`,
+`BILLER_REMITENTES_AUTORIZADOS`, los tres flags de capacidad de escritura y la
+identidad fiscal: RUT, sucursal, mapa de sucursales). Heredarlas mandaba los
+mensajes de una empresa por la cuenta de WhatsApp de otra, dejaba la allowlist de
+egreso apuntando a teléfonos ajenos, hacía valer la allowlist de consulta de A
+para B y regalaba el permiso de emitir en producción que alguien había habilitado
+para otra. Se borra en vez de exigir que se declare porque borrar hace el error
+**imposible** en vez de detectable, y se puede borrar porque el default de todas
+es el seguro: sin capability mode se queda en `read_only`, sin allowlist de Kapso
+no sale ningún mensaje. Lo que sí se hereda es lo que describe al **despliegue** y
+no al cliente: base URL, timeouts, puerto.
+
+Y hay una tercera regla, para las variables donde borrar afloja en vez de
+apretar: las tres rutas de persistencia (`BILLER_AUDIT_LOG_PATH`,
+`BILLER_IDEMPOTENCY_LOG_PATH`, `BILLER_BORRADOR_STORE_PATH`) y los topes
+`BILLER_MAX_MONTO_<MONEDA>` **ni se heredan ni se borran**: si el proceso las
+define y un tenant no declara la suya, el server **no arranca**. Sin ruta de
+audit no queda rastro fiscal; sin tope no hay nada entre una coma mal puesta y un
+CFE por cien veces lo que valía.
+
+Dos duplicados son fatales por la misma razón —parecen andar—: el mismo
+`BILLER_API_TOKEN` en dos tenants (mismo `cacheId` ⇒ misma sal y mismo espacio de
+borradores, con la idempotencia separada: un reintento por el otro token emite un
+duplicado ante DGI) y el mismo archivo en cualquiera de las tres rutas,
+comparadas en **absoluto** y de forma **cruzada** entre las tres variables.
 
 ### Tocar el enrutador de WhatsApp
 
@@ -388,7 +481,18 @@ Dicho en voz alta para que nadie lo prometa:
   es el que se rompe cuando el modelo se olvida un campo. El default del store es
   **memoria**, a propósito: el archivo (`BILLER_BORRADOR_STORE_PATH`) guarda el
   contenido del borrador —qué se vendió, a quién— y eso es información comercial
-  en disco. Los borradores vencen a las 24 h y se descartan al emitir.
+  en disco. Los borradores vencen a las 24 h y se descartan al emitir. Con el
+  canal de WhatsApp abierto, **`sesion` ya no puede apuntar a otro**: el borrador
+  es de quien lo está cargando, y el server contrasta contra el remitente que
+  verificó la barrera (§4.1).
+- **Una sesión HTTP no vive para siempre.** Vence a los 30 min sin uso
+  (`BILLER_HTTP_SESSION_TTL_MS`) y hay techo de 200 simultáneas
+  (`BILLER_HTTP_MAX_SESSIONS`), con LRU y **cerrando** el transporte al
+  desalojar: sacarlo del mapa sin cerrarlo es la misma fuga con otra cara y
+  encima invisible, porque el contador baja. Perder la sesión no pierde nada del
+  negocio —el borrador vive aparte, con su propio TTL—: cuesta un `initialize`.
+  El barrido es perezoso, al entrar cada request, para no dejar un `setInterval`
+  que hay que acordarse de `unref()` y que trabaja aunque no haya tráfico.
 - **En serverless la escritura se degrada a `read_only`**: la idempotencia es en
   memoria y un reintento duplicaría una factura ante DGI. Por el mismo motivo —un
   contexto nuevo por request— **el store de borradores en memoria no sirve ahí**:
