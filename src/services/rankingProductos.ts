@@ -38,7 +38,7 @@
 import { round2 } from "../biller/coerce.js";
 import { extractClienteNombre, extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
-import { clasificarParaFacturacion } from "./comprobanteFilters.js";
+import { clasificarParaFacturacion, contarSinEstadoConocido } from "./comprobanteFilters.js";
 import { monedaDeOrden } from "./monedaOrden.js";
 
 /**
@@ -347,6 +347,20 @@ export function rankingProductos(
     warnings.push(
       `${sinItems} comprobante(s) no traían 'items' y se ignoraron para este ranking: hay que ` +
         "consultarlos por 'id' para tener el detalle de productos.",
+    );
+  }
+
+  // El filtro por estado lo aplica `clasificarParaFacturacion`, que devuelve
+  // null y no dice por qué. Era el único ranking que excluía en silencio: el
+  // resto avisa, y el criterio solo es defendible acompañado del aviso (ver
+  // `estaAceptado` en estadoDgi.ts).
+  const sinEstadoConocido = soloAceptados ? contarSinEstadoConocido(comprobantes) : 0;
+  if (sinEstadoConocido > 0) {
+    warnings.push(
+      `${sinEstadoConocido} comprobante(s) llegaron sin estado DGI reconocible y NO se contaron: el ` +
+        'criterio es contar solo "Aceptado DGI", que es con el que Biller arma sus números. Si el ' +
+        "estado falta por un problema de la API y no del comprobante, este ranking está calculado " +
+        "sobre menos ventas de las que hubo, y la cobertura también.",
     );
   }
 

@@ -12,7 +12,7 @@ import { round2 } from "../biller/coerce.js";
 import { extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido, ComprobanteRecibido } from "../biller/types.js";
 import { classifyCfe, type CfeClassification } from "./cfeTypes.js";
-import { clasificarEstado } from "./resumenFacturacion.js";
+import { clasificarEstado } from "./estadoDgi.js";
 
 // =============================================================================
 // LA REGLA DE QUÉ SUMA EN UN TOTAL DE FACTURACIÓN
@@ -38,11 +38,18 @@ import { clasificarEstado } from "./resumenFacturacion.js";
 //      sus propios totales (docs/CALCULOS.md §1); contar rechazados o
 //      pendientes da un número que no cierra contra el panel.
 //
-// OJO CON LAS DOS `clasificarEstado` DEL PROYECTO. La que se usa acá es la de
-// `resumenFacturacion.ts` (aceptado / no_aceptado / desconocido), que es la que
-// usan todos los totales. La de `estadoDgi.ts` responde otra pregunta —si el
-// comprobante es un respaldo fiscal válido— y ahí "Envío no corresponde" SÍ
-// cuenta. Mezclarlas cambia totales sin que ningún test de tipos chille.
+//      Un estado que no reconocemos (null, vacío, o un texto nuevo) TAMPOCO
+//      cuenta: no se puede afirmar que Biller lo esté sumando. El aviso al
+//      usuario compensa lo que eso tiene de injusto — ver `estaAceptado` en
+//      `estadoDgi.ts`.
+//
+// `clasificarEstado` HAY UNA SOLA, y vive en `estadoDgi.ts`. Hasta agosto de
+// 2026 había dos con el mismo nombre y semánticas distintas —la otra estaba en
+// `resumenFacturacion.ts` y contaba el estado desconocido—, así que cambiar un
+// import por el otro movía totales sin que ningún chequeo de tipos chillara.
+// Lo que sigue siendo distinto es `esVentaValida` (mismo archivo), que responde
+// otra pregunta —si el CFE es respaldo fiscal válido— y ahí "Envío no
+// corresponde" SÍ cuenta. Esa no decide totales: no la uses para sumar plata.
 // =============================================================================
 
 /**
@@ -67,6 +74,23 @@ export function clasificarParaFacturacion(
   if (!clasif.suma_en_resumen) return null;
   if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") return null;
   return clasif;
+}
+
+/**
+ * Cuántos comprobantes que POR TIPO entrarían en un total de facturación traen
+ * un estado DGI que no se puede leer (null, vacío, o un texto irreconocible).
+ *
+ * Existe porque el criterio estricto de `estaAceptado` los deja afuera, y este
+ * proyecto se comprometió a que ninguna exclusión por estado sea silenciosa:
+ * quien excluye tiene que poder decir cuántos excluyó. Filtra por
+ * `suma_en_resumen` a propósito — contar acá un recibo o un eRemito sin estado
+ * inflaría un aviso sobre un comprobante que igual no iba a sumar.
+ */
+export function contarSinEstadoConocido(comprobantes: ComprobanteEmitido[]): number {
+  return comprobantes.reduce((n, c) => {
+    if (!classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia).suma_en_resumen) return n;
+    return clasificarEstado(c.estado) === "desconocido" ? n + 1 : n;
+  }, 0);
 }
 
 /**

@@ -35,7 +35,7 @@ import { round2 } from "../biller/coerce.js";
 import { extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./resumenFacturacion.js";
+import { clasificarEstado } from "./estadoDgi.js";
 import { monedaDeOrden } from "./monedaOrden.js";
 
 /** Clave del grupo que junta los comprobantes sin sucursal declarada. */
@@ -343,10 +343,16 @@ export function rankingSucursales(
         "NO se sumaron a ninguna sucursal real: hacerlo le inventaría facturación a un local.",
     );
   }
+  // Ver la nota equivalente en rankingClientes: el texto sigue a `soloAceptados`
+  // porque con el filtro apagado estos comprobantes SÍ están contados.
   if (actual.sinEstado > 0) {
     warnings.push(
-      `${actual.sinEstado} comprobante(s) llegaron sin estado DGI reconocible. Se contaron igual ` +
-        "(la ausencia del dato no es evidencia de rechazo).",
+      soloAceptados
+        ? `${actual.sinEstado} comprobante(s) llegaron sin estado DGI reconocible y NO se contaron: el ` +
+          'criterio es contar solo "Aceptado DGI", que es con el que Biller arma sus números. Si se ' +
+          "concentran en una sucursal, su participación en el ranking sale más baja de lo real."
+        : `${actual.sinEstado} comprobante(s) llegaron sin estado DGI reconocible y SÍ están contados ` +
+          "porque solo_aceptados=false. Ese monto NO va a coincidir con lo que muestra Biller.",
     );
   }
   if (Object.keys(nombres).length === 0 && actual.porSucursal.size > 1) {

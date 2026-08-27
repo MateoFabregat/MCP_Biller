@@ -30,7 +30,7 @@ import { round2 } from "../biller/coerce.js";
 import { extractClienteNombre, extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./resumenFacturacion.js";
+import { clasificarEstado } from "./estadoDgi.js";
 import { monedaDeOrden } from "./monedaOrden.js";
 
 /** Días sin comprar a partir de los cuales un cliente se considera dormido. */
@@ -450,10 +450,20 @@ export function rankingClientes(
       `${sinFecha} comprobante(s) sin fecha de emisión utilizable: no cuentan para "nuevo" ni "dormido".`,
     );
   }
+  // El texto tiene que seguir a `soloAceptados`, no describir el default. Con
+  // solo_aceptados=false estos comprobantes SÍ están contados, y afirmar lo
+  // contrario es el mismo pecado que este criterio vino a erradicar —el warning
+  // viejo decía "se contaron igual" mientras el código los excluía—, nada más
+  // que con el signo dado vuelta.
   if (sinEstado > 0) {
     warnings.push(
-      `${sinEstado} comprobante(s) llegaron sin estado DGI reconocible. Se contaron igual ` +
-        "(la ausencia del dato no es evidencia de rechazo).",
+      soloAceptados
+        ? `${sinEstado} comprobante(s) llegaron sin estado DGI reconocible y NO se contaron: el ` +
+          'criterio es contar solo "Aceptado DGI", que es con el que Biller arma sus números. Si el ' +
+          "estado falta por un problema de la API y no del comprobante, el ranking está calculado " +
+          "sobre menos ventas de las que hubo."
+        : `${sinEstado} comprobante(s) llegaron sin estado DGI reconocible y SÍ están contados ` +
+          "porque solo_aceptados=false. Ese monto NO va a coincidir con lo que muestra Biller.",
     );
   }
 

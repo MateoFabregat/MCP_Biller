@@ -35,7 +35,7 @@ import { round2 } from "../biller/coerce.js";
 import { extractClienteNombre, extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./resumenFacturacion.js";
+import { clasificarEstado } from "./estadoDgi.js";
 import { monedaDeOrden } from "./monedaOrden.js";
 
 /** Actividad de una cohorte en un mes concreto. */
@@ -161,11 +161,14 @@ export function calcularCohortes(
   let analizados = 0;
   let sinReceptor = 0;
   let sinFecha = 0;
+  let sinEstado = 0;
 
   for (const c of comprobantes) {
     const clasificacion = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
     if (!clasificacion.suma_en_resumen) continue;
-    if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") continue;
+    const claseEstado = clasificarEstado(c.estado);
+    if (claseEstado === "desconocido") sinEstado += 1;
+    if (soloAceptados && claseEstado !== "aceptado") continue;
     if (c.total === null || c.moneda === null) continue;
     analizados += 1;
 
@@ -312,6 +315,17 @@ export function calcularCohortes(
   }
   if (sinFecha > 0) {
     warnings.push(`${sinFecha} comprobante(s) sin fecha de emisión utilizable: no se pudieron cohortizar.`);
+  }
+  // Acá la exclusión por estado pega más fuerte que en un total: si la ÚNICA
+  // compra de un cliente en su primer mes vino con el estado en null, ese
+  // cliente entra a la cohorte equivocada —o no entra— y la curva de retención
+  // sale mal para todos los meses siguientes, no solo por el importe.
+  if (soloAceptados && sinEstado > 0) {
+    warnings.push(
+      `${sinEstado} comprobante(s) llegaron sin estado DGI reconocible y NO se cohortizaron ` +
+        '(el criterio es contar solo "Aceptado DGI"). Si alguno era la primera compra de un ' +
+        "cliente, ese cliente quedó asignado a un mes de alta posterior al real.",
+    );
   }
   if (meses.length < 3) {
     warnings.push(

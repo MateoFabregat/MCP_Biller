@@ -11,7 +11,8 @@
 // únicamente los comprobantes en estado "Aceptado DGI", que es el criterio con
 // el que Biller muestra sus propios números. Contar los rechazados/pendientes
 // da un total que no coincide con el panel de Biller. El total con todos los
-// estados se devuelve igual, aparte, para poder comparar.
+// estados se devuelve igual, aparte, para poder comparar. El criterio vive en
+// `estaAceptado` (`estadoDgi.ts`), una sola vez para todo el proyecto.
 //
 // AGRUPACIÓN (`agrupar_por`): permite cortar el período por sucursal, día, mes,
 // tipo de comprobante, moneda o cliente — p.ej. "cuánto vendí en cada local".
@@ -31,6 +32,8 @@ import { round2 } from "../biller/coerce.js";
 import { extractClienteNombre, extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe, type CfeCategoria } from "./cfeTypes.js";
+import { formatearUy } from "./importe.js";
+import { clasificarEstado, estaAceptado } from "./estadoDgi.js";
 import { SIN_RECEPTOR } from "./rankingClientes.js";
 import { AcumuladorUyu, type EquivalenteUyuResultado } from "./tipoCambio.js";
 
@@ -135,11 +138,21 @@ export interface ResumenResultado {
   no_convertir_moneda: true;
 }
 
-/** Estado que indica que el CFE fue aceptado por DGI (cuenta "en firme"). */
-const ESTADO_ACEPTADO = /aceptado/i;
-/** "Sobre Rechazado DGI" contiene "echazado" pero también hay que descartarlo. */
-const ESTADO_RECHAZADO = /rechazado/i;
 const ESTADO_SIN_DATO = "(sin estado)";
+
+/**
+ * El estado como CLAVE de un conteo o de un grupo, normalizado igual que en
+ * `clasificarEstado`: el vacío y el whitespace son "sin dato", no una categoría
+ * propia.
+ *
+ * `||` y no `??` a propósito: el caso que arregla es justamente la cadena
+ * vacía, que `??` deja pasar. Con `??`, un `estado: ""` abría su propia clave y
+ * el aviso salía con una entrada sin nombre —"(sin estado): 1, : 1"—, o sea el
+ * mismo comprobante contado en dos categorías distintas según qué mandó la API.
+ */
+function claveEstado(estado: string | null): string {
+  return estado?.trim() || ESTADO_SIN_DATO;
+}
 
 export interface ResumenOptions {
   incluir_anulados: boolean;
@@ -154,28 +167,17 @@ export interface ResumenOptions {
   limite_detalle?: number;
 }
 
-/**
- * Clasifica el estado DGI de un comprobante.
- *
- * `desconocido` (estado null o con un texto que no reconocemos) NO es lo mismo
- * que rechazado: la ausencia del dato no es evidencia de rechazo. Excluir esos
- * comprobantes del total daría un número bajo sin motivo. Se cuentan, y se
- * avisa cuántos fueron.
- */
-export type EstadoDgi = "aceptado" | "no_aceptado" | "desconocido";
-
-export function clasificarEstado(estado: string | null): EstadoDgi {
-  if (estado === null || estado.trim() === "") return "desconocido";
-  if (ESTADO_RECHAZADO.test(estado)) return "no_aceptado";
-  if (ESTADO_ACEPTADO.test(estado)) return "aceptado";
-  // "Pendiente DGI", "Envío no corresponde", etc.
-  return "no_aceptado";
-}
-
-/** true si el estado indica aceptación efectiva por DGI. */
-export function estaAceptado(estado: string | null): boolean {
-  return clasificarEstado(estado) === "aceptado";
-}
+// El criterio de estado ya no vive acá.
+//
+// Hasta agosto de 2026 este archivo tenía su propia `clasificarEstado`
+// (`aceptado | no_aceptado | desconocido`) que CONTABA el estado desconocido en
+// el total, mientras las otras siete implementaciones lo excluían: para los
+// mismos comprobantes, el resumen y el ranking contestaban distinto. Se unificó
+// en `estadoDgi.ts`, que es la que tiene escrito qué significa cada estado.
+// Se re-exporta `estaAceptado` porque es el nombre con el que la piden
+// `anulacion.ts`, `cuentaCorriente.ts` y `vencimientos.ts`; el dueño del
+// criterio sigue siendo uno solo.
+export { estaAceptado };
 
 function valorDimension(
   c: ComprobanteEmitido,
@@ -212,10 +214,50 @@ function valorDimension(
       return { valor, etiqueta: valor };
     }
     case "estado": {
-      const estado = c.estado ?? ESTADO_SIN_DATO;
+      // Misma normalización que el conteo: agrupar por estado no puede abrir un
+      // grupo con la etiqueta vacía.
+      const estado = claveEstado(c.estado);
       return { valor: estado, etiqueta: estado };
     }
   }
+}
+
+/**
+ * Símbolo de la moneda para un eco de plata. El peso y el dólar tienen el suyo;
+ * cualquier otra cosa se nombra con su código antes que inventarle un signo.
+ *
+ * No se importa `simboloMoneda` de `kapso/emision.ts` a propósito: un servicio
+ * de agregación no puede depender de la capa de WhatsApp. Si algún día hace
+ * falta en un tercer lugar, el que se mueve es aquel, hacia `importe.ts`.
+ */
+function simboloDe(moneda: string): string {
+  if (moneda === "UYU") return "$";
+  if (moneda === "USD") return "US$";
+  return `${moneda} `;
+}
+
+/**
+ * "$1.500, US$30" a partir de un mapa por moneda. `null` si no hay nada, para
+ * que el llamador decida si esa rama del texto existe o no: un "sumaban " vacío
+ * es peor que no decir nada.
+ *
+ * Dos reglas, y ninguna es cosmética:
+ *
+ *   - Los importes pasan por `formatearUy` como toda la plata del proyecto (ver
+ *     el comentario de `calcularTotales.ts`): un eco escrito "5000" en un país
+ *     que escribe "5.000" es un eco que el usuario no puede verificar de un
+ *     vistazo.
+ *   - Se imprime el VALOR ABSOLUTO, y el signo lo pone la palabra de al lado
+ *     ("sumaban" / "restaban"). El bucket negativo viene acumulado con signo, y
+ *     escribir "restaban -90.000" es doble negación: quien lo lee rápido
+ *     corrige el total para el lado contrario, que es exactamente lo que este
+ *     aviso vino a evitar.
+ */
+function formatearMontos(porMoneda: Record<string, number>): string | null {
+  const partes = Object.entries(porMoneda)
+    .filter(([, v]) => v !== 0)
+    .map(([m, v]) => `${simboloDe(m)}${formatearUy(Math.abs(round2(v)))}`);
+  return partes.length === 0 ? null : partes.join(", ");
 }
 
 export function resumirFacturacion(
@@ -247,7 +289,22 @@ export function resumirFacturacion(
   let conteo_incluidos = 0;
   let conteo_excluidos = 0;
   let excluidosPorEstado = 0;
+  let cobranzasExcluidasPorEstado = 0;
   let sinEstadoConocido = 0;
+  // Cuánto sumaban los de estado desconocido, por moneda. Es la mitad que hace
+  // tolerable el criterio estricto: sin el monto, "3 comprobantes sin estado"
+  // no le dice al usuario si el total le quedó $600 o $600.000 corto.
+  //
+  // Van SEPARADOS lo que suma y lo que resta, y no un neto, porque el neto
+  // miente en el caso que más importa: una venta de +5.000 y su nota de crédito
+  // de −5.000, las dos sin estado, dan un neto de 0 y el aviso diría "sumaban
+  // UYU 0" — o sea, "no te quedó nada afuera" cuando quedaron afuera diez mil
+  // pesos de movimiento. Que la NC de estado desconocido no reste es
+  // justamente el riesgo grande de este criterio: infla el total.
+  const montoSinEstadoPositivo: Record<string, number> = {};
+  const montoSinEstadoNegativo: Record<string, number> = {};
+  // Cuánto sumaban los recibos que quedaron fuera de `cobrado_por_moneda`.
+  const montoCobranzasExcluidas: Record<string, number> = {};
 
   for (const c of comprobantes) {
     // Validación de campos mínimos: si falta alguno, no inventar -> excluir.
@@ -266,11 +323,19 @@ export function resumirFacturacion(
     // contabiliza aparte, en `cobrado_por_moneda`.
     if (clasif.categoria === "cobranza") {
       conteo_excluidos += 1;
-      if (!soloAceptados || clasificarEstado(c.estado) !== "no_aceptado") {
+      // Mismo criterio de estado que el total de facturación, a propósito:
+      // `cobrado_por_moneda` también es plata que el usuario compara contra
+      // Biller. Un recibo sin estado reconocible tampoco cuenta acá.
+      if (!soloAceptados || estaAceptado(c.estado)) {
         const bucketCobrado = (cobrado_por_moneda[c.moneda] ??= { total: 0, comprobantes: 0 });
         bucketCobrado.total = round2(bucketCobrado.total + c.total);
         bucketCobrado.comprobantes += 1;
         acumuladorUyuCobrado.agregar(c.total, c.moneda, c.tasa_cambio);
+      } else {
+        cobranzasExcluidasPorEstado += 1;
+        montoCobranzasExcluidas[c.moneda] = round2(
+          (montoCobranzasExcluidas[c.moneda] ?? 0) + c.total,
+        );
       }
       continue;
     }
@@ -295,7 +360,7 @@ export function resumirFacturacion(
     const aporte = clasif.signo * c.total;
 
     // Desglose por estado DGI de todos los comprobantes clasificables.
-    const estadoKey = c.estado ?? ESTADO_SIN_DATO;
+    const estadoKey = claveEstado(c.estado);
     conteo_por_estado[estadoKey] = (conteo_por_estado[estadoKey] ?? 0) + 1;
 
     // Total con TODOS los estados (referencia de comparación).
@@ -303,13 +368,27 @@ export function resumirFacturacion(
     bucketTodos.total = round2(bucketTodos.total + aporte);
     bucketTodos.comprobantes += 1;
 
-    // Criterio de estado para el total principal. Solo se excluye lo que
-    // sabemos que NO fue aceptado; el estado desconocido se cuenta y se avisa.
+    // Criterio de estado para el total principal: SOLO "Aceptado DGI", igual
+    // que en rankings, comparación, cohortes y posición IVA. El estado
+    // desconocido tampoco cuenta.
+    //
+    // Antes acá se excluía únicamente lo que se sabía rechazado, con el
+    // argumento de que "la ausencia del dato no es evidencia de rechazo". El
+    // argumento es cierto pero perdió: mientras el resumen contaba los
+    // desconocidos y los rankings los excluían, las dos tools contestaban
+    // números distintos PARA LOS MISMOS COMPROBANTES. Se resolvió a favor de
+    // "Aceptado DGI" porque ese es el criterio con el que Biller arma sus
+    // propios totales, y un número que no cierra contra el panel no sirve
+    // aunque sea más generoso. Lo que sobrevive del argumento viejo es el
+    // aviso: se cuenta cuántos desconocidos hubo y cuánto sumaban, y
+    // `totales_por_moneda_todos_los_estados` deja ver el total sin el filtro.
     const estadoClasificado = clasificarEstado(c.estado);
     if (estadoClasificado === "desconocido") {
       sinEstadoConocido += 1;
+      const bruto = aporte >= 0 ? montoSinEstadoPositivo : montoSinEstadoNegativo;
+      bruto[moneda] = round2((bruto[moneda] ?? 0) + aporte);
     }
-    if (soloAceptados && estadoClasificado === "no_aceptado") {
+    if (soloAceptados && estadoClasificado !== "aceptado") {
       excluidosPorEstado += 1;
       conteo_excluidos += 1;
       continue;
@@ -389,15 +468,34 @@ export function resumirFacturacion(
   }
 
   // --- Warnings sobre el criterio de estado -------------------------------
+  // "(sin estado)" entra en la lista: desde que el criterio es "solo Aceptado
+  // DGI", esos comprobantes también quedan afuera, y una enumeración que no los
+  // nombra no suma la cantidad que dice el warning de al lado.
   const noAceptados = Object.entries(conteo_por_estado)
-    .filter(([e]) => e !== ESTADO_SIN_DATO && !estaAceptado(e))
+    .filter(([e]) => !estaAceptado(e === ESTADO_SIN_DATO ? null : e))
     .map(([e, n]) => `${e}: ${n}`);
 
   if (sinEstadoConocido > 0) {
+    const suman = formatearMontos(montoSinEstadoPositivo);
+    const restan = formatearMontos(montoSinEstadoNegativo);
+    // Tres redacciones y no una con ceros adentro: "sumaban 0 en ventas" no
+    // dice de qué moneda ni si el 0 es un total o la ausencia de ese lado.
+    const detalle =
+      restan === null
+        ? `sumaban ${suman ?? "0"}`
+        : suman === null
+          ? `restaban ${restan} en notas de crédito, sin ninguna venta del otro lado`
+          : `sumaban ${suman} en ventas y restaban ${restan} en notas de crédito`;
     warningsSet.add(
-      `${sinEstadoConocido} comprobante(s) vinieron SIN estado DGI. Se contaron en el total: la ` +
-        "ausencia del dato no significa que hayan sido rechazados. Verificá esos comprobantes si el " +
-        "total no coincide con Biller.",
+      `${sinEstadoConocido} comprobante(s) vinieron SIN un estado DGI reconocible (null, vacío o un ` +
+        `texto que no conocemos) y ${detalle}. ` +
+        (soloAceptados
+          ? "NO se contaron en el total: el criterio es contar solo \"Aceptado DGI\", que es con el " +
+            "que Biller arma sus números. Ojo en las dos direcciones: si lo que quedó afuera son " +
+            "ventas, el total está corto; si son notas de crédito, el total está INFLADO porque esa " +
+            "anulación no restó. Comparalo contra 'totales_por_moneda_todos_los_estados' antes de " +
+            "darlo por bueno."
+          : "Están contados en el total porque solo_aceptados=false."),
     );
   }
 
@@ -407,6 +505,20 @@ export function resumirFacturacion(
         `El total cuenta SOLO comprobantes "Aceptado DGI" (criterio de Biller). Se excluyeron ` +
           `${excluidosPorEstado} comprobante(s) por estado (${noAceptados.join(", ")}). ` +
           "Mirá 'totales_por_moneda_todos_los_estados' para el total sin ese filtro.",
+      );
+    }
+    if (cobranzasExcluidasPorEstado > 0) {
+      // Con el monto, no solo la cantidad: es la misma regla que le exigimos al
+      // aviso del total (ver `estaAceptado` en estadoDgi.ts). Estos recibos no
+      // aparecen en `conteo_por_estado` —esa enumeración se llena después de
+      // este `continue`, y es la de la FACTURACIÓN—, así que este warning es lo
+      // único que los nombra.
+      warningsSet.add(
+        `${cobranzasExcluidasPorEstado} recibo(s) de cobranza por ` +
+          `${formatearMontos(montoCobranzasExcluidas) ?? "0"} quedaron fuera de ` +
+          '\'cobrado_por_moneda\' por no estar en estado "Aceptado DGI". Se les aplica el mismo ' +
+          "criterio que al total: lo cobrado también se compara contra Biller. No están contados " +
+          "en 'conteo_por_estado', que es el desglose de la facturación.",
       );
     }
   } else if (noAceptados.length > 0) {

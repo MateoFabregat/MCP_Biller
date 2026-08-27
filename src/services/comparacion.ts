@@ -29,7 +29,7 @@
 import { round2 } from "../biller/coerce.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./resumenFacturacion.js";
+import { clasificarEstado } from "./estadoDgi.js";
 import type { RangoFechas } from "./periodo.js";
 import { hoyComoDateUy, hoyIsoUy } from "./fechaUy.js";
 
@@ -135,19 +135,26 @@ function diasEntre(desde: string, hasta: string): number {
 function totalizar(
   comprobantes: ComprobanteEmitido[],
   soloAceptados: boolean,
-): { totales: Record<string, number>; conteo: number } {
+): { totales: Record<string, number>; conteo: number; sinEstado: number } {
   const totales: Record<string, number> = {};
   let conteo = 0;
+  // Comprobantes con estado DGI irreconocible. Se cuentan aunque no sumen,
+  // porque acá la exclusión silenciosa miente más que en otros lados: una
+  // variación se lee como "vendí menos", y si lo único que cambió fue cuántos
+  // estados vinieron nulos, la caída es del dato y no del negocio.
+  let sinEstado = 0;
 
   for (const c of comprobantes) {
     const clasificacion = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
     if (!clasificacion.suma_en_resumen) continue;
-    if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") continue;
+    const clase = clasificarEstado(c.estado);
+    if (clase === "desconocido") sinEstado += 1;
+    if (soloAceptados && clase !== "aceptado") continue;
     if (c.total === null || c.moneda === null) continue;
     totales[c.moneda] = round2((totales[c.moneda] ?? 0) + c.total * clasificacion.signo);
     conteo += 1;
   }
-  return { totales, conteo };
+  return { totales, conteo, sinEstado };
 }
 
 function lecturaVariacion(moneda: string, pct: number | null, abs: number): string {
@@ -350,6 +357,16 @@ export function compararPeriodos(
 
   const act = totalizar(actualComprobantes, soloAceptados);
   const ant = totalizar(anteriorComprobantes, soloAceptados);
+
+  if (soloAceptados && act.sinEstado + ant.sinEstado > 0) {
+    warnings.push(
+      `Quedaron fuera de la comparación ${act.sinEstado} comprobante(s) del período actual y ` +
+        `${ant.sinEstado} del anterior por no tener un estado DGI reconocible. El criterio es ` +
+        'contar solo "Aceptado DGI" (el de Biller), pero OJO: si los dos períodos no tienen la ' +
+        "misma cantidad de estados faltantes, parte de la variación que muestra este informe es " +
+        "del dato y no de las ventas.",
+    );
+  }
 
   // --- Variaciones por moneda ----------------------------------------------
   const monedas = [...new Set([...Object.keys(act.totales), ...Object.keys(ant.totales)])].sort();

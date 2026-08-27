@@ -19,6 +19,17 @@
 //   - Al usuario se le dice que su factura no sirve, y sí sirve.
 //   - Al filtrar totales por "Aceptado DGI", un comercio que vende con tickets
 //     chicos se queda sin la mayor parte de sus ventas. Ver `esVentaValida`.
+//
+// ESTE ARCHIVO ES EL DUEÑO ÚNICO DE `clasificarEstado`
+//
+// Hasta agosto de 2026 había DOS funciones con ese nombre: esta y otra en
+// `resumenFacturacion.ts` que devolvía `aceptado | no_aceptado | desconocido`.
+// El resumen excluía solo lo que sabía rechazado y CONTABA el estado
+// desconocido; los rankings, la comparación, las cohortes y la posición IVA
+// filtraban con `!== "aceptado"` y lo EXCLUÍAN. Para los mismos comprobantes,
+// dos totales distintos, y cambiar un import por el otro los movía sin que tsc
+// dijera nada. Se unificó acá, que es la que tiene el razonamiento escrito.
+// El criterio de qué suma en un total vive en `estaAceptado`, abajo.
 // =============================================================================
 
 /** Estados observados de verdad en la API. NO existe "Anulado". */
@@ -57,15 +68,62 @@ export function clasificarEstado(estado: string | null | undefined): ClaseEstado
 }
 
 /**
+ * EL criterio de estado de todo total de plata del proyecto (`solo_aceptados`):
+ * cuenta únicamente "Aceptado DGI".
+ *
+ * Por qué tan estricto, incluido el estado DESCONOCIDO (`estado: null`, vacío,
+ * o un texto que no reconocemos): el valor del asistente depende de que sus
+ * números coincidan con los que el usuario ve en su panel de Biller, y Biller
+ * arma sus totales con "Aceptado DGI". Un total conservador que cierra es mejor
+ * que uno generoso que no. Contar lo desconocido —el criterio que tenía el
+ * resumen hasta agosto de 2026, con el argumento de que "la ausencia del dato
+ * no es evidencia de rechazo"— hacía que el resumen y los rankings contestaran
+ * distinto para los mismos comprobantes.
+ *
+ * Ese argumento no era tonto y no se perdió: si el `estado` falta por un
+ * problema de la API y no del comprobante, excluirlo baja el total sin motivo
+ * visible. Por eso el criterio estricto SOLO es tolerable acompañado del aviso:
+ * quien excluye por estado tiene que decir CUÁNTOS excluyó, y donde lo que se
+ * responde es un monto —el resumen y lo cobrado— también CUÁNTO sumaban,
+ * separando lo que sumaba de lo que restaba (una nota de crédito excluida no
+ * deja el total corto: lo deja inflado). Ver el warning de `sinEstadoConocido`
+ * en `resumenFacturacion.ts`, y los equivalentes en los rankings de clientes,
+ * sucursales y productos, la comparación, las cohortes y la posición IVA: no
+ * queda ningún camino de plata que excluya en silencio.
+ *
+ * COMPARA EXACTO, NO POR SUBSTRING. La implementación que había en
+ * `resumenFacturacion.ts` usaba `/aceptado/i`, así que un hipotético
+ * "Aceptado DGI (con observaciones)" contaba; con esta cuenta como desconocido
+ * y no suma. No hay ninguna evidencia de que la API devuelva variantes —los
+ * cinco estados observados están arriba—, y ante un texto que no conocemos
+ * preferimos no afirmar que Biller lo está sumando. Pero el cambio no es
+ * inocuo: `anulacion.ts`, `cuentaCorriente.ts` y `vencimientos.ts` piden esta
+ * función y una variante así sería, en cuenta corriente, un recibo que deja de
+ * imputarse y un cliente al que se le reclama plata que ya pagó. Si alguna vez
+ * aparece una variante real, la decisión se toma acá y en un solo lugar. Lo
+ * fija `tests/estadoDgi.test.ts`.
+ *
+ * MODO DE FALLA si alguien lo relaja: el total del resumen deja de coincidir
+ * con el del ranking, nada falla, y nadie se entera hasta que un cliente lo
+ * nota.
+ */
+export function estaAceptado(estado: string | null | undefined): boolean {
+  return clasificarEstado(estado) === "aceptado";
+}
+
+/**
  * ¿Este comprobante es una venta válida que debería contar en los totales?
  *
  * Incluye "Envío no corresponde" a propósito: es una venta real y facturada.
  * Excluirla porque no fue enviada individualmente a DGI es confundir el canal
  * de reporte con la validez del documento.
  *
- * OJO: esto NO es lo mismo que el filtro `solo_aceptados` que usan hoy las
- * tools de análisis, que compara contra "Aceptado DGI" a secas. Ver el aviso
- * de `advertenciaSiHayNoCorresponde`.
+ * OJO: esto NO es lo que usan los totales. Los totales usan `estaAceptado`, que
+ * compara contra "Aceptado DGI" a secas y por lo tanto DEJA AFUERA el "Envío no
+ * corresponde". La discrepancia es conocida y está sin resolver: arreglarla
+ * cambia el criterio fiscal de todos los totales del proyecto y merece su
+ * propio commit con su propio diferencial, no venir de arriba de otro cambio.
+ * Ver el aviso de `advertenciaDeEstado`.
  */
 export function esVentaValida(estado: string | null | undefined): boolean {
   const clase = clasificarEstado(estado);

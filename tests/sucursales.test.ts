@@ -181,7 +181,9 @@ describe("estados DGI", () => {
     expect(r.sucursales[0]!.facturado_por_moneda["UYU"]).toBe(1000);
   });
 
-  it("un estado desconocido se cuenta igual y se avisa", () => {
+  // El título dice la condición a propósito: con el default (solo_aceptados
+  // true) un estado desconocido NO se cuenta. Ver tests/estadoDgi.test.ts.
+  it("con solo_aceptados=false un estado desconocido se cuenta, y se avisa", () => {
     const r = ranking([crudo({ id: 1, sucursal: 6, total: 1000, estado: null })], null, {
       solo_aceptados: false,
     });

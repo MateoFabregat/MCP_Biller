@@ -53,11 +53,25 @@ Con tres reglas que cambian el resultado:
 |---|---|
 | `signo` sale del **tipo de comprobante** | Ventas +1, Notas de Crédito **−1**, Notas de Débito +1. Sin esto, un cliente al que le facturaste 100 y le hiciste 90 de NC "facturó" 100. |
 | Solo cuentan los **"Aceptado DGI"** (`solo_aceptados`, default `true`) | Es el criterio con el que Biller muestra sus propios totales. Contar los rechazados da un número que no coincide con el panel. |
+| El estado **desconocido tampoco cuenta** | `estado: null`, vacío o un texto que el código no reconoce no permite afirmar que Biller lo esté sumando. Hasta agosto de 2026 el resumen sí los contaba y los rankings no: para los mismos comprobantes había dos totales. Se unificó hacia el criterio estricto, y **la exclusión se avisa siempre**: cuántos fueron y cuánto sumaban. |
 | Los **recibos NO son facturación** | Un recibo se emite como e-Ticket o e-Factura: por tipo es indistinguible de una venta. Lo distingue `indicador_cobranza_propia = 1`. Sumarlo duplicaría la venta. Va aparte, en `cobrado_por_moneda`. |
 
 **Estados observados** en el campo `estado`: `Aceptado DGI`, `Rechazado DGI`,
 `Sobre Rechazado DGI`, `Pendiente DGI`, `Envío no corresponde`. No existe
 "Anulado" — anular genera una Nota de Crédito separada, que ya resta.
+
+Los clasifica **una sola función**, `clasificarEstado` en
+`src/services/estadoDgi.ts`, y el criterio de qué suma es `estaAceptado` en el
+mismo archivo. Vale para el resumen, los rankings, la comparación de períodos,
+las cohortes y la posición de IVA: si dos de esas tools contestan totales
+distintos para los mismos comprobantes, es un bug, no una diferencia de
+criterio.
+
+Pendiente y anotado: `"Envío no corresponde"` HOY no suma, y el propio
+`estadoDgi.ts` sostiene que debería (es una venta real; que no viaje sola a DGI
+es el canal de reporte, no la validez del documento). Cambiarlo mueve los
+totales de un comercio de tickets chicos casi por completo, así que espera su
+propio commit y su propio diferencial.
 
 ### 1.1. El total en pesos cuando hay varias monedas 🟢
 
@@ -327,7 +341,7 @@ corriente), se dice en `cobertura` con el motivo — no se calla.
 
 | Alerta | Cálculo | Precisión |
 |---|---|---|
-| Rechazos DGI | agrupa por `estado` los que no fueron aceptados | 🟢 exacta |
+| Rechazos DGI | agrupa por `estado` todo lo que no sea "Aceptado DGI" y traiga un estado: rechazados, pendientes, "Envío no corresponde" y cualquier texto que el código no reconozca (una redacción nueva de rechazo tiene que verse igual). El estado **ausente** —`null` o vacío— NO se alerta: la falta del dato no es evidencia de rechazo | 🟢 exacta |
 | CAE por agotarse | `fin − ultimo_numero_usado` | 🟡 **estimación optimista** |
 | CAE por vencer | `fecha_expiracion − hoy` | 🟢 exacta |
 | Emisión tardía | `fecha_creacion − fecha_emision` | 🟢 exacta (≥3 días avisa, ≥10 crítica) |

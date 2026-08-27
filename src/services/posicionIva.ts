@@ -28,7 +28,7 @@
 import { round2 } from "../biller/coerce.js";
 import type { ComprobanteEmitido, ComprobanteRecibido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./resumenFacturacion.js";
+import { clasificarEstado } from "./estadoDgi.js";
 
 export interface IvaPorTasa {
   tasa_minima: number;
@@ -123,12 +123,15 @@ export function calcularPosicionIva(
   // --- IVA débito (ventas) --------------------------------------------------
   let emitidosAnalizados = 0;
   let emitidosSinIva = 0;
+  let emitidosSinEstado = 0;
 
   for (const c of emitidos) {
     const clasificacion = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
     // Los recibos no generan IVA: son cobro de una factura que ya lo generó.
     if (!clasificacion.suma_en_resumen) continue;
-    if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") continue;
+    const claseEstado = clasificarEstado(c.estado);
+    if (claseEstado === "desconocido") emitidosSinEstado += 1;
+    if (soloAceptados && claseEstado !== "aceptado") continue;
     if (c.moneda === null) continue;
 
     const min = c.iva.tasa_minima ?? 0;
@@ -205,6 +208,17 @@ export function calcularPosicionIva(
       "No se encontraron comprobantes recibidos en el período: la posición mostrada es solo el IVA " +
         "débito, SIN crédito fiscal. Verificá que las compras estén disponibles en DGI antes de usar " +
         "este número.",
+    );
+  }
+  // Este número lo puede terminar mirando alguien para saber cuánto va a pagar.
+  // Un IVA débito calculado sobre menos ventas de las que hubo da una posición
+  // más baja que la real, y eso se paga en multa: el aviso no es opcional.
+  if (soloAceptados && emitidosSinEstado > 0) {
+    warnings.push(
+      `${emitidosSinEstado} comprobante(s) emitidos llegaron sin estado DGI reconocible y NO ` +
+        'entraron en el IVA débito (el criterio es contar solo "Aceptado DGI"). Si el estado falta ' +
+        "por un problema de la API y no del comprobante, la posición estimada queda MÁS BAJA que la " +
+        "real: verificá esos comprobantes en Biller antes de usar este número.",
     );
   }
   if (emitidosSinIva > 0) {

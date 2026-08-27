@@ -6,12 +6,16 @@ import { handleResumenFacturacion } from "../src/tools/resumenFacturacion.js";
 import { EMITIDOS_CON_ESTADO } from "./fixtures.js";
 import { makeCtx } from "./helpers.js";
 
+// Todos llevan estado "Aceptado DGI" a propósito: desde que el criterio de
+// estado se unificó (solo "Aceptado DGI" suma, ver `estadoDgi.ts`), un fixture
+// sin `estado` no entra en ningún total, y estos casos miden signos y monedas,
+// no el filtro de estado.
 const VENTAS_Y_NOTAS = [
-  { tipo_comprobante: 101, moneda: "UYU", total: 1000 }, // venta +1000
-  { tipo_comprobante: 111, moneda: "UYU", total: 500 }, //  venta  +500
-  { tipo_comprobante: 102, moneda: "UYU", total: 200 }, //  NC     -200
-  { tipo_comprobante: 103, moneda: "UYU", total: 50 }, //   ND     +50
-  { tipo_comprobante: 101, moneda: "USD", total: 30 }, //   venta USD
+  { tipo_comprobante: 101, moneda: "UYU", total: 1000, estado: "Aceptado DGI" }, // venta +1000
+  { tipo_comprobante: 111, moneda: "UYU", total: 500, estado: "Aceptado DGI" }, //  venta  +500
+  { tipo_comprobante: 102, moneda: "UYU", total: 200, estado: "Aceptado DGI" }, //  NC     -200
+  { tipo_comprobante: 103, moneda: "UYU", total: 50, estado: "Aceptado DGI" }, //   ND     +50
+  { tipo_comprobante: 101, moneda: "USD", total: 30, estado: "Aceptado DGI" }, //   venta USD
 ];
 
 describe("classifyCfe", () => {
@@ -133,14 +137,52 @@ describe("resumirFacturacion (servicio)", () => {
     expect(r.warnings.some((w) => /no va a coincidir/i.test(w))).toBe(true);
   });
 
-  // Un estado ausente NO es evidencia de rechazo: se cuenta y se avisa.
-  it("cuenta los comprobantes sin estado y lo advierte", () => {
+  // El criterio unificado: un estado que no sabemos leer NO suma. Antes sí
+  // sumaba acá y no sumaba en los rankings, y los dos números convivían.
+  // Lo que hace tolerable la exclusión es el aviso, con el monto adentro.
+  it("NO cuenta los comprobantes sin estado, y avisa cuántos y cuánto sumaban", () => {
+    const list = normalizeComprobantesEmitidos([
+      { tipo_comprobante: 111, moneda: "UYU", total: 100 },
+      { tipo_comprobante: 111, moneda: "UYU", total: 400, estado: "Aceptado DGI" },
+    ]);
+    const r = resumirFacturacion(list, { incluir_anulados: false });
+    expect(r.totales_por_moneda.UYU!.total).toBe(400);
+    // El total de referencia con todos los estados sigue mostrando los 500.
+    expect(r.totales_por_moneda_todos_los_estados.UYU!.total).toBe(500);
+
+    const aviso = r.warnings.find((w) => /SIN un estado DGI reconocible/i.test(w));
+    expect(aviso).toBeDefined();
+    expect(aviso).toMatch(/\$100/); // cuánto se dejó afuera, no solo cuántos
+    expect(aviso).toMatch(/NO se contaron/);
+  });
+
+  // Con solo_aceptados=false el desconocido vuelve a entrar, y el aviso cambia
+  // de sentido en vez de desaparecer.
+  it("con solo_aceptados=false el estado desconocido cuenta y el aviso lo dice", () => {
     const list = normalizeComprobantesEmitidos([
       { tipo_comprobante: 111, moneda: "UYU", total: 100 },
     ]);
-    const r = resumirFacturacion(list, { incluir_anulados: false });
+    const r = resumirFacturacion(list, { incluir_anulados: false, solo_aceptados: false });
     expect(r.totales_por_moneda.UYU!.total).toBe(100);
-    expect(r.warnings.some((w) => /SIN estado/i.test(w))).toBe(true);
+    expect(r.warnings.some((w) => /Están contados en el total/i.test(w))).toBe(true);
+  });
+
+  // Un recibo sin estado reconocible tampoco entra en `cobrado_por_moneda`:
+  // lo cobrado también se compara contra el panel de Biller.
+  it("aplica el mismo criterio de estado a los recibos de cobranza", () => {
+    const list = normalizeComprobantesEmitidos([
+      { tipo_comprobante: 111, moneda: "UYU", total: 500, indicador_cobranza_propia: 1 },
+      {
+        tipo_comprobante: 111,
+        moneda: "UYU",
+        total: 300,
+        indicador_cobranza_propia: 1,
+        estado: "Aceptado DGI",
+      },
+    ]);
+    const r = resumirFacturacion(list, { incluir_anulados: false });
+    expect(r.cobrado_por_moneda.UYU!.total).toBe(300);
+    expect(r.warnings.some((w) => /fuera de 'cobrado_por_moneda'/i.test(w))).toBe(true);
   });
 
   it("no avisa de no aceptados cuando todos están aceptados", () => {
@@ -190,10 +232,10 @@ describe("resumirFacturacion (servicio)", () => {
 
   it("excluye y advierte por falta de campos, especiales y no clasificables", () => {
     const list = normalizeComprobantesEmitidos([
-      { tipo_comprobante: 101, moneda: "UYU", total: null }, // falta total
-      { tipo_comprobante: 181, moneda: "UYU", total: 100 }, // especial
-      { tipo_comprobante: 999, moneda: "UYU", total: 100 }, // desconocido
-      { tipo_comprobante: 101, moneda: "UYU", total: 100 }, // incluido
+      { tipo_comprobante: 101, moneda: "UYU", total: null, estado: "Aceptado DGI" }, // falta total
+      { tipo_comprobante: 181, moneda: "UYU", total: 100, estado: "Aceptado DGI" }, // especial
+      { tipo_comprobante: 999, moneda: "UYU", total: 100, estado: "Aceptado DGI" }, // desconocido
+      { tipo_comprobante: 101, moneda: "UYU", total: 100, estado: "Aceptado DGI" }, // incluido
     ]);
     const r = resumirFacturacion(list, { incluir_anulados: true });
     expect(r.conteo_incluidos).toBe(1);

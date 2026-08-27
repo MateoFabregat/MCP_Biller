@@ -38,7 +38,7 @@ import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
 import { hoyComoDateUy } from "./fechaUy.js";
 import { aIso } from "./periodo.js";
-import { clasificarEstado } from "./resumenFacturacion.js";
+import { clasificarEstado } from "./estadoDgi.js";
 import { diasEntre } from "./vencimientos.js";
 
 export type Severidad = "critica" | "advertencia" | "info";
@@ -148,8 +148,19 @@ export interface RechazosResultado {
 
 /**
  * Agrupa por estado DGI todos los comprobantes que NO fueron aceptados.
- * El estado ausente no se reporta como problema: la falta del dato no es
- * evidencia de rechazo (mismo criterio que `resumenFacturacion`).
+ *
+ * El estado AUSENTE (null o vacío) no se reporta como problema: la falta del
+ * dato no es evidencia de rechazo, y llenar la pantalla de alertas por un campo
+ * que la API no mandó es ruido. Un estado PRESENTE pero que no reconocemos SÍ
+ * se reporta, y esa distinción es deliberada: son dos cosas distintas metidas
+ * en la misma clase `desconocido`. Si DGI o Biller estrenan una redacción de
+ * rechazo que no contiene la palabra "rechazado", el comprobante tiene que
+ * aparecer igual en el panel; que el asistente se calle es la dirección
+ * equivocada del error. Un texto nuevo e inofensivo, en cambio, cuesta una
+ * línea de advertencia que el usuario descarta mirándola.
+ *
+ * (Los TOTALES contestan otra pregunta y ahí las dos variantes de `desconocido`
+ * se tratan igual —ninguna suma—: ver `estaAceptado` en `estadoDgi.ts`.)
  */
 export function detectarRechazos(
   comprobantes: ComprobanteEmitido[],
@@ -159,8 +170,19 @@ export function detectarRechazos(
   const porEstado = new Map<string, ComprobanteConProblema[]>();
 
   for (const c of comprobantes) {
-    if (clasificarEstado(c.estado) !== "no_aceptado") continue;
-    const estado = c.estado ?? "(sin estado)";
+    // Antes esto era `!== "no_aceptado"` contra la `clasificarEstado` del
+    // resumen, donde SOLO null y el vacío daban `desconocido` y un texto
+    // irreconocible caía en `no_aceptado` —o sea que se alertaba—. La
+    // clasificación unificada mete las dos cosas en `desconocido`, así que hay
+    // que volver a separarlas acá a mano para no perder esa alerta: este cambio
+    // unificó el criterio de los TOTALES, no el de las alertas.
+    const clase = clasificarEstado(c.estado);
+    if (clase === "aceptado") continue;
+    if (clase === "desconocido" && (c.estado === null || c.estado.trim() === "")) continue;
+    // No hace falta default: los dos filtros de arriba ya sacaron el null y el
+    // vacío, así que acá siempre hay texto. Se trimea para que "Rechazado DGI"
+    // y " Rechazado DGI " no abran dos filas del mismo problema.
+    const estado = (c.estado ?? "").trim();
     const lista = porEstado.get(estado) ?? [];
     lista.push(aProblema(c));
     porEstado.set(estado, lista);
