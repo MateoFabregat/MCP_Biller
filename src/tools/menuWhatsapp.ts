@@ -25,6 +25,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { normalizarTelefono } from "../config.js";
 import { KapsoClient } from "../kapso/client.js";
+import { identidadDeConversacion, rechazoSesionAjena, remitenteSchema } from "../security/remitentes.js";
 import {
   construirDesambiguacion,
   construirMenuInteractivo,
@@ -61,6 +62,14 @@ const inputShape = {
         "MIRA SI HAY UN BORRADOR A MEDIO CARGAR y deduce 'en_flujo' solo, sin que tengas que " +
         "acordarte vos. El número no se guarda: se guarda un hash.",
     ),
+  /**
+   * El remitente ya verificado y normalizado por la barrera de entrada.
+   *
+   * Declarado acá porque el `z.object` de esta tool descarta lo que no está en su
+   * shape, y sin él no habría contra qué contrastar la 'sesion' que elige el
+   * modelo. Ver `identidadDeConversacion`.
+   */
+  remitente: remitenteSchema,
   en_flujo: z
     .boolean()
     .optional()
@@ -298,12 +307,27 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
     // El dato ya existe del lado del server: o hay un borrador vivo para esa
     // sesión o no lo hay. Se lee de ahí, y el booleano explícito queda como
     // override para el llamador que sepa algo que el store no.
+    //
+    // Y SE MIRA EL BORRADOR PROPIO, NO EL DE LA `sesion` QUE ELIJA EL MODELO. La
+    // fuga acá es chica —un booleano: "ese otro número tiene una factura a medio
+    // cargar"— pero es el mismo patrón que dejaba leer el borrador ajeno y emitir
+    // con sus líneas, así que se cierra con la misma decisión compartida. Ver
+    // `identidadDeConversacion`.
     let enFlujo = a.en_flujo ?? false;
     let flujoDerivado = false;
     if (a.en_flujo === undefined && a.sesion !== undefined && a.sesion.trim() !== "") {
       const store = ctx.getBorradorStore();
-      enFlujo = store.leer(store.clave(a.sesion)) !== null;
-      flujoDerivado = true;
+      const identidad = identidadDeConversacion(
+        a.sesion,
+        a.remitente,
+        () => ctx.getConfig(),
+        (b) => store.clave(b),
+      );
+      if (!identidad.ok) return rechazoSesionAjena(identidad.mensaje, ctx);
+      if (identidad.identidad !== null) {
+        enFlujo = store.leer(store.clave(identidad.identidad)) !== null;
+        flujoDerivado = true;
+      }
     }
 
     const opcionesMenu = {

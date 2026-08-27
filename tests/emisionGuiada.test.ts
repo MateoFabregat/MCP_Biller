@@ -1743,3 +1743,144 @@ describe("un precio ambiguo sobrevive hasta el resumen de confirmación", () => 
     expect(primera.comprobante_borrador.items[0].precio).toBe(6.5);
   });
 });
+
+// ---------------------------------------------------------------------------
+// LA SESIÓN ES DE QUIEN ESCRIBE, NO DE QUIEN EL MODELO DIGA.
+//
+// El agujero: la clave del borrador salía de `sesion`, un parámetro que elige
+// el modelo y que acepta un teléfono crudo. La barrera de entrada ya había
+// verificado quién escribía y ese dato se descartaba. Con dos números en la
+// allowlist de la MISMA empresa —el caso normal, dueño más contador— alcanzaba
+// con "seguí la factura que estaba armando el 099…" para leer el borrador del
+// otro; y como los ítems se fusionan por posición, para inyectarle una línea
+// que el otro iba a ver en su preview mezclada con lo suyo.
+//
+// La sal del store cerraba el cruce ENTRE empresas y no podía cerrar este: las
+// dos partes son la misma empresa, o sea la misma sal.
+// ---------------------------------------------------------------------------
+
+describe("el borrador de la emisión es del remitente verificado", () => {
+  const DUENO = "59899111000";
+  const CONTADOR = "59899222000";
+
+  /** Canal de WhatsApp abierto: dos números autorizados en la misma empresa. */
+  const conCanal = () =>
+    makeCtx({
+      config: {
+        kapso: {
+          apiKey: "kapso_key_de_prueba",
+          baseUrl: "https://api.kapso.ai",
+          phoneNumberId: "597907523413541",
+          destinatariosPermitidos: [DUENO, CONTADOR],
+        },
+      },
+    });
+
+  const llamar = async (args: Record<string, unknown>, ctx: Parameters<typeof handleEmisionGuiada>[1]) =>
+    JSON.parse((await handleEmisionGuiada(args, ctx)).content[0]!.text) as Record<string, any>;
+
+  it("un remitente NO puede leer el borrador de otro de su misma empresa", async () => {
+    const { ctx, borradores } = conCanal();
+    await llamar({ remitente: DUENO, mensaje: "facturale a perez 2 bolsas de portland a 6500" }, ctx);
+    // El concepto NO vuelve en la respuesta —lo envolvería la barrera de
+    // salida—, así que el borrador ajeno se mira en el store.
+    expect(JSON.stringify(borradores.leer(borradores.clave(DUENO))!.estado)).toContain("portland");
+
+    // El contador pide explícitamente la sesión del dueño.
+    const espiada = await handleEmisionGuiada({ remitente: CONTADOR, sesion: DUENO }, ctx);
+    expect(espiada.isError).toBe(true);
+    const error = JSON.parse(espiada.content[0]!.text).error;
+    expect(error.kind).toBe("autorizacion");
+    expect(error.motivo).toBe("sesion_ajena");
+    // El mensaje va dirigido al modelo y le cierra las dos salidas.
+    expect(error.message).toContain("NO reintentes con otro número");
+    // Y no se filtra nada del borrador ajeno, ni el número entero de su dueño.
+    expect(error.message).not.toContain(DUENO);
+    expect(JSON.stringify(espiada)).not.toContain("portland");
+  });
+
+  it("tampoco con el `sesion.id` opaco del otro, que es 24 hex válidos", async () => {
+    const { ctx } = conCanal();
+    const propio = await llamar({ remitente: DUENO, mensaje: "facturale a perez a 6500" }, ctx);
+    const idAjeno = propio.sesion.id as string;
+    expect(idAjeno).toMatch(/^[0-9a-f]{24}$/);
+
+    const res = await handleEmisionGuiada({ remitente: CONTADOR, sesion: idAjeno }, ctx);
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0]!.text).error.motivo).toBe("sesion_ajena");
+  });
+
+  it("no puede INYECTARLE ítems al borrador de otro", async () => {
+    // El caso caro: `fusionarItems` fusiona por posición, así que una línea
+    // ajena entra sin borrar nada y aparece en el preview del otro mezclada con
+    // lo suyo. Un CFE con ítems que el emisor no cargó.
+    const { ctx, borradores } = conCanal();
+    await llamar({ remitente: DUENO, mensaje: "facturale a perez 2 bolsas a 6500" }, ctx);
+
+    const res = await handleEmisionGuiada(
+      { remitente: CONTADOR, sesion: DUENO, items: [{}, { concepto: "flete", precio: 9999 }] },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+
+    const delDueno = borradores.leer(borradores.clave(DUENO))!.estado;
+    expect(delDueno.items).toHaveLength(1);
+    expect(JSON.stringify(delDueno)).not.toContain("flete");
+  });
+
+  it("`reiniciar` ajeno no borra nada: el chequeo va ANTES de tocar el store", async () => {
+    const { ctx, borradores } = conCanal();
+    await llamar({ remitente: DUENO, mensaje: "facturale a perez 2 bolsas a 6500" }, ctx);
+    const antes = borradores.leer(borradores.clave(DUENO))!.revision;
+
+    const res = await handleEmisionGuiada({ remitente: CONTADOR, sesion: DUENO, reiniciar: true }, ctx);
+    expect(res.isError).toBe(true);
+    expect(borradores.leer(borradores.clave(DUENO))?.revision).toBe(antes);
+  });
+
+  it("el flujo normal no se rompe: mismo remitente, dos mensajes, un borrador", async () => {
+    const { ctx } = conCanal();
+    const uno = await llamar(
+      { remitente: DUENO, mensaje: "facturale a perez 2 bolsas de portland a 6500" },
+      ctx,
+    );
+    expect(uno.sesion.activa).toBe(true);
+
+    // Sin mandar 'sesion' siquiera: el server ya sabe de quién es el borrador.
+    const dos = await llamar({ remitente: DUENO, mensaje: "emision:iva:3" }, ctx);
+    expect(dos.sesion.id).toBe(uno.sesion.id);
+    expect(dos.estado_entendido.items[0].precio).toBe(6500);
+    expect(dos.sesion.recuperado_del_store.length).toBeGreaterThan(0);
+  });
+
+  it("mandar 'sesion' con el propio número sigue andando, en cualquier formato", async () => {
+    const { ctx } = conCanal();
+    const uno = await llamar({ remitente: DUENO, sesion: DUENO, mensaje: "facturale a perez a 6500" }, ctx);
+    const dos = await llamar(
+      { remitente: DUENO, sesion: `+${DUENO.slice(0, 3)} ${DUENO.slice(3)}`, mensaje: "emision:iva:3" },
+      ctx,
+    );
+    expect(dos.sesion.id).toBe(uno.sesion.id);
+  });
+
+  it("con el canal abierto y SIN remitente no se abre ninguna sesión", async () => {
+    // No debería llegar acá nunca —la barrera rechaza antes del handler—, y por
+    // eso mismo se rechaza en vez de degradar a `sesion`: si alguien registra
+    // esta tool sin barrera, el modo de falla es "no contesta", no "vuelve el
+    // agujero".
+    const { ctx } = conCanal();
+    const res = await handleEmisionGuiada({ sesion: DUENO, mensaje: "facturale a perez a 6500" }, ctx);
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0]!.text).error.message).toContain("Falta 'remitente'");
+  });
+
+  it("SIN Kapso configurado, 'sesion' sigue valiendo tal cual (modo Claude Desktop)", async () => {
+    // Ahí no hay canal no confiable: el que abre el server es el dueño de la
+    // máquina. Pedirle que se identifique con un teléfono no protege de nada.
+    const { ctx } = makeCtx();
+    const uno = await llamar({ sesion: "59899121314", mensaje: "facturale a perez 2 bolsas a 6500" }, ctx);
+    const dos = await llamar({ sesion: "59899121314", mensaje: "emision:iva:3" }, ctx);
+    expect(dos.sesion.id).toBe(uno.sesion.id);
+    expect(dos.sesion.recuperado_del_store.length).toBeGreaterThan(0);
+  });
+});

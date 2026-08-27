@@ -5,7 +5,9 @@
 // molesto, la respuesta correcta casi nunca es relajar el test.
 // =============================================================================
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { remitenteVerificado } from "../src/security/remitentes.js";
 import { METRICAS_NULAS } from "../src/observabilidad/metricas.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -19,7 +21,7 @@ import {
   NO_ENVUELTOS_A_PROPOSITO,
 } from "../src/security/untrusted.js";
 import type { ToolContext } from "../src/tools/shared.js";
-import type { BillerConfig } from "../src/config.js";
+import { inspectConfig, type BillerConfig } from "../src/config.js";
 import { BorradorStoreMemoria } from "../src/kapso/borradorStore.js";
 
 const TOKEN = "tok_super_secreto_1234567890";
@@ -49,6 +51,9 @@ function ctxCon(overrides: Partial<BillerConfig> = {}): ToolContext {
     },
     metricas: METRICAS_NULAS,
     getBorradorStore: () => new BorradorStoreMemoria(),
+    // El contexto de test no viene de un env: se inspecciona uno vacío, que es la
+    // verdad (no hay config de tenant detrás) y nunca el `process.env` del runner.
+    inspeccionar: () => inspectConfig({}),
   };
 }
 
@@ -65,6 +70,9 @@ const ctxSinConfig: ToolContext = {
   },
   metricas: METRICAS_NULAS,
     getBorradorStore: () => new BorradorStoreMemoria(),
+    // El contexto de test no viene de un env: se inspecciona uno vacío, que es la
+    // verdad (no hay config de tenant detrás) y nunca el `process.env` del runner.
+    inspeccionar: () => inspectConfig({}),
 };
 
 describe("redacción estructural de secretos", () => {
@@ -352,5 +360,52 @@ describe("un campo no confiable renombrado sigue siendo no confiable", () => {
     for (const clave of NO_ENVUELTOS_A_PROPOSITO) {
       expect(CAMPOS_NO_CONFIABLES.has(clave), `"${clave}" está en los dos sets`).toBe(false);
     }
+  });
+});
+
+describe("remitenteVerificado: quién se ganó ver el detalle", () => {
+  // Contesta otra pregunta que `verificarRemitente`: no si la tool se ejecuta
+  // —las exentas se ejecutan siempre, para poder diagnosticar— sino si el que
+  // llama está identificado. Por eso NO tiene excepción por tool.
+  const conCanal = (extra: Partial<BillerConfig> = {}) =>
+    ctxCon({
+      kapso: {
+        apiKey: "k",
+        baseUrl: "https://app.kapso.ai",
+        destinatariosPermitidos: ["59895923567"],
+      },
+      remitentesAutorizados: [],
+      ...extra,
+    } as Partial<BillerConfig>).getConfig();
+
+  it("sin canal de WhatsApp no hay a quién identificar: true", () => {
+    expect(remitenteVerificado(undefined, ctxCon({ remitentesAutorizados: [] }).getConfig())).toBe(true);
+  });
+
+  it("con canal y sin remitente: false", () => {
+    expect(remitenteVerificado(undefined, conCanal())).toBe(false);
+  });
+
+  it("con canal y remitente fuera de la allowlist: false", () => {
+    expect(remitenteVerificado("59891112223", conCanal())).toBe(false);
+  });
+
+  it("con canal y remitente autorizado: true, normalizando el formato", () => {
+    expect(remitenteVerificado("+598 95 923 567", conCanal())).toBe(true);
+  });
+
+  it("con canal y allowlist vacía no se abre: false", () => {
+    const config = conCanal();
+    const sinNadie = { ...config, kapso: { ...config.kapso!, destinatariosPermitidos: [] } } as BillerConfig;
+    expect(remitenteVerificado("59895923567", sinNadie)).toBe(false);
+  });
+
+  it("el comentario de TOOLS_SIN_REMITENTE ya no dice que la tool no devuelve datos", () => {
+    // Decía que el health check "no devuelve un solo dato fiscal —ni un importe,
+    // ni un cliente, ni un RUT—", y era falso: devolvía el RUT, la URL de la API
+    // y la ruta del audit log. La justificación que queda es la degradación.
+    const fuente = readFileSync(new URL("../src/security/remitentes.ts", import.meta.url), "utf8");
+    expect(fuente).not.toContain("no devuelve un solo dato fiscal");
+    expect(fuente).toContain("DEGRADA");
   });
 });

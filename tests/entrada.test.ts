@@ -16,6 +16,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { inspectConfig } from "../src/config.js";
 import { METRICAS_NULAS } from "../src/observabilidad/metricas.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -265,6 +266,9 @@ describe("guardarEntrada intercepta registerTool", () => {
       },
       metricas: METRICAS_NULAS,
     getBorradorStore: () => new BorradorStoreMemoria(),
+    // El contexto de test no viene de un env: se inspecciona uno vacío, que es la
+    // verdad (no hay config de tenant detrás) y nunca el `process.env` del runner.
+    inspeccionar: () => inspectConfig({}),
     };
     const server = new McpServer({ name: "t", version: "0" });
     let handlerRegistrado: ((a: unknown) => Promise<ToolResult>) | null = null;
@@ -385,5 +389,70 @@ describe("cobertura del catálogo", () => {
     // preguntate primero si esa tool puede devolver un importe, un nombre de
     // cliente o un RUT. Si puede, no va exenta.
     expect(sinBarrera).toEqual(["biller_health_check"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EL REMITENTE VERIFICADO LLEGA AL HANDLER, YA NORMALIZADO.
+//
+// Antes la barrera lo verificaba y después lo tiraba: cada tool que quisiera
+// atar algo a la identidad de quien escribe tenía que volver a leer el crudo y
+// repetir `normalizarTelefono` + `requiereRemitente`. Eso es una convención, y
+// la convención se rompe con la tool número 25 — que acá significa que vuelve el
+// agujero de leer y emitir con los datos de otro.
+// ---------------------------------------------------------------------------
+
+describe("guardarEntrada inyecta el remitente verificado", () => {
+  /** Registra una tool y devuelve el handler ya envuelto por la barrera. */
+  function conBarrera(ctx: ToolContext): {
+    llamar: (args: unknown) => Promise<ToolResult>;
+    visto: () => unknown;
+  } {
+    let vistoPorElHandler: unknown = undefined;
+    const server = new McpServer({ name: "t", version: "0" });
+    let handler: ((a: unknown) => Promise<ToolResult>) | null = null;
+    (server as unknown as { registerTool: unknown }).registerTool = (
+      _n: string,
+      _c: unknown,
+      h: (a: unknown) => Promise<ToolResult>,
+    ) => {
+      handler = h;
+    };
+    guardarEntrada(server, ctx);
+    server.registerTool("biller_x", { description: "x", inputSchema: {} }, (async (a: {
+      remitente?: unknown;
+    }) => {
+      vistoPorElHandler = a.remitente;
+      return { content: [] };
+    }) as never);
+    return { llamar: (args) => handler!(args), visto: () => vistoPorElHandler };
+  }
+
+  it("el handler recibe el número normalizado, no el texto que mandó el modelo", async () => {
+    const { ctx } = makeCtx({ config: conCanal() });
+    const t = conBarrera(ctx);
+    // El mismo número que el de la allowlist, escrito como lo escribe una persona.
+    await t.llamar({ remitente: "+598 95 923 567" });
+    expect(t.visto()).toBe("59895923567");
+  });
+
+  it("no queda ningún camino por el que el handler vea un remitente sin verificar", async () => {
+    // Se pisa el MISMO campo justamente por esto: no conviven "lo que dijo el
+    // modelo" y "lo que verificó la barrera" bajo dos nombres parecidos, así que
+    // no hay forma de que una tool lea el equivocado.
+    const { ctx } = makeCtx({ config: conCanal() });
+    const t = conBarrera(ctx);
+    const res = await t.llamar({ remitente: "59899999999" });
+    expect(res.isError).toBe(true);
+    expect(t.visto()).toBeUndefined();
+  });
+
+  it("sin Kapso no toca nada: el crudo llega tal cual", async () => {
+    // Modo Claude Desktop. No hay a quién identificar y `biller_health_check`
+    // necesita el crudo para decidir si degrada su salida.
+    const { ctx } = makeCtx({ config: makeConfig() });
+    const t = conBarrera(ctx);
+    await t.llamar({ remitente: "+598 95 923 567" });
+    expect(t.visto()).toBe("+598 95 923 567");
   });
 });

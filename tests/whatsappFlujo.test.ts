@@ -1188,3 +1188,58 @@ describe("emitir con confirmación por WhatsApp", () => {
     expect(fx.postMock).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// EL "ESTOY EN MEDIO DE UNA CARGA" ES DEL QUE ESCRIBE.
+//
+// La fuga acá es chica —un booleano: "ese otro número tiene una factura a medio
+// cargar"— pero es el mismo patrón que dejaba leer el borrador ajeno y emitir un
+// CFE con sus líneas, y se cierra con la misma decisión compartida.
+// ---------------------------------------------------------------------------
+
+describe("el menú deduce el flujo del borrador PROPIO", () => {
+  const DUENO = "59899111000";
+  const CONTADOR = "59899222000";
+  const dosAutorizados = () =>
+    makeCtx({
+      config: { kapso: kapsoConfig({ destinatariosPermitidos: [DUENO, CONTADOR] }) },
+    });
+
+  it("no dice si otro número tiene una emisión a medio cargar", async () => {
+    const fx = dosAutorizados();
+    fx.borradores.guardar(fx.borradores.clave(DUENO), { items: [{ concepto: "portland" }] });
+
+    const res = await handleMenuWhatsapp({ sesion: DUENO, remitente: CONTADOR }, fx.ctx);
+
+    expect(res.isError).toBe(true);
+    const error = errorOf(res);
+    expect((error as { motivo?: string }).motivo).toBe("sesion_ajena");
+    expect(error.message).not.toContain(DUENO);
+    expect(JSON.stringify(res)).not.toContain("portland");
+  });
+
+  it("el propio sigue andando: con borrador vivo, en_flujo derivado", async () => {
+    const fx = dosAutorizados();
+    fx.borradores.guardar(fx.borradores.clave(DUENO), { items: [{ concepto: "portland" }] });
+
+    const res = await handleMenuWhatsapp(
+      { sesion: DUENO, remitente: DUENO, mensaje: "pará, eran 3 no 2" },
+      fx.ctx,
+    );
+    expect(res.isError).toBeUndefined();
+    const interpretacion = sc(res)["interpretacion"] as Record<string, unknown>;
+    expect(interpretacion["en_flujo"]).toBe(true);
+    expect(interpretacion["en_flujo_derivado"]).toBe(true);
+  });
+
+  it("sin Kapso el menú no cambia: la sesión vale tal cual", async () => {
+    const fx = makeCtx();
+    fx.borradores.guardar(fx.borradores.clave(DUENO), { items: [{ concepto: "portland" }] });
+    const res = await handleMenuWhatsapp(
+      { sesion: DUENO, mensaje: "pará, eran 3 no 2" },
+      fx.ctx,
+    );
+    expect(res.isError).toBeUndefined();
+    expect((sc(res)["interpretacion"] as Record<string, unknown>)["en_flujo"]).toBe(true);
+  });
+});

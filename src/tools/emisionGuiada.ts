@@ -62,6 +62,7 @@ import {
 import { extractClienteRut } from "../biller/normalize.js";
 import { fetchEmitidos } from "../biller/queries.js";
 import { CONCURRENCIA, mapConLimite } from "../biller/traerVentanas.js";
+import { identidadDeConversacion, rechazoSesionAjena, remitenteSchema } from "../security/remitentes.js";
 import { hoyComoDateUy, hoyIsoUy } from "../services/fechaUy.js";
 import { formatearUy, parsearCantidad, parsearImporte } from "../services/importe.js";
 import { aIso, consultarPorPeriodo } from "../services/periodo.js";
@@ -249,8 +250,20 @@ const inputShape = {
         "pasás, el server GUARDA el borrador y lo usa como base en la próxima llamada: no hace falta " +
         "que repitas todo lo anterior, alcanza con el dato nuevo. PASALO SIEMPRE que exista una " +
         "conversación: es lo que hace que el flujo no se pierda si te falta un campo. El número no " +
-        "se guarda: se guarda un hash.",
+        "se guarda: se guarda un hash. Con el canal de WhatsApp configurado la sesión la manda " +
+        "'remitente' y este parámetro es opcional: si lo mandás tiene que ser el MISMO usuario " +
+        "(o el `sesion.id` que devolvió este server), no el número de otra persona.",
     ),
+  /**
+   * El remitente ya verificado por la barrera de entrada.
+   *
+   * Está declarado acá aunque `guardarEntrada` se lo agrega igual al schema de
+   * toda tool, y no es redundancia: el input se parsea con `z.object`, que
+   * DESCARTA lo que no esté en el shape. Sin esta línea el handler nunca lo ve
+   * —el campo llega y se tira en silencio— y la sesión vuelve a quedar atada a
+   * lo que elija el modelo. Ver `identidadDeSesion`.
+   */
+  remitente: remitenteSchema,
   reiniciar: z
     .boolean()
     .optional()
@@ -520,6 +533,24 @@ function rellenarDesdePedido(estado: EstadoEmision, pedido: PedidoEmision): stri
   return puestos;
 }
 
+/**
+ * DE QUIÉN ES EL BORRADOR QUE SE VA A ABRIR.
+ *
+ * La decisión vive en `security/remitentes.ts` y no acá: es la MISMA que toman
+ * `biller_emitir_comprobante` y `biller_menu_whatsapp`, y una regla de
+ * autorización copiada en tres archivos es una regla que el cuarto archivo no
+ * copia. Lo único propio de esta tool es el store contra el que se comparan las
+ * claves y el rechazo, que se redacta con la envoltura de errores de acá.
+ */
+function identidadDeSesion(
+  sesion: string | undefined,
+  remitente: string | undefined,
+  ctx: ToolContext,
+  store: BorradorStore,
+) {
+  return identidadDeConversacion(sesion, remitente, () => ctx.getConfig(), (b) => store.clave(b));
+}
+
 export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   const parsed = inputSchema.safeParse(args);
   if (!parsed.success) {
@@ -533,6 +564,16 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       ctx,
     );
   }
+
+  // --- De quién es este borrador ------------------------------------------
+  //
+  // ANTES QUE NADA, y en particular antes de tocar el store: `reiniciar` borra
+  // y `repetir_ultima_de` prellena, así que resolver la identidad más abajo
+  // dejaría un camino donde se destruye o se pisa el borrador de otro y recién
+  // después se chequea de quién era. Ver `identidadDeSesion`.
+  const store = ctx.getBorradorStore();
+  const identidad = identidadDeSesion(a.sesion, a.remitente, ctx, store);
+  if (!identidad.ok) return rechazoSesionAjena(identidad.mensaje, ctx);
 
   try {
     const warnings: string[] = [];
@@ -646,10 +687,11 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     // guardado, y RECIÉN DESPUÉS se aplica el id del botón. El botón es lo
     // último que hizo el usuario, así que tiene que ganarle tanto a lo guardado
     // como a lo que el agente creía saber.
-    const store = ctx.getBorradorStore();
     // La clave la deriva el STORE, no una función suelta: es quien tiene la sal
-    // de la empresa. Ver `BorradorStore.clave`.
-    const clave = a.sesion === undefined || a.sesion.trim() === "" ? null : store.clave(a.sesion);
+    // de la empresa. Ver `BorradorStore.clave`. Y el identificador que entra ya
+    // NO es el `sesion` crudo del modelo sino la identidad resuelta arriba: con
+    // canal de WhatsApp abierto, el remitente que verificó la barrera.
+    const clave = identidad.identidad === null ? null : store.clave(identidad.identidad);
     if (clave !== null && a.reiniciar) store.borrar(clave);
 
     const guardado = clave === null ? null : store.leer(clave);

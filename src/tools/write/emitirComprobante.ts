@@ -18,6 +18,7 @@ import {
   type ComprobanteBody,
 } from "../../biller/cfeSchema.js";
 import { normalizarTelefono } from "../../config.js";
+import { identidadDeConversacion, rechazoSesionAjena } from "../../security/remitentes.js";
 import { WRITE_PATHS } from "../../constants.js";
 import { KapsoClient } from "../../kapso/client.js";
 import { construirConfirmacionEmision } from "../../kapso/menu.js";
@@ -107,7 +108,7 @@ const fullSchema = z.object(inputShape);
  * Solo COMPLETA, nunca pisa: un concepto que el agente sí mandó (el usuario lo
  * cambió a último momento) le gana al guardado.
  */
-function completarDesdeSesion(args: unknown, ctx: ToolContext): DatosDeSesion {
+function completarDesdeSesion(args: unknown, ctx: ToolContext, identidad: string | null): DatosDeSesion {
   const vacio: DatosDeSesion = { precios_ambiguos: [], avisos: [] };
   const avisos: string[] = [];
   if (typeof args !== "object" || args === null) return vacio;
@@ -118,7 +119,14 @@ function completarDesdeSesion(args: unknown, ctx: ToolContext): DatosDeSesion {
   if (typeof a.sesion !== "string" || a.sesion.trim() === "") return vacio;
   if (typeof a.comprobante !== "object" || a.comprobante === null) return vacio;
 
-  const guardado = ctx.getBorradorStore().leer(ctx.getBorradorStore().clave(a.sesion));
+  // NO se abre `a.sesion` sino la identidad que resolvió `identidadDeConversacion`
+  // en el handler: con el canal de WhatsApp abierto es el remitente que verificó
+  // la barrera, y un `sesion` ajeno ya fue rechazado antes de llegar acá. Esta es
+  // la línea por la que el remitente A completaba las líneas de su CFE —un
+  // documento fiscal REAL— con los conceptos del borrador de B.
+  if (identidad === null) return vacio;
+
+  const guardado = ctx.getBorradorStore().leer(ctx.getBorradorStore().clave(identidad));
   if (guardado === null) return vacio;
 
   const preciosAmbiguos: DatosDeSesion["precios_ambiguos"] = [];
@@ -219,7 +227,42 @@ export async function handleEmitirComprobante(
   args: unknown,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const deSesion = completarDesdeSesion(args, ctx);
+  // --- DE QUIÉN ES LA SESIÓN, ANTES QUE NADA -------------------------------
+  //
+  // Va arriba de todo, antes de leer el borrador y muy antes del POST, porque acá
+  // `sesion` decide TRES cosas y las tres son caras: con qué conceptos y con qué
+  // `numero_interno` se completa el CFE que se emite (`completarDesdeSesion`), y
+  // qué borrador se BORRA cuando la emisión sale bien. Un chequeo que solo
+  // cubriera la lectura dejaría vivo el camino por el que A, al emitir lo suyo,
+  // le borra a B la factura que estaba cargando.
+  //
+  // Cubre el ciclo entero: el dry-run y el confirm son dos llamadas a esta misma
+  // función y las dos pasan por acá, así que no hay forma de resolver la sesión
+  // con un remitente y ejecutarla con otro.
+  //
+  // Solo se resuelve cuando vino `sesion`: sin sesión no se lee ni se borra
+  // ningún borrador, o sea que no hay nada que autorizar, y exigir el remitente
+  // ahí rompería la emisión directa —la que no viene de la guiada— sin cerrar
+  // nada. La decisión es de `security/remitentes.ts`: es la misma que toman la
+  // emisión guiada y el menú.
+  const sesionCruda =
+    typeof (args as { sesion?: unknown } | null)?.sesion === "string"
+      ? ((args as { sesion: string }).sesion)
+      : undefined;
+  const identidadSesion =
+    sesionCruda === undefined || sesionCruda.trim() === ""
+      ? ({ ok: true, identidad: null } as const)
+      : identidadDeConversacion(
+          sesionCruda,
+          typeof (args as { remitente?: unknown } | null)?.remitente === "string"
+            ? ((args as { remitente: string }).remitente)
+            : undefined,
+          () => ctx.getConfig(),
+          (b) => ctx.getBorradorStore().clave(b),
+        );
+  if (!identidadSesion.ok) return rechazoSesionAjena(identidadSesion.mensaje, ctx);
+
+  const deSesion = completarDesdeSesion(args, ctx, identidadSesion.identidad);
   const parsed = fullSchema.safeParse(args);
   if (!parsed.success) return validationErrorResult(parsed.error, ctx);
   const a = parsed.data;
@@ -308,10 +351,17 @@ export async function handleEmitirComprobante(
   // el cliente y los ítems de ESTA factura a la siguiente. Por eso se avisa
   // fuerte en vez de fallar: fallar la emisión por un borrador colgado sería
   // peor que el problema.
+  //
+  // La clave sale de la IDENTIDAD resuelta arriba y no del `sesion` crudo, que es
+  // lo que hace que el borrado del final caiga siempre sobre el borrador propio.
+  // Se sigue exigiendo que haya venido `sesion`, porque mandarlo es lo que
+  // declara que esta emisión viene de la guiada: sin eso, un POST directo del
+  // mismo usuario le comería el borrador que tiene a medio cargar en otra
+  // conversación.
   const claveSesion_ =
-    a.sesion === undefined || a.sesion.trim() === ""
+    a.sesion === undefined || a.sesion.trim() === "" || identidadSesion.identidad === null
       ? null
-      : ctx.getBorradorStore().clave(a.sesion);
+      : ctx.getBorradorStore().clave(identidadSesion.identidad);
   if (claveSesion_ !== null && ctx.getBorradorStore().leer(claveSesion_) === null) {
     warnings.push(
       "No hay ningún borrador guardado con esa 'sesion', así que al emitir no se va a borrar nada. " +
