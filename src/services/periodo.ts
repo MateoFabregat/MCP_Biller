@@ -30,15 +30,80 @@ import { hoyIsoUy } from "./fechaUy.js";
  * justamente ENTRE tools distintas: el resolvedor de clientes y el ranking
  * consultan el mismo período con segundos de diferencia, y si cada uno trajera
  * su propio cache no se ahorraría nada. La clave incluye un hash del token, así
- * que compartirlo entre empresas es seguro (ver `biller/cacheVentanas.ts`).
+ * que compartirlo entre empresas es seguro (ver `biller/cacheVentanas.ts`), y
+ * desde que el techo de entradas es por `cacheId`, compartir el objeto tampoco
+ * significa compartir el PRESUPUESTO: una empresa que baja un año entero ya no
+ * puede desalojarle las ventanas calientes a las otras diecinueve.
  */
-const cacheGlobal = new CacheVentanas(
-  (process.env.BILLER_CACHE_ENABLED ?? "").trim().toLowerCase() !== "false",
-);
 
-/** Para tests y diagnóstico: cuántas ventanas se sirvieron de memoria. */
-export function estadisticasCache(): { hits: number; misses: number; entradas: number } {
-  return cacheGlobal.stats;
+/**
+ * El default del proceso, leído del entorno.
+ *
+ * Se lee en cada llamada y no una sola vez al cargar el módulo: leerlo al
+ * importar era lo que volvía a `BILLER_CACHE_ENABLED` la única variable del
+ * producto imposible de pisar, porque para cuando el registro de tenants
+ * existía, el booleano ya estaba congelado adentro del singleton. El costo de
+ * mirar `process.env` por ventana es despreciable al lado de una request HTTP.
+ */
+function habilitadoPorEntorno(): boolean {
+  // Sigue leyéndose de `process.env` y no de la config validada a propósito: es
+  // el default DEL PROCESO, y una config validada siempre es la de ALGUNA
+  // empresa. Lo que pisa por empresa entra por `resolverHabilitacion`.
+  return (process.env.BILLER_CACHE_ENABLED ?? "").trim().toLowerCase() !== "false";
+}
+
+/**
+ * Resolución de la habilitación POR EMPRESA. Vacía por defecto.
+ *
+ * Devuelve `undefined` para "no opino, usá el default del proceso". Existe para
+ * que un tenant pueda apagar su propio cache —diagnosticar un total que no le
+ * cierra sin cache es la mitad del trabajo— sin que apagarlo para uno lo apague
+ * para los veinte.
+ *
+ * QUIÉN LA REGISTRA: `tenants/contextos.ts`, al construir el registro de
+ * contextos por empresa. Es el único lugar donde están las dos mitades a la vez
+ * —el overlay del tenant y el `cacheId`, que no existe hasta que se construye el
+ * cliente—. Sin registro de tenants (stdio, escritorio) nadie la llama y esto
+ * queda en `null`: el default del proceso, o sea el comportamiento de siempre.
+ */
+let resolverHabilitacion: ((cacheId: string) => boolean | undefined) | null = null;
+
+/**
+ * Enchufa la resolución por empresa. La llama quien arma el registro de
+ * tenants, una vez, al arrancar. `null` vuelve al default del entorno.
+ */
+export function registrarHabilitacionCache(
+  fn: ((cacheId: string) => boolean | undefined) | null,
+): void {
+  resolverHabilitacion = fn;
+}
+
+/**
+ * Cache compartido del proceso (ver arriba).
+ *
+ * La habilitación entra como FUNCIÓN y no como booleano: el cache pregunta en
+ * cada operación, con el `cacheId` a la vista, así que la respuesta puede
+ * cambiar por empresa y en caliente.
+ */
+const cacheGlobal = new CacheVentanas((cacheId: string) => {
+  const propio = resolverHabilitacion?.(cacheId);
+  return propio ?? habilitadoPorEntorno();
+});
+
+/**
+ * Para tests y diagnóstico: cuántas ventanas se sirvieron de memoria.
+ *
+ * Sin argumento son las cuentas del proceso; con `cacheId`, las de esa empresa.
+ * El global mezcla los hits de todos los tenants y por eso no sirve para
+ * contestar "¿a MÍ me está andando el cache?", que es la pregunta que se hace
+ * cuando alguien reporta que la segunda respuesta tardó.
+ */
+export function estadisticasCache(cacheId?: string): {
+  hits: number;
+  misses: number;
+  entradas: number;
+} {
+  return cacheGlobal.estadisticas(cacheId);
 }
 
 /** Margen (en días) que se agrega al rango de CREACIÓN al filtrar por EMISIÓN. */

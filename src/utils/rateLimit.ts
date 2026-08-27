@@ -47,7 +47,16 @@ export class NoopRateLimiter implements RateLimiter {
 
 export type RateLimitClass = "default" | "dgi";
 
-/** Limiters compartidos a nivel proceso para que el espaciado persista. */
+/**
+ * El par de limiters de UN contexto de tools, o sea de UNA empresa.
+ *
+ * NO son de proceso, y la diferencia importa: el límite que estamos respetando
+ * es el que Biller aplica POR TOKEN, así que compartir el espaciado entre
+ * empresas haría que veinte tenants se estorbaran contra un límite que cada uno
+ * tiene entero para sí. `createToolContext` arma un par propio por contexto, y
+ * `ContextosPorTenant` crea un contexto por empresa; el espaciado persiste
+ * porque el contexto vive, no porque el módulo tenga estado.
+ */
 export interface RateLimiters {
   default: RateLimiter;
   dgi: RateLimiter;

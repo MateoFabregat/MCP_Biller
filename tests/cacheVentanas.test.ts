@@ -15,7 +15,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CacheVentanas,
   DIAS_ASENTADA,
+  MAX_EMPRESAS,
   MAX_ENTRADAS,
+  MAX_VENTANAS_POR_EMPRESA,
   TTL_RECIENTE_MS,
   TTL_VIEJA_MS,
   ttlPara,
@@ -33,6 +35,19 @@ const CFE = (id: number) => ({ id, total: 100 }) as unknown as ComprobanteEmitid
 
 function claveDe(cacheId: string, desde = "2026-07-01", hasta = "2026-07-07") {
   return { cacheId, desde, hasta };
+}
+
+/**
+ * La ventana número `i` de la grilla de 7 días, contada desde 2020-01-01.
+ *
+ * Fechas de verdad y no strings inventados: `ttlPara` las parsea, y una fecha
+ * ilegible cae al TTL corto — un test de desalojo que se apoyara en eso estaría
+ * midiendo expiración sin darse cuenta.
+ */
+function ventana(cacheId: string, i: number) {
+  const base = Date.UTC(2020, 0, 1) + i * 7 * 86_400_000;
+  const iso = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  return { cacheId, desde: iso(base), hasta: iso(base + 6 * 86_400_000) };
 }
 
 // --- Aislamiento entre empresas: lo más importante del archivo --------------
@@ -118,12 +133,92 @@ describe("expiración", () => {
 
   it("tiene techo: un proceso largo no acumula medio año por empresa", () => {
     const cache = new CacheVentanas();
-    for (let i = 0; i < MAX_ENTRADAS + 50; i++) {
-      cache.set(claveDe("a", `2020-01-${String((i % 28) + 1).padStart(2, "0")}`, `2020-0${(i % 9) + 1}-28`), [
-        CFE(i),
-      ]);
+    for (let i = 0; i < MAX_VENTANAS_POR_EMPRESA + 50; i++) {
+      cache.set(ventana("a", i), [CFE(i)]);
     }
+    expect(cache.entradasDe("a")).toBeLessThanOrEqual(MAX_VENTANAS_POR_EMPRESA);
     expect(cache.stats.entradas).toBeLessThanOrEqual(MAX_ENTRADAS);
+  });
+});
+
+// --- El presupuesto también es por empresa ----------------------------------
+//
+// Este bloque cubre la regresión que no se veía: los DATOS ya estaban aislados
+// por `cacheId`, pero el TECHO era uno solo, así que una empresa bajando un año
+// entero le desalojaba las ventanas calientes a las demás. No rompía ningún
+// test, no encendía ninguna alerta, y lo único que se notaba era que la segunda
+// pregunta de otra empresa volvía a tardar segundos.
+
+describe("una empresa no desaloja a otra", () => {
+  it("la B llenando el cache no se lleva puesta la ventana caliente de la A", () => {
+    const cache = new CacheVentanas();
+    cache.set(claveDe("empresa-a"), [CFE(1)]);
+
+    // La B pide un año entero, y después algunos más: mucho más que el techo.
+    for (let i = 0; i < MAX_VENTANAS_POR_EMPRESA * 3; i++) {
+      cache.set(ventana("empresa-b", i), [CFE(1000 + i)]);
+    }
+
+    expect(cache.get(claveDe("empresa-a"))).toEqual([CFE(1)]);
+    expect(cache.entradasDe("empresa-a")).toBe(1);
+    expect(cache.entradasDe("empresa-b")).toBe(MAX_VENTANAS_POR_EMPRESA);
+  });
+
+  it("el techo de empresas descarta a la que hace más rato que no consulta", () => {
+    const cache = new CacheVentanas();
+    for (let e = 0; e < MAX_EMPRESAS; e++) cache.set(ventana(`e${e}`, 0), [CFE(e)]);
+    // La primera vuelve a consultar: deja de ser la más fría.
+    expect(cache.get(ventana("e0", 0))).not.toBeNull();
+    // Entra una nueva: tiene que caerse `e1`, no `e0`.
+    cache.set(ventana("nueva", 0), [CFE(99)]);
+    expect(cache.entradasDe("e0")).toBe(1);
+    expect(cache.entradasDe("e1")).toBe(0);
+    expect(cache.entradasDe("nueva")).toBe(1);
+  });
+});
+
+describe("adentro de una empresa el desalojo es LRU, no FIFO", () => {
+  it("la ventana que se sigue pidiendo sobrevive a las que se pidieron una vez", () => {
+    const cache = new CacheVentanas();
+    const caliente = ventana("a", 0);
+    cache.set(caliente, [CFE(0)]);
+
+    for (let i = 1; i < MAX_VENTANAS_POR_EMPRESA; i++) {
+      cache.set(ventana("a", i), [CFE(i)]);
+      // Se la toca en cada vuelta: es la que el usuario pregunta siempre.
+      expect(cache.get(caliente)).not.toBeNull();
+    }
+    // Ahora se pasa del techo. Con FIFO, la primera insertada —la caliente— era
+    // justo la que se caía.
+    for (let i = MAX_VENTANAS_POR_EMPRESA; i < MAX_VENTANAS_POR_EMPRESA + 10; i++) {
+      cache.set(ventana("a", i), [CFE(i)]);
+    }
+
+    expect(cache.get(caliente)).toEqual([CFE(0)]);
+    // Lo que sí se cayó: la más fría de todas, la segunda que se insertó.
+    expect(cache.get(ventana("a", 1))).toBeNull();
+  });
+});
+
+describe("la habilitación puede venir por empresa", () => {
+  it("apagarlo para una no lo apaga para las otras", () => {
+    // La forma que necesita el overlay del tenant: la decisión se toma con el
+    // `cacheId` a la vista, en cada operación, no una vez al cargar el módulo.
+    const cache = new CacheVentanas((cacheId) => cacheId !== "a-oscuras");
+    cache.set(claveDe("a-oscuras"), [CFE(1)]);
+    cache.set(claveDe("normal"), [CFE(2)]);
+    expect(cache.get(claveDe("a-oscuras"))).toBeNull();
+    expect(cache.get(claveDe("normal"))).toEqual([CFE(2)]);
+  });
+
+  it("las cuentas se pueden mirar por empresa: el global mezcla a todos", () => {
+    const cache = new CacheVentanas();
+    cache.set(claveDe("a"), [CFE(1)]);
+    cache.get(claveDe("a")); // hit de A
+    cache.get(claveDe("b")); // miss de B
+    expect(cache.estadisticas("a")).toEqual({ hits: 1, misses: 0, entradas: 1 });
+    expect(cache.estadisticas("b")).toEqual({ hits: 0, misses: 1, entradas: 0 });
+    expect(cache.estadisticas()).toEqual({ hits: 1, misses: 1, entradas: 1 });
   });
 });
 
