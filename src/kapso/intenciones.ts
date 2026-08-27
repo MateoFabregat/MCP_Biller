@@ -504,6 +504,15 @@ export const OPCIONES_MENU: readonly MenuOpcion[] = [
       // la frase que MÁS probablemente vuelva textual.
       "mis compras", "cuanto compre", "mis proveedores", "compras del mes", "cuanto le compre",
       "gastos con proveedores", "compras a proveedores", "que compre",
+      // LA PLATA PARA EL OTRO LADO. "cuanto le debo a los proveedores" caía en
+      // `menu:cobranzas` —"¿quién me debe?"— porque "debo" se parece a "deben"
+      // por distancia de edición. Es la misma familia que "registrar un pago":
+      // una consulta de plata contestada al revés, que acá se lee como si
+      // tuviera plata a cobrar cuando en realidad la tiene que pagar. Van
+      // largas para ganarle por inclusión al parecido de una sola palabra.
+      "cuanto le debo a los proveedores", "cuanto le debo al proveedor",
+      "que le debo a los proveedores", "cuanto debo a proveedores",
+      "lo que le debo al mayorista", "cuanto le debo al mayorista",
     ],
   },
   {

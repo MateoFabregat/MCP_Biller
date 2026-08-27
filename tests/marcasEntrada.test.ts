@@ -108,7 +108,7 @@ describe("los ejemplos propios NO se envuelven", () => {
         items: [{ concepto: "Texto que escribió un proveedor" }],
       },
     };
-    const saneado = sanitizeToolResult(bruto as never, makeCtx());
+    const saneado = sanitizeToolResult(bruto as never, makeCtx().ctx);
     const j = saneado.structuredContent as {
       faltantes: Array<{ ejemplo: Array<{ concepto: string }> }>;
       items: Array<{ concepto: string }>;

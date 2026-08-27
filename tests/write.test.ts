@@ -106,6 +106,44 @@ describe("emitir_comprobante — dry-run / confirm", () => {
     expect(fx.postMock).toHaveBeenCalledOnce(); // no se repitió
   });
 
+  it("el MISMO token no emite dos veces, aunque no venga idempotency_key", async () => {
+    // ESTE ERA EL AGUJERO. La clave se generaba con `randomUUID()` cuando el
+    // agente no la mandaba —y no tiene por qué acordarse—, así que cada
+    // `confirm` traía una clave distinta, el registro de idempotencia no
+    // reconocía el reintento y la escritura pasaba de nuevo. Un timeout de
+    // Kapso o un reintento del modelo emitían DOS CFE ante DGI, y dos CFE no se
+    // deshacen: se anulan con dos notas de crédito.
+    const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: { writeEnabled: true } });
+    const { token } = await dryRunThenExecute(fx, { comprobante: COMPROBANTE });
+    expect(fx.postMock).toHaveBeenCalledOnce();
+
+    const reintento = await handleEmitirComprobante(
+      { comprobante: COMPROBANTE, confirm: true, confirmation_token: token },
+      fx.ctx,
+    );
+    expect(reintento.isError).toBe(true);
+    expect(errorOf(reintento).kind).toBe("idempotency");
+    expect(fx.postMock).toHaveBeenCalledOnce();
+  });
+
+  it("dos ventas distintas SÍ emiten dos veces", async () => {
+    // La contracara, y es deliberada: bloquear de más sería peor. Dos previews
+    // distintos son el usuario haciendo dos operaciones, no un reintento.
+    //
+    // EL BORDE, ANOTADO PORQUE ES REAL: el token lleva el instante del dry-run,
+    // así que dos previews del MISMO payload en el MISMO milisegundo dan el
+    // mismo token y la segunda emisión se bloquea. En el flujo real no se
+    // alcanza —entre un dry-run y el siguiente hay una persona leyendo un
+    // preview—, pero si algún día se emite en lote desde código, esto es lo
+    // que hay que mirar primero.
+    const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: { writeEnabled: true } });
+    await dryRunThenExecute(fx, { comprobante: COMPROBANTE });
+    await dryRunThenExecute(fx, {
+      comprobante: { ...COMPROBANTE, items: [{ ...COMPROBANTE.items[0], cantidad: 3 }] },
+    });
+    expect(fx.postMock).toHaveBeenCalledTimes(2);
+  });
+
   it("valida que el comprobante tenga tipo_comprobante", async () => {
     const fx = makeCtx();
     const res = await handleEmitirComprobante({ comprobante: {} }, fx.ctx);

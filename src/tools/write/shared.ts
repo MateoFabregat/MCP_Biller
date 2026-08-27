@@ -14,6 +14,7 @@ import {
   type ContextoPreview,
   type TotalesEstimados,
 } from "../../services/calcularTotales.js";
+import { createHash } from "node:crypto";
 import { limpiarMarcasProfundo } from "../../security/untrusted.js";
 import type { RateLimitClass } from "../../utils/rateLimit.js";
 import { BillerConfirmationError } from "../../utils/errors.js";
@@ -193,6 +194,18 @@ export interface RunWriteParams {
   montoExplicito?: MontoExplicito;
 }
 
+/**
+ * Deriva una `idempotency_key` estable del `confirmation_token`.
+ *
+ * Se hashea en vez de usar el token tal cual porque la clave viaja al audit log
+ * y al registro persistente, y el token es la credencial que autoriza ejecutar:
+ * no tiene por qué quedar escrita en dos archivos más.
+ */
+function claveDesdeToken(token: string | undefined): string {
+  if (token === undefined || token.trim() === "") return generateIdempotencyKey();
+  return createHash("sha256").update(`idem:${token}`).digest("hex").slice(0, 32);
+}
+
 export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> {
   const { ctx, tool, endpoint } = p;
   const warnings = [...(p.warnings ?? [])];
@@ -298,7 +311,26 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
       throw new BillerConfirmationError(check.mensaje);
     }
 
-    const idempotencyKey = p.idempotencyKey ?? generateIdempotencyKey();
+    // LA CLAVE SALE DEL TOKEN, NO DE UN AZAR NUEVO EN CADA INTENTO.
+    //
+    // `generateIdempotencyKey()` es un UUID random. Si el agente no manda
+    // `idempotency_key` —y no tiene por qué acordarse—, cada `confirm` traía una
+    // clave distinta, así que el registro de idempotencia no reconocía el
+    // reintento y la escritura pasaba de nuevo. O sea que el mismo
+    // `confirmation_token`, reenviado por un timeout de Kapso o por un
+    // reintento del modelo, EMITÍA DOS VECES el mismo CFE ante DGI. Y dos CFE
+    // no se deshacen: se anulan con dos notas de crédito.
+    //
+    // El token ya identifica unívocamente esta operación —hashea endpoint,
+    // ambiente, payload y el instante del dry-run—, así que derivar la clave de
+    // él hace que dos confirmaciones del MISMO preview compartan clave y la
+    // segunda choque con `idempotency.has()`. Dos dry-runs distintos dan tokens
+    // distintos y siguen pudiendo emitir dos veces: eso es el usuario haciendo
+    // la operación dos veces a propósito, que es otra cosa.
+    //
+    // Una `idempotency_key` explícita le sigue ganando: quien la manda sabe algo
+    // que nosotros no sobre qué reintento es cuál.
+    const idempotencyKey = p.idempotencyKey ?? claveDesdeToken(p.confirmationToken);
     const result = await executeWrite(ctx.getWriteContext(), {
       tool,
       endpoint,

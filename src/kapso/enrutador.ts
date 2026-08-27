@@ -629,6 +629,30 @@ export function interpretarMensaje(raw: string, opciones: MenuOpciones = {}): In
           .join(" o ")}?`,
       };
     }
+    // EL CATÁLOGO DECIDE QUÉ OPCIÓN ES; EL EXTRACTOR NO SE TIRA POR ESO.
+    //
+    // "facturale a Perez 2 bolsas a 6500" —el ejemplo insignia de
+    // `extraerPedido.ts`— matchea el sinónimo "facturale" y salía por acá con
+    // la opción correcta y SIN `pedido_campos`. El cliente, la cantidad y el
+    // precio estaban en el mensaje, se podían leer, y se tiraban: el usuario
+    // que dijo todo de una volvía igual a las tres preguntas del flujo guiado.
+    //
+    // No se cambia el orden —el paso 6c sigue siendo el último y el catálogo le
+    // sigue ganando, que es la invariante—: lo que cambia es que cuando la
+    // opción YA es emitir, se adjunta lo que el extractor supo leer. No compite
+    // con nadie, porque la decisión de qué opción es ya está tomada.
+    if (hit.opcion.id === `${PREFIJO_MENU}emitir`) {
+      const pedidoEnFrase = extraerPedidoEmision(texto);
+      if (esPedidoDeEmision(pedidoEnFrase)) {
+        return {
+          opcion: hit.opcion,
+          via: "pedido_emision",
+          mostrar_menu: false,
+          pedido_campos: pedidoEnFrase.campos,
+        };
+      }
+    }
+
     return {
       opcion: hit.opcion,
       via: hit.via,
