@@ -26,7 +26,8 @@
     "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js",
     "evals": "npm run build && node scripts/evals-enrutador.mjs",
     "diagnostico": "npm run build && node --env-file=.env scripts/simular-whatsapp.mjs",
-    "conversar": "npm run build && node --env-file=.env scripts/conversar.mjs"
+    "conversar": "npm run build && node --env-file=.env scripts/conversar.mjs",
+    "contrato": "node --env-file=.env scripts/contrato.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

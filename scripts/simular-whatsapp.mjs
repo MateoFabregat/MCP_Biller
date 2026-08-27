@@ -8,11 +8,11 @@
 // túnel, el bearer, el enrutador o la tool. Y encima cuesta un mensaje real, con
 // una conversación real que puede quedar en un estado del que no se vuelve.
 //
-// Este script recorre las cinco capas por separado y en orden, y cada una dice
-// si pasa o no. La primera que falla explica todo lo de abajo: si Kapso no puede
+// Este script recorre las capas por separado y en orden, y cada una dice si pasa
+// o no. La primera que falla explica todo lo de abajo: si Kapso no puede
 // conectarse al MCP, no tiene sentido leer los resultados del enrutador.
 //
-// LAS CINCO FASES
+// LAS SEIS FASES
 //   1. KAPSO      — ¿el workflow está activo, publicado y con trigger? ¿hay
 //                   conversaciones trabadas en handoff? (esto último es lo que
 //                   hace que un "hola" no obtenga NADA, sin ningún error.)
@@ -25,6 +25,9 @@
 //                   por `interpretarMensaje`. Sin red: es TypeScript puro.
 //   5. EJECUCIÓN  — las tools de LECTURA de cada opción, llamadas de verdad
 //                   contra Biller a través del MCP.
+//   6. GUIADA     — una emisión entera turno por turno, por los dos caminos
+//                   (tocando y escribiendo). Es la única fase que prueba una
+//                   TRANSICIÓN: las demás miran una llamada suelta.
 //
 // LO QUE NO HACE, A PROPÓSITO: no emite, no anula, no manda WhatsApps. Las tools
 // de escritura y las que le escriben a un tercero se listan y se saltean. Un
@@ -34,6 +37,7 @@
 //   node --env-file=.env scripts/simular-whatsapp.mjs
 //   node --env-file=.env scripts/simular-whatsapp.mjs --url https://otra/mcp
 //   node --env-file=.env scripts/simular-whatsapp.mjs --solo enrutador
+//   node --env-file=.env scripts/simular-whatsapp.mjs --solo guiada
 // =============================================================================
 
 import { ClienteMcp } from "./mcpCliente.mjs";
@@ -513,9 +517,130 @@ async function faseEjecucion(cliente, nombres) {
 }
 
 // =============================================================================
+// FASE 6 — la emisión guiada, turno por turno
+// =============================================================================
+/**
+ * Recorre una emisión completa como la recorre una persona.
+ *
+ * POR QUÉ NO ALCANZA CON LLAMARLA UNA VEZ. La fase 5 llama cada tool con un
+ * argumento mínimo y mira que conteste. Para `biller_emision_guiada` eso prueba
+ * únicamente el primer turno: la tool es una MÁQUINA DE ESTADOS, y lo que puede
+ * romperse es la transición —una respuesta que no mueve el paso, un paso que
+ * pregunta algo que ya se contestó, un default que se cuela sin que nadie lo
+ * diga—. Nada de eso se ve en un turno.
+ *
+ * Los dos bugs que aparecieron al recorrerla a mano eran exactamente de ese
+ * tipo: escribir "sin identificar" —la frase que la propia pregunta sugiere— no
+ * movía nada, y "pesos" en el paso de la cotización se ignoraba y dejaba la
+ * venta en dólares. Los dos con la fase 5 en verde.
+ *
+ * NO EMITE. Llega hasta `confirmar`, que es donde el flujo se detiene a esperar
+ * al humano, y ahí termina. El borrador se descarta.
+ */
+async function faseEmisionGuiada(cliente, nombres) {
+  titulo(6, "EMISIÓN GUIADA — la conversación entera, turno por turno");
+
+  if (!nombres.has("biller_emision_guiada")) {
+    anotar("guiada", "mal", "biller_emision_guiada no está en el catálogo.");
+    return;
+  }
+  const remitente = remitentePrincipal();
+
+  // Dos caminos hasta el mismo lugar. El de botones es el que se diseñó; el de
+  // texto es el que ocurre cuando el usuario escribe en vez de tocar, y hasta
+  // hace poco era un callejón sin salida.
+  const guiones = [
+    {
+      nombre: "tocando los botones",
+      turnos: [
+        "facturale 2 bolsas de portland a 480",
+        "emision:receptor:final",
+        "emision:cliente:sin_identificar",
+      ],
+    },
+    {
+      nombre: "escribiendo las respuestas",
+      turnos: [
+        "facturale 2 bolsas de portland a 480",
+        "consumidor final",
+        "sin identificar",
+      ],
+    },
+  ];
+
+  for (const g of guiones) {
+    const sesion = `simulador-${g.nombre.replace(/\s/g, "-")}-${remitente}`;
+    await cliente.llamar("biller_emision_guiada", { remitente, sesion, reiniciar: true, enviar: false });
+
+    let paso = null;
+    let atascado = false;
+    const recorrido = [];
+    for (const turno of g.turnos) {
+      const r = await cliente.llamar("biller_emision_guiada", {
+        remitente,
+        sesion,
+        mensaje: turno,
+        enviar: false,
+      });
+      if (!r.ok) {
+        anotar("guiada", "mal", `${g.nombre}: "${turno}" → ${(r.detalle ?? r.texto ?? "").slice(0, 90)}`);
+        atascado = true;
+        break;
+      }
+      let j;
+      try {
+        j = JSON.parse(r.texto);
+      } catch {
+        anotar("guiada", "mal", `${g.nombre}: "${turno}" no devolvió JSON.`);
+        atascado = true;
+        break;
+      }
+      // EL PASO TIENE QUE MOVERSE. Un turno que deja el flujo donde estaba es
+      // el usuario contestando y el asistente repreguntando lo mismo: desde el
+      // teléfono se ve como que no entiende, y no hay ningún error que mirar.
+      if (j.paso === paso) {
+        anotar("guiada", "mal", `${g.nombre}: "${turno}" NO movió el flujo (sigue en "${paso}").`);
+        atascado = true;
+        break;
+      }
+      paso = j.paso;
+      recorrido.push(paso);
+    }
+
+    if (!atascado) {
+      anotar("guiada", "ok", `${g.nombre}: ${recorrido.join(" → ")}`);
+    }
+  }
+
+  // Y los dos caminos tienen que terminar en el MISMO comprobante: si tocar y
+  // escribir dan borradores distintos, uno de los dos está mintiendo.
+  const borradores = [];
+  for (const g of guiones) {
+    const sesion = `simulador-${g.nombre.replace(/\s/g, "-")}-${remitente}`;
+    const r = await cliente.llamar("biller_emision_guiada", { remitente, sesion, enviar: false });
+    if (!r.ok) continue;
+    try {
+      borradores.push(JSON.parse(r.texto).comprobante_borrador ?? null);
+    } catch {
+      borradores.push(null);
+    }
+  }
+  if (borradores.length === 2 && borradores[0] !== null) {
+    const iguales = JSON.stringify(borradores[0]) === JSON.stringify(borradores[1]);
+    anotar(
+      "guiada",
+      iguales ? "ok" : "mal",
+      iguales
+        ? "Tocar y escribir producen el MISMO comprobante."
+        : `Tocar y escribir producen comprobantes DISTINTOS:\n      botones: ${JSON.stringify(borradores[0])}\n      texto:   ${JSON.stringify(borradores[1])}`,
+    );
+  }
+}
+
+// =============================================================================
 // Main
 // =============================================================================
-console.log(NEGRITA("Simulador del canal de WhatsApp") + " — recorre las cinco capas y dice cuál falla.");
+console.log(NEGRITA("Simulador del canal de WhatsApp") + " — recorre las seis capas y dice cuál falla.");
 
 // La URL se resuelve SIEMPRE, corra o no la fase 1.
 //
@@ -544,6 +669,7 @@ if (SOLO === "enrutador") {
   if (cliente !== null) {
     const nombres = await faseCatalogo(cliente);
     if (nombres !== null && corre("ejecucion")) await faseEjecucion(cliente, nombres);
+    if (nombres !== null && corre("guiada")) await faseEmisionGuiada(cliente, nombres);
   }
 }
 

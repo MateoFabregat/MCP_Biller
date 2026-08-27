@@ -14,6 +14,8 @@
 import { describe, expect, it } from "vitest";
 import { envolverNoConfiable, limpiarMarcas, limpiarMarcasProfundo } from "../src/security/untrusted.js";
 import { computeConfirmationToken } from "../src/write/confirm.js";
+import { sanitizeToolResult } from "../src/security/sanitize.js";
+import { makeCtx } from "./helpers.js";
 
 describe("limpiarMarcas", () => {
   it("deshace exactamente lo que hizo envolverNoConfiable", () => {
@@ -88,5 +90,31 @@ describe("el payload sucio y el limpio emiten LO MISMO", () => {
       "/v3/comprobantes/emitir", "test", limpiarMarcasProfundo(limpio).valor, ahora,
     );
     expect(tSucio).toBe(tLimpio);
+  });
+});
+
+describe("los ejemplos propios NO se envuelven", () => {
+  it("un `ejemplo` con clave `concepto` adentro sale limpio", () => {
+    // Es el origen del bug de arriba: el modelo copiaba el ejemplo CON las
+    // marcas al comprobante que mandaba a emitir.
+    const bruto = {
+      content: [{ type: "text", text: "" }],
+      structuredContent: {
+        faltantes: [
+          { campo: "items", ejemplo: [{ concepto: "Servicio de consultoría", cantidad: 1 }] },
+        ],
+        // Fuera del `ejemplo`, el MISMO nombre de clave sí se envuelve: la
+        // excepción es del subárbol, no del nombre.
+        items: [{ concepto: "Texto que escribió un proveedor" }],
+      },
+    };
+    const saneado = sanitizeToolResult(bruto as never, makeCtx());
+    const j = saneado.structuredContent as {
+      faltantes: Array<{ ejemplo: Array<{ concepto: string }> }>;
+      items: Array<{ concepto: string }>;
+    };
+
+    expect(j.faltantes[0]!.ejemplo[0]!.concepto).toBe("Servicio de consultoría");
+    expect(j.items[0]!.concepto).toContain("dato-no-confiable");
   });
 });

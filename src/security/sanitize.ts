@@ -21,7 +21,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { redactSecrets } from "../utils/errors.js";
 import { pretty, type ToolContext, type ToolResult } from "../tools/shared.js";
-import { CAMPOS_NO_CONFIABLES, envolverNoConfiable, yaEnvuelto } from "./untrusted.js";
+import {
+  CAMPOS_NO_CONFIABLES,
+  SUBARBOLES_PROPIOS,
+  envolverNoConfiable,
+  yaEnvuelto,
+} from "./untrusted.js";
 
 /** Profundidad máxima al recorrer la salida (corta ciclos y estructuras patológicas). */
 const MAX_DEPTH = 12;
@@ -29,12 +34,22 @@ const MAX_DEPTH = 12;
 /**
  * Recorre un valor arbitrario envolviendo los strings cuya CLAVE está en
  * `CAMPOS_NO_CONFIABLES`. `claveActual` es el nombre bajo el que vino el valor.
+ *
+ * `propio` viaja hacia ABAJO y no se apaga nunca: una vez que se entró a un
+ * subárbol nuestro (ver `SUBARBOLES_PROPIOS`), todo lo que cuelga de ahí lo
+ * escribimos nosotros, por más que las claves de adentro se llamen `concepto` o
+ * `razon_social` — que es justamente lo que pasa con el `ejemplo` de un ítem.
  */
-function envolverCamposNoConfiables(valor: unknown, claveActual: string | null, depth: number): unknown {
+function envolverCamposNoConfiables(
+  valor: unknown,
+  claveActual: string | null,
+  depth: number,
+  propio = false,
+): unknown {
   if (depth > MAX_DEPTH) return valor;
 
   if (typeof valor === "string") {
-    if (claveActual !== null && CAMPOS_NO_CONFIABLES.has(claveActual) && !yaEnvuelto(valor)) {
+    if (!propio && claveActual !== null && CAMPOS_NO_CONFIABLES.has(claveActual) && !yaEnvuelto(valor)) {
       return envolverNoConfiable(valor);
     }
     return valor;
@@ -43,13 +58,13 @@ function envolverCamposNoConfiables(valor: unknown, claveActual: string | null, 
   if (Array.isArray(valor)) {
     // Los elementos heredan la clave del array: `items: [...]` no marca, pero
     // `motivos: ["texto de tercero"]` sí debe marcar cada elemento.
-    return valor.map((v) => envolverCamposNoConfiables(v, claveActual, depth + 1));
+    return valor.map((v) => envolverCamposNoConfiables(v, claveActual, depth + 1, propio));
   }
 
   if (typeof valor === "object" && valor !== null) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(valor as Record<string, unknown>)) {
-      out[k] = envolverCamposNoConfiables(v, k, depth + 1);
+      out[k] = envolverCamposNoConfiables(v, k, depth + 1, propio || SUBARBOLES_PROPIOS.has(k));
     }
     return out;
   }

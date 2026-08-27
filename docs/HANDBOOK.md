@@ -54,8 +54,9 @@ Y cuando lo que falla es **el WhatsApp** —el usuario escribe y no le contesta
 nadie— hay dos comandos más, porque ese síntoma no deja rastro en ningún lado:
 
 ```bash
-npm run diagnostico    # las cinco capas por separado; la primera que falla explica el resto
+npm run diagnostico    # las seis capas por separado; la primera que falla explica el resto
 npm run conversar -- --guion   # conversaciones reales contra el agente de Kapso
+npm run contrato       # ¿la API de Biller sigue comportándose como creemos?
 ```
 
 `diagnostico` recorre Kapso (workflow, trigger, conversaciones trabadas en
@@ -66,6 +67,14 @@ WhatsApps: lo que escribe se lista y se saltea.
 
 `conversar` sí manda mensajes reales al número de la allowlist. Úsalo cuando
 `diagnostico` da todo verde y querés ver qué hace el agente con una frase.
+
+`contrato` es distinto de los tests y no los reemplaza. Los tests usan fixtures
+y dicen que NUESTRO código hace lo que dice; `contrato` llama a la API real y
+dice si la REALIDAD contra la que se escribió sigue siendo esa. Hay siete
+comportamientos de Biller que se descubrieron llamándola de verdad y **cuatro
+contradicen al OpenAPI**: si Biller cambia uno, los 1376 tests siguen pasando y
+lo que se rompe es un número en el teléfono de alguien, semanas después. Solo
+hace GET.
 
 El tercero es el menos obvio y el más importante: verifica **estáticamente** que
 fuera de `src/write/` no exista ningún POST. Es lo que garantiza que agregar una

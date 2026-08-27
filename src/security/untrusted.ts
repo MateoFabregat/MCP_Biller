@@ -88,6 +88,28 @@ export const CAMPOS_NO_CONFIABLES: ReadonlySet<string> = new Set([
  */
 export const NO_ENVUELTOS_A_PROPOSITO: ReadonlySet<string> = new Set(["nombre"]);
 
+/**
+ * Claves cuyo subárbol lo escribimos NOSOTROS, y por lo tanto no se envuelve.
+ *
+ * POR QUÉ HACE FALTA UNA EXCEPCIÓN. La barrera envuelve por nombre de clave, y
+ * eso es lo correcto para un `concepto` que vino de un comprobante ajeno. Pero
+ * `biller_requisitos_comprobante` devuelve un `ejemplo` de cómo se ve un ítem
+ * —con su clave `concepto` adentro— y ese texto es un literal de
+ * `biller/requisitos.ts`: lo escribimos acá, no lo escribió ningún proveedor.
+ *
+ * Envolverlo tenía dos costos. Ensuciaba el ejemplo justo donde su trabajo es
+ * ser copiable. Y era el origen de un bug real: el modelo copiaba el ejemplo
+ * CON las marcas al comprobante, y el CFE salía ante DGI con
+ * "⟦dato-no-confiable⟧ Servicio de consultoría ⟦/dato-no-confiable⟧" impreso.
+ *
+ * AGREGAR UNA CLAVE ACÁ ES UNA DECISIÓN DE SEGURIDAD, no de formato: abre un
+ * subárbol entero por el que el texto de un tercero saldría sin marcar. Solo va
+ * una clave cuyo contenido sea SIEMPRE un literal del repo. Si algún día un
+ * `ejemplo` se arma con datos traídos de la API, esta excepción deja de valer y
+ * hay que sacarla.
+ */
+export const SUBARBOLES_PROPIOS: ReadonlySet<string> = new Set(["ejemplo"]);
+
 const MARCA_INICIO = "⟦dato-no-confiable⟧";
 const MARCA_FIN = "⟦/dato-no-confiable⟧";
 
