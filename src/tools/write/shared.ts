@@ -14,6 +14,7 @@ import {
   type ContextoPreview,
   type TotalesEstimados,
 } from "../../services/calcularTotales.js";
+import { limpiarMarcasProfundo } from "../../security/untrusted.js";
 import type { RateLimitClass } from "../../utils/rateLimit.js";
 import { BillerConfirmationError } from "../../utils/errors.js";
 import { checkConfirmationToken, computeConfirmationToken } from "../../write/confirm.js";
@@ -193,8 +194,31 @@ export interface RunWriteParams {
 }
 
 export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> {
-  const { ctx, tool, endpoint, payload } = p;
+  const { ctx, tool, endpoint } = p;
   const warnings = [...(p.warnings ?? [])];
+
+  // LAS MARCAS DE LA BARRERA DE SALIDA NO ENTRAN A UN DOCUMENTO FISCAL.
+  //
+  // El modelo lee un `payload_preview` —o el `ejemplo` de
+  // `biller_requisitos_comprobante`, que sale envuelto por tener una clave
+  // `concepto`— y copia el string con las marcas adentro. Sin esto, el CFE salía
+  // ante DGI con "⟦dato-no-confiable⟧ Bolsa de portland ⟦/dato-no-confiable⟧"
+  // impreso en la línea, y no había ninguna advertencia en ningún lado.
+  //
+  // VA ACÁ Y ANTES DEL TOKEN, no en cada tool, por dos razones. Es la única
+  // costura por la que pasan las SIETE tools de escritura, así que una tool
+  // nueva queda cubierta sin que nadie se acuerde. Y el `confirmation_token`
+  // hashea el payload: si se limpiara después, el dry-run hashearía el sucio y
+  // el confirm el limpio, y el usuario recibiría "el payload cambió" —el aviso
+  // que existe para detectar manipulación— por un cambio que hicimos nosotros.
+  const { valor: payload, limpiados } = limpiarMarcasProfundo(p.payload);
+  if (limpiados.length > 0) {
+    warnings.push(
+      `Se limpiaron marcas de la barrera de datos en: ${limpiados.join(", ")}. El texto se emite sin ` +
+        "las marcas. Si esto se repite, el modelo está copiando valores de una respuesta anterior en " +
+        "vez de tomarlos del borrador.",
+    );
+  }
 
   try {
     const config = ctx.getConfig();

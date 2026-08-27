@@ -118,6 +118,76 @@ export function envolverNoConfiable(valor: string): string {
   return `${MARCA_INICIO} ${truncado} ${MARCA_FIN}`;
 }
 
+/**
+ * Saca las marcas de envoltura de un texto que ENTRA al server.
+ *
+ * LA BARRERA TENÍA UNA SOLA MITAD. `envolverNoConfiable` marca lo que SALE, y
+ * eso es correcto. Lo que faltaba es que ese texto marcado vuelve: el modelo lee
+ * un `payload_preview` —o el `ejemplo` de `biller_requisitos_comprobante`, que
+ * también sale envuelto por ser una clave `concepto`— y copia el string entero,
+ * marcas incluidas, al comprobante que manda a emitir.
+ *
+ * Verificado el 2026-08-27: un `concepto` con las marcas adentro llegaba
+ * intacto al `payload_preview` del dry-run, sin una sola advertencia. O sea que
+ * el CFE salía ante DGI con "⟦dato-no-confiable⟧ Bolsa de portland
+ * ⟦/dato-no-confiable⟧" impreso en la línea. Un documento fiscal no se edita:
+ * se anula con una nota de crédito y se emite de nuevo.
+ *
+ * Se limpia y NO se rechaza a propósito. El texto de adentro es el que el
+ * usuario dictó; tirarle un error al almacenero por un artefacto del canal del
+ * modelo es hacerle pagar a él un problema nuestro. Pero se avisa, porque que
+ * esto pase significa que el modelo está haciendo round-trip de un valor que
+ * debería venir del borrador.
+ */
+export function limpiarMarcas(valor: string): string {
+  if (!valor.includes("⟦")) return valor;
+  return valor
+    .split(MARCA_INICIO)
+    .join("")
+    .split(MARCA_FIN)
+    .join("")
+    // Los delimitadores neutralizados: si vuelven, vuelven así.
+    .split("⟦…⟧")
+    .join("")
+    .split("⟦/…⟧")
+    .join("")
+    .trim();
+}
+
+/**
+ * Limpia las marcas en TODO string de una estructura que entra, a cualquier
+ * profundidad, y dice qué claves hubo que limpiar.
+ *
+ * Recorre todo y no solo `CAMPOS_NO_CONFIABLES` porque el problema no es de qué
+ * campo se trate: es que ese texto no puede terminar en NINGÚN lugar de un
+ * documento fiscal. Y porque el modelo copia de donde se le ocurre.
+ *
+ * Devuelve una copia: mutar el payload del llamador haría que el objeto que se
+ * hashea para el `confirmation_token` cambie bajo los pies de quien lo armó.
+ */
+export function limpiarMarcasProfundo(valor: unknown): { valor: unknown; limpiados: string[] } {
+  const limpiados: string[] = [];
+
+  function caminar(nodo: unknown, ruta: string): unknown {
+    if (typeof nodo === "string") {
+      const limpio = limpiarMarcas(nodo);
+      if (limpio !== nodo) limpiados.push(ruta === "" ? "(raíz)" : ruta);
+      return limpio;
+    }
+    if (Array.isArray(nodo)) return nodo.map((h, i) => caminar(h, `${ruta}[${i}]`));
+    if (typeof nodo === "object" && nodo !== null) {
+      const salida: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(nodo)) {
+        salida[k] = caminar(v, ruta === "" ? k : `${ruta}.${k}`);
+      }
+      return salida;
+    }
+    return nodo;
+  }
+
+  return { valor: caminar(valor, ""), limpiados };
+}
+
 /** true si el string ya pasó por `envolverNoConfiable` (evita doble envoltura). */
 export function yaEnvuelto(valor: string): boolean {
   return valor.startsWith(MARCA_INICIO);
