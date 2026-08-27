@@ -157,7 +157,7 @@ Por eso `services/dedupe.ts` —que consulta si un `numero_interno` ya existe an
 de emitir— vive en `services/` y no en `tools/write/`: hace GET, y queriéndolo
 dentro del alcance del guard, si algún día alguien mete un POST ahí, salta.
 
-### 2.1. `kapso/`: nueve archivos y una fachada
+### 2.1. `kapso/`: diez archivos y una fachada
 
 `menu.ts` tenía 1.555 líneas y cuatro responsabilidades. Hoy son cinco archivos
 —más los cuatro del flujo de emisión— y `menu.ts` quedó como **fachada que
@@ -173,6 +173,7 @@ re-exporta todo**: cero importadores cambiados.
 | `extraerPedido.ts` | Lee "facturale a Pérez 2 bolsas a 6.500" con una gramática | `Number("6.500")` es 6,5: **la plata la lee TypeScript**, no el modelo |
 | `emision.ts` | La máquina de pasos: qué preguntar ahora, y los submenús | es una decisión **fiscal** (qué CFE, qué IVA); un modelo que improvisa produce un comprobante que hay que anular |
 | `borradorStore.ts` | El estado de la emisión, del lado del server | el flujo más caro del producto no puede apoyarse en el contexto de un modelo |
+| `borradorEmision.ts` | Qué va en el comprobante: importes que escribió una persona, la jerarquía usuario > texto > perfil > default, y el cuerpo para emitir | vivía adentro de la tool, o sea inalcanzable desde cualquier otra superficie; importa `emision.ts` y `extraerPedido.ts`, y **nadie lo importa a él**, para que la máquina de pasos siga sin depender de la gramática que adivina |
 | `webhook.ts` | La entrada de Kapso: firma HMAC, allowlist, decisión de ruteo | **no ejecuta nada que toque plata**: interpreta y delega |
 
 Las dependencias van en **una sola dirección** y sin ciclos: `enrutador` y
