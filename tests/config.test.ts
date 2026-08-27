@@ -1,7 +1,13 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { inspectConfig, loadConfig } from "../src/config.js";
+import {
+  DEFAULT_HTTP_MAX_SESSIONS,
+  DEFAULT_HTTP_SESSION_TTL_MS,
+  TENANT_IMPLICITO,
+  inspectConfig,
+  loadConfig,
+} from "../src/config.js";
 import { BillerConfigError } from "../src/utils/errors.js";
 
 describe("config", () => {
@@ -168,5 +174,62 @@ describe("contrato del .env.example", () => {
         "Una variable indocumentada no se configura nunca: agregala al ejemplo diciendo qué " +
         "pasa si NO se configura, que es la parte que importa.",
     ).toEqual([]);
+  });
+});
+
+// =============================================================================
+// Los parámetros del transporte HTTP y el cache, ya en la config validada.
+//
+// Vivían leyéndose sueltos del entorno con un helper local en
+// `transport/http.ts`, fuera de la validación y por lo tanto fuera del overlay
+// de tenants. El test que importa es el del MODO DE FALLA: un valor basura no
+// puede romper el arranque (quedarse sin server de facturación por un TTL mal
+// tipeado es peor) pero tampoco puede pasar en silencio por bueno.
+// =============================================================================
+
+describe("parámetros del proceso en la config validada", () => {
+  const MINIMA = {
+    BILLER_API_BASE_URL: "https://test.biller.uy",
+    BILLER_API_TOKEN: "validtoken123",
+  };
+
+  it("BILLER_HTTP_SESSION_TTL_MS y BILLER_HTTP_MAX_SESSIONS se leen y se validan", () => {
+    const c = loadConfig({
+      ...MINIMA,
+      BILLER_HTTP_SESSION_TTL_MS: "60000",
+      BILLER_HTTP_MAX_SESSIONS: "10",
+    });
+    expect(c.httpSessionTtlMs).toBe(60_000);
+    expect(c.httpMaxSessions).toBe(10);
+  });
+
+  it("un valor basura cae al default en vez de romper el arranque", () => {
+    for (const malo of ["cero", "-1", "0"]) {
+      const c = loadConfig({ ...MINIMA, BILLER_HTTP_MAX_SESSIONS: malo });
+      expect(c.httpMaxSessions).toBe(DEFAULT_HTTP_MAX_SESSIONS);
+    }
+    expect(loadConfig(MINIMA).httpSessionTtlMs).toBe(DEFAULT_HTTP_SESSION_TTL_MS);
+  });
+
+  it("BILLER_CACHE_ENABLED viene prendido y solo el literal 'false' lo apaga", () => {
+    expect(loadConfig(MINIMA).cacheEnabled).toBe(true);
+    expect(loadConfig({ ...MINIMA, BILLER_CACHE_ENABLED: "false" }).cacheEnabled).toBe(false);
+    expect(loadConfig({ ...MINIMA, BILLER_CACHE_ENABLED: "FALSE" }).cacheEnabled).toBe(false);
+    // "0" es lo que escribe quien cree que apagó el cache: queda prendido y se
+    // avisa por log, porque diagnosticar contra datos cacheados es el modo de
+    // falla caro.
+    expect(loadConfig({ ...MINIMA, BILLER_CACHE_ENABLED: "0" }).cacheEnabled).toBe(true);
+  });
+
+  it("inspectConfig reporta lo mismo y nunca lanza", () => {
+    const i = inspectConfig({ ...MINIMA, BILLER_CACHE_ENABLED: "false" });
+    expect(i.cacheEnabled).toBe(false);
+    expect(i.tenantId).toBe(TENANT_IMPLICITO);
+    expect(i.dataDir).toBeNull();
+  });
+
+  it("inspectConfig informa la ruta DERIVADA, que es el archivo que se va a usar de verdad, sin tocar el disco", () => {
+    const i = inspectConfig({ ...MINIMA, BILLER_DATA_DIR: "/no/existe/ni/hace/falta" });
+    expect(i.auditLogPath).toBe("/no/existe/ni/hace/falta/_proceso/audit.jsonl");
   });
 });

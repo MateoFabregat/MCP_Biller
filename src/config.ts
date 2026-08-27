@@ -7,12 +7,48 @@
 //                    La usa `biller_health_check` para diagnosticar.
 // =============================================================================
 
+import { mkdirSync } from "node:fs";
+import { join as unirRuta } from "node:path";
+import { logger } from "./logger.js";
 import { BillerConfigError } from "./utils/errors.js";
 import { parseLimitesMonto, type LimitesMonto } from "./write/limiteMonto.js";
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 120_000;
+
+/**
+ * TTL de una sesión del transporte HTTP y techo de sesiones simultáneas.
+ *
+ * Viven acá y no en `transport/http.ts` —donde se usan— porque hasta agosto de
+ * 2026 se leían del entorno con un helper local, fuera de la config validada y
+ * por lo tanto fuera del overlay de tenants. Hoy no duele (son parámetros del
+ * proceso, no de una empresa), pero es exactamente el camino por el que
+ * `BILLER_CACHE_ENABLED` se volvió la única variable imposible de pisar: una
+ * variable que nadie valida es una variable que nadie puede pisar.
+ *
+ * El porqué de cada número está en `transport/http.ts`, al lado de quien los usa.
+ */
+export const DEFAULT_HTTP_SESSION_TTL_MS = 30 * 60 * 1000;
+export const DEFAULT_HTTP_MAX_SESSIONS = 200;
+
+/**
+ * El id que se le da a "la única empresa" cuando no hay registro de tenants.
+ *
+ * Sirve para que `BILLER_DATA_DIR` funcione igual en modo mono-tenant: las rutas
+ * se derivan a `<data_dir>/_proceso/…` y el operador no tiene que escribir tres
+ * rutas para un despliegue de una sola empresa.
+ *
+ * Empieza con `_` a propósito: `construirRegistro` rechaza los ids que no sean
+ * `[A-Za-z0-9-]`, así que ningún tenant real puede llamarse así y quedarse con
+ * el directorio del proceso. La colisión no se detecta, no se puede cometer.
+ */
+export const TENANT_IMPLICITO = "_proceso";
+
+/** Nombre de archivo de cada ruta derivada. Cambiarlos es cambiar de archivo. */
+const ARCHIVO_AUDIT = "audit.jsonl";
+const ARCHIVO_IDEMPOTENCIA = "idempotencia.jsonl";
+const ARCHIVO_BORRADORES = "borradores.jsonl";
 
 export type BillerEnvironment = "test" | "production";
 
@@ -34,6 +70,16 @@ function parseCapabilityMode(raw: string | undefined): BillerCapabilityMode {
 }
 
 export interface BillerConfig {
+  /**
+   * Id de la empresa de esta config. `_proceso` en modo mono-tenant.
+   *
+   * No identifica nada ante Biller —eso lo hace el token—: es el nombre con el
+   * que esta empresa aparece en los logs y, sobre todo, el que separa su
+   * directorio de datos del de las demás. Ver `BILLER_DATA_DIR`.
+   */
+  tenantId: string;
+  /** Directorio base de persistencia, si está configurado. Ver `derivarRutas`. */
+  dataDir?: string;
   /** Base URL normalizada (sin barra final), p.ej. https://test.biller.uy */
   apiBaseUrl: string;
   /** Bearer token. Nunca se loguea ni se devuelve. */
@@ -151,6 +197,19 @@ export interface BillerConfig {
   valorUiFecha?: string;
   /** Umbral en UI para exigir receptor. Default 5000 (ver requisitos.ts). */
   umbralUiReceptor?: number;
+  /**
+   * Cache de ventanas de consulta. Prendido salvo `BILLER_CACHE_ENABLED=false`.
+   *
+   * Está en la config validada —y no solo leído del entorno donde se usa— para
+   * que un tenant lo pueda pisar en su overlay: apagar el cache para diagnosticar
+   * un total que no cierra en UNA empresa no tiene por qué apagarlo para las
+   * veinte. Quien conecta esto con el cache es `tenants/contextos.ts`.
+   */
+  cacheEnabled: boolean;
+  /** TTL de una sesión del transporte HTTP, en ms. */
+  httpSessionTtlMs: number;
+  /** Techo de sesiones HTTP simultáneas. */
+  httpMaxSessions: number;
 }
 
 /** Configuración del canal de salida por WhatsApp (Kapso). */
@@ -304,6 +363,143 @@ function parseBool(raw: string | undefined): boolean {
 }
 
 /**
+ * Booleano que viene PRENDIDO de fábrica: solo el literal "false" lo apaga.
+ *
+ * Se avisa —y no se rompe— cuando el valor no es ni "true" ni "false": el modo
+ * de falla que importa es el de quien escribe `BILLER_CACHE_ENABLED=0` creyendo
+ * que apagó el cache y se queda diagnosticando un total contra datos cacheados.
+ * Romper el arranque por esto sería peor: es una optimización, no una barrera.
+ */
+function parseBoolPrendido(raw: string | undefined, nombre: string): boolean {
+  const t = (raw ?? "").trim().toLowerCase();
+  if (t === "") return true;
+  if (t === "true") return true;
+  if (t === "false") return false;
+  logger.warn(
+    `${nombre}="${raw}" no es "true" ni "false": se ignora y queda PRENDIDO. Si querías apagarlo, ` +
+      `el único valor que lo apaga es exactamente "false".`,
+  );
+  return true;
+}
+
+/**
+ * Entero positivo del entorno, con default y aviso.
+ *
+ * Un valor no numérico o <= 0 cae al default en vez de romper el arranque:
+ * quedarse sin server de facturación por un TTL mal tipeado es peor que
+ * ignorarlo. Pero se avisa, porque el silencio es lo que hace que alguien crea
+ * que configuró un techo de sesiones que en realidad no está puesto.
+ */
+function parseEnteroPositivo(raw: string | undefined, porDefecto: number, nombre: string): number {
+  const t = (raw ?? "").trim();
+  if (t === "") return porDefecto;
+  const n = Number(t);
+  if (!Number.isFinite(n) || n <= 0) {
+    logger.warn(
+      `${nombre}="${raw}" no es un entero positivo: se ignora y se usa el default (${porDefecto}).`,
+    );
+    return porDefecto;
+  }
+  return Math.floor(n);
+}
+
+/**
+ * Las tres rutas de persistencia, derivadas de `BILLER_DATA_DIR` + el id de la
+ * empresa.
+ *
+ * EL PROBLEMA QUE RESUELVE. Declararlas a mano son tres rutas por empresa, y la
+ * de más arriba está a un copy-paste de distancia: dar de alta la vigésima
+ * empresa copiando la entrada de la decimonovena deja a las dos escribiendo el
+ * audit fiscal en el mismo archivo. Hasta acá la única defensa era la validación
+ * de duplicados de `construirRegistro`, que es una red, no una imposibilidad.
+ *
+ * Con el id adentro de la ruta, compartir archivo deja de ser detectable y pasa
+ * a ser IMPOSIBLE: el id ya es único por construcción (el registro lo valida) y
+ * dos ids distintos no pueden producir el mismo directorio.
+ *
+ * LA DECLARACIÓN EXPLÍCITA GANA. Quien ya tiene sus rutas escritas —y el layout
+ * de disco atado a ellas: backups, permisos, un volumen montado -- no se entera
+ * de que esto existe. La derivación solo llena lo que nadie declaró.
+ *
+ * SIN `BILLER_DATA_DIR` NO PASA NADA. Sin rutas no hay persistencia, que es el
+ * comportamiento de siempre y ya está documentado qué implica (idempotencia en
+ * memoria, sin rastro fiscal en disco).
+ */
+function derivarRutas(env: Env): {
+  auditLogPath?: string;
+  idempotencyLogPath?: string;
+  borradorStorePath?: string;
+} {
+  const explicitas = {
+    auditLogPath: trimOrUndefined(env.BILLER_AUDIT_LOG_PATH),
+    idempotencyLogPath: trimOrUndefined(env.BILLER_IDEMPOTENCY_LOG_PATH),
+    borradorStorePath: trimOrUndefined(env.BILLER_BORRADOR_STORE_PATH),
+  };
+  const dataDir = trimOrUndefined(env.BILLER_DATA_DIR);
+  if (dataDir === undefined) return explicitas;
+
+  const derivadas = rutasDerivadasDe(dataDir, tenantIdDe(env));
+  return {
+    auditLogPath: explicitas.auditLogPath ?? derivadas.BILLER_AUDIT_LOG_PATH,
+    idempotencyLogPath: explicitas.idempotencyLogPath ?? derivadas.BILLER_IDEMPOTENCY_LOG_PATH,
+    borradorStorePath: explicitas.borradorStorePath ?? derivadas.BILLER_BORRADOR_STORE_PATH,
+  };
+}
+
+/**
+ * Las tres rutas derivadas, indexadas por el NOMBRE DE LA VARIABLE que cada una
+ * reemplaza.
+ *
+ * Se indexa así —y no por el campo de la config— porque el otro consumidor es
+ * `tenants/registry.ts`, que razona sobre variables de entorno: necesita saber
+ * qué archivo le va a tocar a un tenant que no declaró `BILLER_AUDIT_LOG_PATH`
+ * para poder chequearlo contra el que otro tenant declaró a mano.
+ */
+export function rutasDerivadasDe(dataDir: string, tenantId: string): Record<string, string> {
+  const dir = directorioDeDatos(dataDir, tenantId);
+  return {
+    BILLER_AUDIT_LOG_PATH: unirRuta(dir, ARCHIVO_AUDIT),
+    BILLER_IDEMPOTENCY_LOG_PATH: unirRuta(dir, ARCHIVO_IDEMPOTENCIA),
+    BILLER_BORRADOR_STORE_PATH: unirRuta(dir, ARCHIVO_BORRADORES),
+  };
+}
+
+/** El id de empresa del entorno efectivo. Lo pone el overlay del tenant. */
+export function tenantIdDe(env: Env): string {
+  return trimOrUndefined(env.BILLER_TENANT_ID) ?? TENANT_IMPLICITO;
+}
+
+/** `<data_dir>/<id>`. Función y no un template suelto para que haya UN solo lugar. */
+export function directorioDeDatos(dataDir: string, tenantId: string): string {
+  return unirRuta(dataDir, tenantId);
+}
+
+/**
+ * Crea el directorio derivado si no existe.
+ *
+ * Se hace acá y no en cada store porque el modo de falla es de arranque, no de
+ * emisión: si el directorio no se puede crear, quien tiene que enterarse es el
+ * operador al levantar el proceso, no el almacenero a mitad de una factura con
+ * un `ENOENT` que no le dice nada. Solo se crea el DERIVADO: para una ruta que
+ * el operador escribió a mano, el directorio es parte de lo que él decidió y
+ * crearlo por las nuestras puede terminar en un `data/` inventado al lado del
+ * volumen que en realidad quería usar.
+ */
+function asegurarDirectorio(dir: string): void {
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    throw new BillerConfigError(
+      `No se pudo crear el directorio de datos "${dir}" (BILLER_DATA_DIR): ` +
+        (err instanceof Error ? err.message : String(err)) +
+        ". Ahí van el audit fiscal, la idempotencia y los borradores de esta empresa. " +
+        "Crealo a mano y dale permiso de escritura al usuario del proceso, o apuntá " +
+        "BILLER_DATA_DIR a un directorio escribible.",
+    );
+  }
+}
+
+/**
  * Parsea BILLER_SUCURSALES_JSON, p.ej. {"6":"Pocitos","7":"Centro"}.
  * Tolerante: si el JSON es inválido devuelve un mapa vacío en vez de romper el
  * arranque — es metadata de presentación, no algo crítico.
@@ -325,6 +521,10 @@ export function parseSucursales(raw: string | undefined): Record<string, string>
 }
 
 export interface ConfigInspection {
+  /** Id de la empresa de esta config (`_proceso` sin registro de tenants). */
+  tenantId: string;
+  /** Directorio base de persistencia (null = sin derivación). */
+  dataDir: string | null;
   hasBaseUrl: boolean;
   apiBaseUrl: string | null;
   hasToken: boolean;
@@ -385,6 +585,10 @@ export interface ConfigInspection {
   valorUi: number | null;
   valorUiFecha: string | null;
   umbralUiReceptor: number | null;
+  /** Cache de ventanas prendido para ESTA empresa. */
+  cacheEnabled: boolean;
+  httpSessionTtlMs: number;
+  httpMaxSessions: number;
   /** Nombres de variables requeridas que faltan. */
   missing: string[];
 }
@@ -438,7 +642,23 @@ export function loadConfig(env: Env = process.env): BillerConfig {
 
   // En este punto baseUrlRaw y token están definidos.
   const apiBaseUrl = normalizeBaseUrl(baseUrlRaw!);
+  const dataDir = trimOrUndefined(env.BILLER_DATA_DIR);
+  const tenantId = tenantIdDe(env);
+  const rutas = derivarRutas(env);
+  // El directorio se crea solo si hay algo derivado que vaya a caer adentro: con
+  // las tres rutas declaradas a mano, `BILLER_DATA_DIR` no manda nada y crear un
+  // directorio vacío sería ruido en el disco de alguien.
+  if (
+    dataDir !== undefined &&
+    (rutas.auditLogPath !== trimOrUndefined(env.BILLER_AUDIT_LOG_PATH) ||
+      rutas.idempotencyLogPath !== trimOrUndefined(env.BILLER_IDEMPOTENCY_LOG_PATH) ||
+      rutas.borradorStorePath !== trimOrUndefined(env.BILLER_BORRADOR_STORE_PATH))
+  ) {
+    asegurarDirectorio(directorioDeDatos(dataDir, tenantId));
+  }
   return {
+    tenantId,
+    dataDir,
     apiBaseUrl,
     apiToken: token!,
     defaultEmpresaRut: trimOrUndefined(env.BILLER_DEFAULT_EMPRESA_RUT),
@@ -449,7 +669,7 @@ export function loadConfig(env: Env = process.env): BillerConfig {
     environment: detectEnvironment(apiBaseUrl),
     writeEnabled: parseBool(env.BILLER_WRITE_ENABLED),
     allowProductionWrites: parseBool(env.BILLER_ALLOW_PRODUCTION_WRITES),
-    auditLogPath: trimOrUndefined(env.BILLER_AUDIT_LOG_PATH),
+    auditLogPath: rutas.auditLogPath,
     capabilityMode: parseCapabilityMode(env.BILLER_CAPABILITY_MODE),
     httpAuthToken: trimOrUndefined(env.BILLER_HTTP_AUTH_TOKEN),
     httpPort: parsePort(env.BILLER_HTTP_PORT, DEFAULT_HTTP_PORT),
@@ -458,13 +678,24 @@ export function loadConfig(env: Env = process.env): BillerConfig {
     kapso: parseKapso(env),
     remitentesAutorizados: parseDestinatarios(env.BILLER_REMITENTES_AUTORIZADOS),
     enableIvaEstimado: parseBool(env.BILLER_ENABLE_IVA_ESTIMADO),
-    idempotencyLogPath: trimOrUndefined(env.BILLER_IDEMPOTENCY_LOG_PATH),
-    borradorStorePath: trimOrUndefined(env.BILLER_BORRADOR_STORE_PATH),
+    idempotencyLogPath: rutas.idempotencyLogPath,
+    borradorStorePath: rutas.borradorStorePath,
     wireLiviano: parseBool(env.BILLER_WIRE_LIVIANO),
     maxMontos: parseLimitesMonto(env),
     valorUi: parseNumeroPositivo(env.BILLER_VALOR_UI),
     valorUiFecha: trimOrUndefined(env.BILLER_VALOR_UI_FECHA),
     umbralUiReceptor: parseNumeroPositivo(env.BILLER_UMBRAL_UI_RECEPTOR),
+    cacheEnabled: parseBoolPrendido(env.BILLER_CACHE_ENABLED, "BILLER_CACHE_ENABLED"),
+    httpSessionTtlMs: parseEnteroPositivo(
+      env.BILLER_HTTP_SESSION_TTL_MS,
+      DEFAULT_HTTP_SESSION_TTL_MS,
+      "BILLER_HTTP_SESSION_TTL_MS",
+    ),
+    httpMaxSessions: parseEnteroPositivo(
+      env.BILLER_HTTP_MAX_SESSIONS,
+      DEFAULT_HTTP_MAX_SESSIONS,
+      "BILLER_HTTP_MAX_SESSIONS",
+    ),
   };
 }
 
@@ -495,7 +726,14 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
 
   const apiBaseUrl = baseUrlRaw ? normalizeBaseUrl(baseUrlRaw) : null;
   const kapso = parseKapso(env);
+  // Las rutas se DERIVAN igual que en `loadConfig` —el diagnóstico tiene que
+  // decir el archivo que se va a usar de verdad, no la variable que alguien
+  // escribió—, pero acá no se crea ningún directorio: `inspectConfig` no toca
+  // el disco ni lanza, por definición.
+  const rutas = derivarRutas(env);
   return {
+    tenantId: tenantIdDe(env),
+    dataDir: trimOrUndefined(env.BILLER_DATA_DIR) ?? null,
     hasBaseUrl: Boolean(baseUrlRaw),
     apiBaseUrl,
     hasToken: Boolean(token),
@@ -507,7 +745,7 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     environment: apiBaseUrl ? detectEnvironment(apiBaseUrl) : null,
     writeEnabled: parseBool(env.BILLER_WRITE_ENABLED),
     allowProductionWrites: parseBool(env.BILLER_ALLOW_PRODUCTION_WRITES),
-    auditLogPath: trimOrUndefined(env.BILLER_AUDIT_LOG_PATH) ?? null,
+    auditLogPath: rutas.auditLogPath ?? null,
     capabilityMode: parseCapabilityMode(env.BILLER_CAPABILITY_MODE),
     httpAuthTokenConfigurado: trimOrUndefined(env.BILLER_HTTP_AUTH_TOKEN) !== undefined,
     httpPort: parsePort(env.BILLER_HTTP_PORT, DEFAULT_HTTP_PORT),
@@ -533,13 +771,24 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
       } as const;
     })(),
     enableIvaEstimado: parseBool(env.BILLER_ENABLE_IVA_ESTIMADO),
-    idempotencyLogPath: trimOrUndefined(env.BILLER_IDEMPOTENCY_LOG_PATH) ?? null,
-    borradorStorePath: trimOrUndefined(env.BILLER_BORRADOR_STORE_PATH) ?? null,
+    idempotencyLogPath: rutas.idempotencyLogPath ?? null,
+    borradorStorePath: rutas.borradorStorePath ?? null,
     wireLiviano: parseBool(env.BILLER_WIRE_LIVIANO),
     maxMontos: parseLimitesMonto(env),
     valorUi: parseNumeroPositivo(env.BILLER_VALOR_UI) ?? null,
     valorUiFecha: trimOrUndefined(env.BILLER_VALOR_UI_FECHA) ?? null,
     umbralUiReceptor: parseNumeroPositivo(env.BILLER_UMBRAL_UI_RECEPTOR) ?? null,
+    cacheEnabled: parseBoolPrendido(env.BILLER_CACHE_ENABLED, "BILLER_CACHE_ENABLED"),
+    httpSessionTtlMs: parseEnteroPositivo(
+      env.BILLER_HTTP_SESSION_TTL_MS,
+      DEFAULT_HTTP_SESSION_TTL_MS,
+      "BILLER_HTTP_SESSION_TTL_MS",
+    ),
+    httpMaxSessions: parseEnteroPositivo(
+      env.BILLER_HTTP_MAX_SESSIONS,
+      DEFAULT_HTTP_MAX_SESSIONS,
+      "BILLER_HTTP_MAX_SESSIONS",
+    ),
     missing,
   };
 }
