@@ -32,7 +32,25 @@
 // respuesta ("es cliente nuevo"), y es información útil — dispara el alta con
 // dirección y ciudad, que es lo que la API exige y lo que si falta hace fallar
 // la emisión entera en el último paso.
+//
+// QUÉ MÁS VIVE ACÁ: EL UNIVERSO CONTRA EL QUE SE RESUELVE
+//
+// Además de comparar, este módulo DEFINE la lista contra la cual se compara
+// (`universoClientes`, `universoProductos`, al final del archivo). Eso no es
+// plomería: "la cartera se deriva de la facturación y el universo es completo"
+// es una regla de negocio con consecuencia visible —decide si la respuesta es
+// "es un cliente nuevo" o "no lo encontré"—, y vivía adentro de
+// `tools/resolverNombre.ts`, o sea inalcanzable desde cualquier otra superficie.
+// La emisión guiada, un cron o una segunda tool que necesiten resolver un nombre
+// con el mismo criterio tenían dos salidas y las dos malas: reimplementarlo, o
+// importar una tool desde otra tool (el error tabulado del HANDBOOK: lo que
+// calcula vive en `services/`, ninguna tool importa a otra).
 // =============================================================================
+
+import type { ComprobanteEmitido } from "../biller/types.js";
+import type { RangoFechas } from "./periodo.js";
+import { rankingClientes, SIN_RECEPTOR } from "./rankingClientes.js";
+import { rankingProductos } from "./rankingProductos.js";
 
 /**
  * Mínimo de caracteres para que un fragmento pueda matchear por contención.
@@ -403,4 +421,126 @@ export function comoSigue<T extends Resoluble>(r: Resolucion<T>, consulta: strin
         "dirección y ciudad además del nombre y el documento."
       );
   }
+}
+
+// ---------------------------------------------------------------------------
+// El universo: contra qué lista se resuelve
+// ---------------------------------------------------------------------------
+
+/** Un candidato con el contexto que permite distinguirlo de otro parecido. */
+export interface ItemResoluble extends Resoluble {
+  extra: Record<string, unknown>;
+}
+
+/**
+ * El límite que se le pide al ranking para armar el universo: TODO.
+ *
+ * No es un número afinado: es la forma de decirle a `rankingClientes` /
+ * `rankingProductos` —que existen para contestar "quiénes son los mejores" y por
+ * eso cortan en 20 por default— que acá la pregunta es otra. El universo de
+ * resolución es la CARTERA ENTERA del período, no el podio.
+ *
+ * EL MODO DE FALLA SI ESTO FUERA EL TOP 20
+ *
+ * Buscar a un cliente chico entre los 20 más grandes no lo encuentra, y el
+ * resolvedor no contesta "no sé": contesta `ninguno`, que en el contrato de este
+ * módulo significa "probablemente es NUEVO". Y "es nuevo" no es una respuesta
+ * pasiva — dispara el alta de cliente dentro de la emisión. O sea: un cliente
+ * que existe, que facturó poco, y al que se le termina creando un duplicado mal
+ * cargado. Es exactamente el error que el resolvedor existe para evitar, servido
+ * con toda seguridad y sin ninguna señal de duda.
+ *
+ * Es un número y no `Infinity` porque el ranking espera un entero, y es alto y
+ * redondo porque no está pensado para atarse a nada: la cartera de una PyME
+ * uruguaya en 90 días no llega a diez mil nombres distintos, y si alguna vez
+ * llegara, el que se pierde es el que menos factura — el mismo modo de falla, y
+ * entonces el arreglo no es subir el número sino dejar de derivar la cartera de
+ * la facturación (haría falta un GET de clientes que Biller hoy no expone).
+ *
+ * El costo es memoria y CPU sobre datos que YA están en el proceso: el universo
+ * se arma sobre los comprobantes que la ventana trajo, no agrega una request.
+ */
+export const LIMITE_UNIVERSO = 10_000;
+
+/**
+ * Construye el universo de clientes desde los comprobantes del período.
+ *
+ * La cartera se DERIVA de la facturación porque Biller no expone un listado de
+ * clientes por GET. Consecuencia que hay que decir en voz alta: un cliente que
+ * existe en la base pero no facturó en el período consultado no está acá, y por
+ * eso `ninguno` se comunica como "probablemente es nuevo" y nunca como "no
+ * existe".
+ *
+ * Se sacan los que no tienen nombre y el grupo `SIN_RECEPTOR`: no son clientes,
+ * son la bolsa de las ventas de mostrador sin receptor identificado, y dejarlos
+ * adentro haría que "(sin receptor)" compitiera por parecido con lo que escribe
+ * el usuario.
+ */
+export function universoClientes(
+  comprobantes: ComprobanteEmitido[],
+  rango: RangoFechas,
+): ItemResoluble[] {
+  const ranking = rankingClientes(comprobantes, {
+    desde: rango.desde,
+    hasta: rango.hasta,
+    // Sin límite útil: el universo es la cartera entera, no el top 20. Buscar a
+    // un cliente chico entre los 20 más grandes no encuentra nada y contesta
+    // "es nuevo", que es la respuesta equivocada con más consecuencias.
+    limite: LIMITE_UNIVERSO,
+  });
+  return ranking.clientes
+    .filter((c) => c.nombre !== null && c.nombre !== SIN_RECEPTOR)
+    .map((c) => ({
+      nombre: c.nombre!,
+      documento: c.rut,
+      extra: {
+        ultima_compra: c.ultima_compra,
+        comprobantes: c.comprobantes,
+        esta_dormido: c.esta_dormido,
+        es_nuevo: c.es_nuevo,
+        facturado_por_moneda: c.facturado_por_moneda,
+      },
+    }));
+}
+
+/**
+ * Construye el universo de productos. Requiere el detalle por id (N+1).
+ *
+ * Recibe los comprobantes YA detallados: el listado GET viene con `items: null`
+ * y el catálogo solo se puede leer pidiendo cada comprobante por su `id`. Cuántos
+ * se detallan lo decide el llamador —es una decisión de costo de red, no de
+ * resolución— y es la limitación que la tool declara en sus warnings.
+ *
+ * El límite del ranking es el mismo `LIMITE_UNIVERSO` y por el mismo motivo: con
+ * el top 20 de productos, pedir un artículo que se vende poco contesta "es un
+ * producto nuevo" y se termina cargando un ítem duplicado con otro nombre.
+ */
+export function universoProductos(comprobantes: ComprobanteEmitido[]): ItemResoluble[] {
+  const ranking = rankingProductos(comprobantes, { limite: LIMITE_UNIVERSO });
+  return ranking.productos
+    .filter((p) => p.concepto !== null && p.concepto.trim() !== "")
+    .map((p) => ({
+      // El valor viene de `concepto`, pero sale bajo `nombre`: la clave define
+      // si la barrera lo envuelve, y esto vuelve a entrar en la emisión.
+      //
+      // Dicho entero, porque el comentario se mudó con el código y el motivo no
+      // está a la vista desde acá: `concepto` está en `CAMPOS_NO_CONFIABLES`
+      // (`src/security/untrusted.ts`), así que la barrera de SALIDA lo envolvería
+      // en ⟦dato-no-confiable⟧ mirando SOLO el nombre de la clave, sin importar
+      // de dónde vino el valor. Esta salida está pensada justamente para volver a
+      // entrar en el payload de la emisión, así que esas marcas terminarían
+      // impresas en un CFE ante DGI. Ya pasó dos veces. Por eso el nombre del
+      // producto sale bajo `nombre` y NUNCA bajo `concepto` ni `razon_social`.
+      nombre: p.concepto!,
+      documento: p.codigo,
+      extra: {
+        codigo: p.codigo,
+        precio_unitario_promedio: p.precio_unitario_promedio_ponderado,
+        precio_unitario_min: p.precio_unitario_min,
+        precio_unitario_max: p.precio_unitario_max,
+        unidades: p.unidades,
+        ultima_venta: p.ultima_venta,
+        dispersion_alta: p.dispersion_alta,
+      },
+    }));
 }

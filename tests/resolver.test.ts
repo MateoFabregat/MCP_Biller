@@ -12,14 +12,19 @@
 // =============================================================================
 
 import { describe, expect, it } from "vitest";
+import { normalizeComprobantesEmitidos } from "../src/biller/normalize.js";
 import { interpretarMensaje, interpretarRespuestaResolucion } from "../src/kapso/menu.js";
+import { CAMPOS_NO_CONFIABLES } from "../src/security/untrusted.js";
 import {
+  LIMITE_UNIVERSO,
   MARGEN_DECISIVO,
   UMBRAL_MINIMO,
   distanciaEdicion,
   normalizarNombre,
   resolver,
   similitudNombres,
+  universoClientes,
+  universoProductos,
 } from "../src/services/resolver.js";
 
 const CLIENTES = [
@@ -252,5 +257,120 @@ describe("similitudNombres", () => {
 
   it("nombres sin relación quedan por debajo del umbral", () => {
     expect(similitudNombres("Panadería Rivera", "Supermercado Norte")).toBeLessThan(UMBRAL_MINIMO);
+  });
+});
+
+// --- El universo: contra qué lista se resuelve ------------------------------
+//
+// Estas funciones vivían adentro de `tools/resolverNombre.ts`. La regla que
+// codifican —la cartera se deriva de la facturación, y el universo es COMPLETO—
+// decide si el asistente contesta "es un cliente nuevo" o "no lo encontré", y la
+// primera dispara un alta. Se testean acá, en services, porque es donde una
+// segunda superficie (la emisión guiada, un cron) las va a usar.
+
+/** Comprobante emitido crudo con lo mínimo que el ranking necesita. */
+function crudoEmitido(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 1,
+    tipo_comprobante: 111, // e-Factura (venta)
+    moneda: "UYU",
+    total: 1000,
+    estado: "Aceptado DGI",
+    fecha_emision: "2026-06-15",
+    cliente: { documento: "210000000011", razon_social: "ACME SA" },
+    ...over,
+  };
+}
+
+const RANGO_JUNIO = { desde: "2026-06-01", hasta: "2026-06-30" };
+
+describe("universoClientes", () => {
+  it("deriva la cartera de la facturación: nombre y documento salen del receptor", () => {
+    const u = universoClientes(normalizeComprobantesEmitidos([crudoEmitido()]), RANGO_JUNIO);
+    expect(u).toHaveLength(1);
+    expect(u[0]!.nombre).toBe("ACME SA");
+    expect(u[0]!.documento).toBe("210000000011");
+  });
+
+  it("EL UNIVERSO ES COMPLETO, no el top 20", () => {
+    // El test que protege la regla. Con el límite por default del ranking (20),
+    // los clientes 21 en adelante —los que menos facturan— no estarían, y
+    // preguntar por uno de ellos daría "ninguno", que el resolvedor comunica
+    // como "probablemente es NUEVO" y termina en un alta duplicada.
+    const crudos = Array.from({ length: 59 }, (_, i) =>
+      crudoEmitido({
+        id: i,
+        total: 1000 + i,
+        cliente: { documento: `2100000000${i}`, razon_social: `Comercio ${i}` },
+      }),
+    );
+    // El que menos factura de todos: el primero que se pierde si alguien acorta.
+    crudos.push(
+      crudoEmitido({
+        id: 999,
+        total: 1,
+        cliente: { documento: "219999990011", razon_social: "Ferretería Tacuarembó" },
+      }),
+    );
+    const u = universoClientes(normalizeComprobantesEmitidos(crudos), RANGO_JUNIO);
+    expect(u).toHaveLength(60);
+
+    // Y la consecuencia observable: el más chico se resuelve, no se da por nuevo.
+    const r = resolver("Ferreteria Tacuarembo", u);
+    expect(r.clase).toBe("unico");
+    if (r.clase !== "unico") return;
+    expect(r.elegido.item.nombre).toBe("Ferretería Tacuarembó");
+  });
+
+  it("el límite es alto a propósito, no un top disfrazado", () => {
+    // Test de intención: si alguien lo baja "porque diez mil es mucho", esto
+    // falla y le explica cuál es el modo de falla.
+    expect(LIMITE_UNIVERSO).toBeGreaterThanOrEqual(10_000);
+  });
+
+  it("saca las ventas sin receptor: no son un cliente al que se le pueda facturar", () => {
+    const u = universoClientes(
+      normalizeComprobantesEmitidos([
+        crudoEmitido({ id: 1 }),
+        crudoEmitido({ id: 2, cliente: {} }),
+      ]),
+      RANGO_JUNIO,
+    );
+    expect(u.map((c) => c.nombre)).toEqual(["ACME SA"]);
+  });
+});
+
+describe("universoProductos", () => {
+  const CON_ITEMS = [
+    crudoEmitido({
+      id: 1,
+      items: [
+        { codigo: "HAR-25", concepto: "Bolsa de harina 000 25kg", cantidad: "2", precio: "600" },
+        // Un ítem sin concepto no es un producto nombrable: no puede entrar.
+        { codigo: "X", concepto: "   ", cantidad: "1", precio: "10" },
+      ],
+    }),
+  ];
+
+  it("el concepto del ítem se convierte en el nombre del producto", () => {
+    const u = universoProductos(normalizeComprobantesEmitidos(CON_ITEMS));
+    expect(u.map((p) => p.nombre)).toEqual(["Bolsa de harina 000 25kg"]);
+    expect(u[0]!.documento).toBe("HAR-25");
+  });
+
+  it("NINGUNA clave del universo está en CAMPOS_NO_CONFIABLES", () => {
+    // El invariante de la barrera de salida, testeado y no solo comentado: la
+    // envoltura ⟦dato-no-confiable⟧ se aplica por NOMBRE DE CLAVE, sin mirar de
+    // dónde vino el valor. Esta salida está pensada para volver a entrar en el
+    // payload de la emisión, así que una clave `concepto` o `razon_social` acá
+    // termina con las marcas impresas en un CFE ante DGI.
+    const u = universoProductos(normalizeComprobantesEmitidos(CON_ITEMS));
+    expect(u.length).toBeGreaterThan(0);
+    for (const p of u) {
+      const claves = [...Object.keys(p), ...Object.keys(p.extra)];
+      for (const k of claves) {
+        expect(CAMPOS_NO_CONFIABLES.has(k), `la clave "${k}" la envuelve la barrera`).toBe(false);
+      }
+    }
   });
 });

@@ -31,6 +31,20 @@
 // lo que nunca se facturó en el período consultado no está. Por eso "ninguno" se
 // devuelve como "probablemente es nuevo" y no como "no existe".
 //
+// Cómo se arman esas listas —y por qué el universo es COMPLETO y no el top 20—
+// vive en `services/resolver.ts` (`universoClientes`, `universoProductos`), con
+// el resto de la resolución. Es una regla de negocio, no plomería de esta tool:
+// decide si el asistente contesta "es un cliente nuevo" o "no lo encontré", y la
+// primera dispara un alta. Adentro de una tool era inalcanzable para la emisión
+// guiada, un cron o una segunda tool, que solo podían reimplementarla o importar
+// una tool desde otra tool.
+//
+// QUÉ QUEDA ACÁ
+//
+// El schema (qué se puede pedir y qué se devuelve), la orquestación (traer la
+// ventana, decidir cuántos comprobantes se detallan por id, mandar los botones)
+// y la forma de la respuesta. Nada que decida a QUIÉN se resuelve.
+//
 // OJO CON LA CLAVE `nombre`
 //
 // El nombre del producto se devuelve bajo `nombre` y NUNCA bajo `concepto`.
@@ -46,11 +60,16 @@ import { normalizarTelefono } from "../config.js";
 import { traerPorId } from "../biller/traerDetalles.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { KapsoClient, type InteractivoBotones } from "../kapso/client.js";
-import { PERIODOS_SOPORTADOS, type RangoFechas } from "../services/periodo.js";
+import { PERIODOS_SOPORTADOS } from "../services/periodo.js";
 import { resolverRango, traerVentana } from "../services/ventana.js";
-import { rankingClientes, SIN_RECEPTOR } from "../services/rankingClientes.js";
-import { rankingProductos } from "../services/rankingProductos.js";
-import { comoSigue, resolver, type Resoluble, type Resolucion } from "../services/resolver.js";
+import {
+  comoSigue,
+  resolver,
+  universoClientes,
+  universoProductos,
+  type ItemResoluble,
+  type Resolucion,
+} from "../services/resolver.js";
 import {
   READ_ONLY_ANNOTATIONS,
   WRITE_ANNOTATIONS,
@@ -159,11 +178,6 @@ const outputShape = {
   warnings: z.array(z.string()),
 };
 
-/** Un candidato con el contexto que permite distinguirlo de otro parecido. */
-interface Item extends Resoluble {
-  extra: Record<string, unknown>;
-}
-
 /**
  * La pregunta de desambiguación como botones.
  *
@@ -172,7 +186,7 @@ interface Item extends Resoluble {
  * agente mapea el índice contra `candidatos` de esta misma respuesta.
  */
 function construirBotonesCandidatos(
-  candidatos: ReadonlyArray<{ item: Item }>,
+  candidatos: ReadonlyArray<{ item: ItemResoluble }>,
   tipo: "cliente" | "producto",
 ): InteractivoBotones {
   return {
@@ -188,7 +202,7 @@ function construirBotonesCandidatos(
   };
 }
 
-function aSalida(c: { item: Item; score: number; via: "documento" | "exacto" | "parecido" }) {
+function aSalida(c: { item: ItemResoluble; score: number; via: "documento" | "exacto" | "parecido" }) {
   return {
     nombre: c.item.nombre,
     documento: c.item.documento ?? null,
@@ -196,53 +210,6 @@ function aSalida(c: { item: Item; score: number; via: "documento" | "exacto" | "
     via: c.via,
     detalle: c.item.extra,
   };
-}
-
-/** Construye el universo de clientes desde los comprobantes del período. */
-function universoClientes(comprobantes: ComprobanteEmitido[], rango: RangoFechas): Item[] {
-  const ranking = rankingClientes(comprobantes, {
-    desde: rango.desde,
-    hasta: rango.hasta,
-    // Sin límite útil: el universo es la cartera entera, no el top 20. Buscar a
-    // un cliente chico entre los 20 más grandes no encuentra nada y contesta
-    // "es nuevo", que es la respuesta equivocada con más consecuencias.
-    limite: 10_000,
-  });
-  return ranking.clientes
-    .filter((c) => c.nombre !== null && c.nombre !== SIN_RECEPTOR)
-    .map((c) => ({
-      nombre: c.nombre!,
-      documento: c.rut,
-      extra: {
-        ultima_compra: c.ultima_compra,
-        comprobantes: c.comprobantes,
-        esta_dormido: c.esta_dormido,
-        es_nuevo: c.es_nuevo,
-        facturado_por_moneda: c.facturado_por_moneda,
-      },
-    }));
-}
-
-/** Construye el universo de productos. Requiere el detalle por id (N+1). */
-function universoProductos(comprobantes: ComprobanteEmitido[]): Item[] {
-  const ranking = rankingProductos(comprobantes, { limite: 10_000 });
-  return ranking.productos
-    .filter((p) => p.concepto !== null && p.concepto.trim() !== "")
-    .map((p) => ({
-      // El valor viene de `concepto`, pero sale bajo `nombre`: la clave define
-      // si la barrera lo envuelve, y esto vuelve a entrar en la emisión.
-      nombre: p.concepto!,
-      documento: p.codigo,
-      extra: {
-        codigo: p.codigo,
-        precio_unitario_promedio: p.precio_unitario_promedio_ponderado,
-        precio_unitario_min: p.precio_unitario_min,
-        precio_unitario_max: p.precio_unitario_max,
-        unidades: p.unidades,
-        ultima_venta: p.ultima_venta,
-        dispersion_alta: p.dispersion_alta,
-      },
-    }));
 }
 
 export async function handleResolverNombre(args: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -272,7 +239,7 @@ export async function handleResolverNombre(args: unknown, ctx: ToolContext): Pro
     // en cuántas ventanas se partió la consulta.
     warnings.push(...ventana.warnings_recorte);
 
-    let universo: Item[];
+    let universo: ItemResoluble[];
     let detallados: number | null = null;
 
     if (a.tipo === "cliente") {
@@ -308,7 +275,7 @@ export async function handleResolverNombre(args: unknown, ctx: ToolContext): Pro
       }
     }
 
-    const resolucion: Resolucion<Item> = resolver(a.texto, universo);
+    const resolucion: Resolucion<ItemResoluble> = resolver(a.texto, universo);
     const requiereConfirmacion = resolucion.clase !== "unico";
 
     // Cuántas veces el resolvedor NO sabe. Un `ambiguo` alto significa que la
