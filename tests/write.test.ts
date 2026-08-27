@@ -5,6 +5,7 @@ import { handleCancelarRecibo } from "../src/tools/write/cancelarRecibo.js";
 import { handleCrearCliente } from "../src/tools/write/crearCliente.js";
 import { handleCargarProducto } from "../src/tools/write/cargarProducto.js";
 import { handleCrearRecibo } from "../src/tools/write/crearRecibo.js";
+import { handleCrearPago } from "../src/tools/write/crearPago.js";
 import type { ToolResult } from "../src/tools/shared.js";
 import { errorOf, makeCtx, type FakeCtx } from "./helpers.js";
 
@@ -562,5 +563,391 @@ describe("cancelar_recibo — id por query", () => {
     expect(opts.endpoint).toBe("/v2/recibos/cancelar");
     expect(opts.query.id).toBe("302968");
     expect(opts.body).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EL BORRADOR QUE COMPLETA UN CFE ES DEL QUE ESCRIBE, NO DEL QUE DIGA EL MODELO.
+//
+// El agujero, y era el más caro de todos: `completarDesdeSesion` abría
+// `store.leer(store.clave(a.sesion))` con la `sesion` que ELIGE EL MODELO, y con
+// esos conceptos completaba el cuerpo del CFE que se estaba por emitir. O sea:
+// el remitente A emitía un documento fiscal REAL —ante DGI, con la numeración de
+// la empresa— con las líneas del borrador de B. Y al emitir, el mismo `sesion`
+// decidía qué borrador se BORRA, así que de paso le comía a B la factura que
+// estaba cargando.
+//
+// Con dos números en la allowlist de la misma empresa (dueño y contador, el caso
+// normal) alcanzaba con nombrar el número del otro. La sal del store cierra el
+// cruce entre empresas y no puede ver este: las dos partes son la misma empresa.
+// ---------------------------------------------------------------------------
+
+describe("emitir con la sesión de otro", () => {
+  const DUENO = "59899111000";
+  const CONTADOR = "59899222000";
+
+  /** Canal de WhatsApp abierto: dos autorizados en la MISMA empresa. */
+  const conCanal = () =>
+    makeCtx({
+      postResponse: EMIT_RESPONSE,
+      config: {
+        writeEnabled: true,
+        kapso: {
+          apiKey: "kapso_key_de_prueba",
+          baseUrl: "https://api.kapso.ai",
+          phoneNumberId: "597907523413541",
+          destinatariosPermitidos: [DUENO, CONTADOR],
+        },
+      },
+    });
+
+  /** El borrador del dueño: conceptos que no tienen que salir en el CFE de otro. */
+  const sembrarBorradorDelDueno = (fx: FakeCtx) =>
+    fx.borradores.guardar(fx.borradores.clave(DUENO), {
+      items: [{ concepto: "Bolsas de portland", precio: 6500, indicador_facturacion: 3 }],
+      adenda: "Obra Rivera 2130",
+      numero_interno: "emi-del-dueno",
+    });
+
+  /** Un cuerpo sin concepto: es lo que el borrador completaría. */
+  const cuerpoSinConcepto = () => ({
+    ...COMPROBANTE,
+    items: [{ cantidad: 2, precio: 6500, indicador_facturacion: 3 }],
+  });
+
+  it("A no puede emitir un CFE con las líneas del borrador de B", async () => {
+    const fx = conCanal();
+    sembrarBorradorDelDueno(fx);
+
+    const res = await handleEmitirComprobante(
+      { comprobante: cuerpoSinConcepto(), sesion: DUENO, remitente: CONTADOR },
+      fx.ctx,
+    );
+
+    expect(res.isError).toBe(true);
+    const error = errorOf(res);
+    expect(error.kind).toBe("autorizacion");
+    expect((error as { motivo?: string }).motivo).toBe("sesion_ajena");
+    // El mensaje va dirigido al modelo y le cierra las dos salidas.
+    expect(error.message).toContain("NO reintentes con otro número");
+    // Y no filtra ni el número ajeno ni una sola línea de su borrador.
+    expect(error.message).not.toContain(DUENO);
+    expect(JSON.stringify(res)).not.toContain("portland");
+    expect(fx.postMock).not.toHaveBeenCalled();
+  });
+
+  it("tampoco emite con el numero_interno del borrador ajeno", async () => {
+    // Con el `numero_interno` de otro, la dedupe de ESTA venta queda atada a la
+    // de otra: el reintento del dueño choca contra un comprobante que no es suyo.
+    const fx = conCanal();
+    sembrarBorradorDelDueno(fx);
+    const res = await handleEmitirComprobante(
+      { comprobante: cuerpoSinConcepto(), sesion: DUENO, remitente: CONTADOR },
+      fx.ctx,
+    );
+    expect(JSON.stringify(res)).not.toContain("emi-del-dueno");
+  });
+
+  it("A no le borra el borrador a B al emitir el suyo", async () => {
+    // El chequeo tiene que estar ANTES del borrado, no solo antes de la lectura:
+    // acá `sesion` decide las dos cosas.
+    const fx = conCanal();
+    const antes = sembrarBorradorDelDueno(fx).revision;
+
+    const dry = await handleEmitirComprobante(
+      { comprobante: COMPROBANTE, sesion: DUENO, remitente: CONTADOR },
+      fx.ctx,
+    );
+    expect(dry.isError).toBe(true);
+    const exec = await handleEmitirComprobante(
+      {
+        comprobante: COMPROBANTE,
+        sesion: DUENO,
+        remitente: CONTADOR,
+        confirm: true,
+        confirmation_token: "deadbeef",
+      },
+      fx.ctx,
+    );
+    expect(exec.isError).toBe(true);
+
+    expect(fx.borradores.leer(fx.borradores.clave(DUENO))?.revision).toBe(antes);
+  });
+
+  it("el flujo legítimo completo sigue andando: dry-run y confirm con el mismo remitente", async () => {
+    const fx = conCanal();
+    sembrarBorradorDelDueno(fx);
+
+    const dry = await handleEmitirComprobante(
+      { comprobante: cuerpoSinConcepto(), sesion: DUENO, remitente: DUENO },
+      fx.ctx,
+    );
+    expect(dry.isError).toBeUndefined();
+    // El concepto se completó desde el borrador PROPIO: eso es lo que esta
+    // función existe para hacer, y tiene que seguir haciéndolo.
+    expect(JSON.stringify(sc(dry).payload_preview)).toContain("Bolsas de portland");
+
+    const exec = await handleEmitirComprobante(
+      {
+        comprobante: cuerpoSinConcepto(),
+        sesion: DUENO,
+        remitente: DUENO,
+        confirm: true,
+        confirmation_token: sc(dry).confirmation_token as string,
+      },
+      fx.ctx,
+    );
+    expect(sc(exec).mode).toBe("executed");
+    // Y recién ahí se descarta el borrador: el CFE ya existe.
+    expect(fx.borradores.leer(fx.borradores.clave(DUENO))).toBeNull();
+  });
+
+  it("el mismo remitente con 'sesion' escrita en otro formato sigue siendo él", async () => {
+    const fx = conCanal();
+    sembrarBorradorDelDueno(fx);
+    const dry = await handleEmitirComprobante(
+      { comprobante: cuerpoSinConcepto(), sesion: `+${DUENO.slice(0, 3)} ${DUENO.slice(3)}`, remitente: DUENO },
+      fx.ctx,
+    );
+    expect(dry.isError).toBeUndefined();
+    expect(JSON.stringify(sc(dry).payload_preview)).toContain("Bolsas de portland");
+  });
+
+  it("sin Kapso (Claude Desktop) nada de esto cambia: 'sesion' vale tal cual", async () => {
+    const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: { writeEnabled: true } });
+    fx.borradores.guardar(fx.borradores.clave("59899111000"), {
+      items: [{ concepto: "Bolsas de portland", precio: 6500, indicador_facturacion: 3 }],
+    });
+    const dry = await handleEmitirComprobante(
+      { comprobante: cuerpoSinConcepto(), sesion: "59899111000" },
+      fx.ctx,
+    );
+    expect(dry.isError).toBeUndefined();
+    expect(JSON.stringify(sc(dry).payload_preview)).toContain("Bolsas de portland");
+  });
+
+  it("emitir SIN 'sesion' no exige remitente: no hay borrador que abrir ni que borrar", async () => {
+    // La emisión directa —la que no viene de la emisión guiada— no toca el store,
+    // así que no hay nada que autorizar. Exigir el remitente acá la rompería sin
+    // cerrar nada.
+    const fx = conCanal();
+    const dry = await handleEmitirComprobante({ comprobante: COMPROBANTE }, fx.ctx);
+    expect(dry.isError).toBeUndefined();
+    expect(sc(dry).mode).toBe("dry_run");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EL TOKEN ES DE QUIEN HIZO EL DRY-RUN.
+//
+// El `confirmation_token` se calculaba sobre {endpoint, environment, payload,
+// issuedAt} y no llevaba nada de quién lo pidió. Con dos números autorizados en
+// la misma empresa —el dueño y el contador, el caso normal— el token que A
+// recibía en su preview lo podía confirmar B. El payload estaba congelado, así
+// que B no podía cambiar QUÉ se emitía, pero sí podía DISPARAR la emisión de A:
+// "el contador aprueba sin querer la factura del dueño", y ante DGI eso sale
+// como un documento fiscal con numeración real, que después se anula con otro
+// documento.
+//
+// Se cubren las SIETE tools de escritura y no solo emitir: una sola sin atar es
+// la que va a usar el que quiera saltear.
+// ---------------------------------------------------------------------------
+
+describe("el confirmation_token es de la conversación que lo pidió", () => {
+  const DUENO = "59899111000";
+  const CONTADOR = "59899222000";
+
+  const conCanal = () =>
+    makeCtx({
+      postResponse: EMIT_RESPONSE,
+      config: {
+        writeEnabled: true,
+        kapso: {
+          apiKey: "kapso_key_de_prueba",
+          baseUrl: "https://api.kapso.ai",
+          phoneNumberId: "597907523413541",
+          destinatariosPermitidos: [DUENO, CONTADOR],
+        },
+      },
+    });
+
+  /** Las siete puertas de escritura, con un cuerpo mínimo válido cada una. */
+  const TOOLS: { nombre: string; correr: typeof handleEmitirComprobante; args: Record<string, unknown> }[] = [
+    { nombre: "biller_emitir_comprobante", correr: handleEmitirComprobante, args: { comprobante: COMPROBANTE } },
+    {
+      nombre: "biller_anular_comprobante",
+      correr: handleAnularComprobante,
+      args: { id: 43574, fecha_emision_hoy: true },
+    },
+    {
+      nombre: "biller_crear_recibo",
+      correr: handleCrearRecibo,
+      args: {
+        recibo: {
+          tipo_comprobante: 101,
+          forma_pago: 1,
+          sucursal: 6,
+          moneda: "UYU",
+          cliente: {
+            tipo_documento: 3,
+            documento: "52165030",
+            nombre_fantasia: "Juan Pérez",
+            sucursal: { pais: "UY", ciudad: "Montevideo", direccion: "Sarandí 420" },
+          },
+          referencias: [{ padre: 150448, total: 1830 }],
+          pago: { fecha: "2021-05-27", monto: 1830, referencia: "Transferencia Itaú 2185" },
+        },
+      },
+    },
+    {
+      nombre: "biller_crear_pago",
+      correr: handleCrearPago,
+      args: {
+        pago: {
+          fecha: "2021-05-27",
+          monto: 1830,
+          referencia: "Transferencia Itaú 2185",
+          comprobantes: [{ id: 150448, monto: 1830 }],
+        },
+      },
+    },
+    {
+      nombre: "biller_crear_cliente",
+      correr: handleCrearCliente,
+      args: {
+        cliente: {
+          tipo_documento: 2,
+          documento: "214987440017",
+          razon_social: "Empresa Test SRL",
+          direccion: "Los Arces 7635",
+          ciudad: "Montevideo",
+          departamento: "Montevideo",
+          pais: "UY",
+        },
+      },
+    },
+    {
+      nombre: "biller_cargar_producto",
+      correr: handleCargarProducto,
+      args: {
+        producto: {
+          codigo: "P001",
+          nombre: "Pelota",
+          moneda: "UYU",
+          precio: 200,
+          indicador_facturacion: 3,
+          es_servicio: false,
+        },
+      },
+    },
+    { nombre: "biller_cancelar_recibo", correr: handleCancelarRecibo, args: { id: 302968 } },
+  ];
+
+  for (const t of TOOLS) {
+    it(`${t.nombre}: el token de A no lo confirma B`, async () => {
+      const fx = conCanal();
+      const dry = await t.correr({ ...t.args, remitente: DUENO }, fx.ctx);
+      expect(dry.isError).toBeUndefined();
+      const token = sc(dry).confirmation_token as string;
+
+      const exec = await t.correr(
+        { ...t.args, remitente: CONTADOR, confirm: true, confirmation_token: token },
+        fx.ctx,
+      );
+
+      expect(exec.isError).toBe(true);
+      const error = errorOf(exec);
+      expect(error.kind).toBe("autorizacion");
+      expect((error as { motivo?: string }).motivo).toBe("sesion_ajena");
+      // No se emitió NADA: es el punto entero.
+      expect(fx.postMock).not.toHaveBeenCalled();
+      expect(fx.auditEntries.some((e) => e.phase === "executed")).toBe(false);
+      // Y el rechazo no filtra el número del otro ni un fragmento suyo.
+      const crudo = JSON.stringify(exec);
+      expect(crudo).not.toContain(DUENO);
+      expect(crudo).not.toContain(DUENO.slice(-4));
+    });
+
+    it(`${t.nombre}: el ciclo legítimo completo sigue andando`, async () => {
+      const fx = conCanal();
+      const dry = await t.correr({ ...t.args, remitente: DUENO }, fx.ctx);
+      const exec = await t.correr(
+        { ...t.args, remitente: DUENO, confirm: true, confirmation_token: sc(dry).confirmation_token },
+        fx.ctx,
+      );
+      expect(exec.isError).toBeUndefined();
+      expect(sc(exec).mode).toBe("executed");
+      expect(fx.postMock).toHaveBeenCalledOnce();
+    });
+
+    it(`${t.nombre}: sin Kapso (Claude Desktop) el ciclo no cambia`, async () => {
+      // El modo escritorio no tiene canal no confiable: quien abre el server ya
+      // es el dueño de la máquina. La identidad es null a los dos lados y el
+      // token vale igual, con y sin 'remitente'.
+      const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: { writeEnabled: true } });
+      const dry = await t.correr(t.args, fx.ctx);
+      const exec = await t.correr(
+        { ...t.args, confirm: true, confirmation_token: sc(dry).confirmation_token },
+        fx.ctx,
+      );
+      expect(exec.isError).toBeUndefined();
+      expect(sc(exec).mode).toBe("executed");
+    });
+  }
+
+  it("el mismo remitente escrito en otro formato sigue siendo él", async () => {
+    // La comparación es en el espacio de claves del store, no de strings: el
+    // mismo teléfono con o sin '+' y con espacios es la misma persona, y romper
+    // ahí sería negarle a alguien su propia confirmación.
+    const fx = conCanal();
+    const dry = await handleEmitirComprobante({ comprobante: COMPROBANTE, remitente: DUENO }, fx.ctx);
+    const exec = await handleEmitirComprobante(
+      {
+        comprobante: COMPROBANTE,
+        remitente: `+${DUENO.slice(0, 3)} ${DUENO.slice(3)}`,
+        confirm: true,
+        confirmation_token: sc(dry).confirmation_token,
+      },
+      fx.ctx,
+    );
+    expect(sc(exec).mode).toBe("executed");
+  });
+
+  it("un token de dos partes (formato viejo) ya no vale, y lo dice", async () => {
+    // Decisión anotada en confirm.ts: el TTL es de 15 minutos, así que el costo
+    // de no aceptarlos es que alguien a mitad de un confirm rehaga el dry-run.
+    const fx = conCanal();
+    const dry = await handleEmitirComprobante({ comprobante: COMPROBANTE, remitente: DUENO }, fx.ctx);
+    const partes = (sc(dry).confirmation_token as string).split(".");
+    const viejo = `${partes[0]}.${partes[2]}`;
+    const exec = await handleEmitirComprobante(
+      { comprobante: COMPROBANTE, remitente: DUENO, confirm: true, confirmation_token: viejo },
+      fx.ctx,
+    );
+    expect(exec.isError).toBe(true);
+    expect(errorOf(exec).kind).toBe("confirmation");
+    expect(errorOf(exec).message).toContain("dry-run");
+    expect(fx.postMock).not.toHaveBeenCalled();
+  });
+
+  it("falsificar la huella no alcanza: la identidad está DENTRO del hash", async () => {
+    // La huella existe para diagnosticar, no para autorizar. Quien la reemplace
+    // por la suya se lleva un rechazo igual, solo que por el otro motivo.
+    const fx = conCanal();
+    const delDueno = await handleEmitirComprobante({ comprobante: COMPROBANTE, remitente: DUENO }, fx.ctx);
+    const delContador = await handleEmitirComprobante(
+      { comprobante: COMPROBANTE, remitente: CONTADOR },
+      fx.ctx,
+    );
+    const a = (sc(delDueno).confirmation_token as string).split(".");
+    const b = (sc(delContador).confirmation_token as string).split(".");
+    const falsificado = `${a[0]}.${b[1]}.${a[2]}`;
+
+    const exec = await handleEmitirComprobante(
+      { comprobante: COMPROBANTE, remitente: CONTADOR, confirm: true, confirmation_token: falsificado },
+      fx.ctx,
+    );
+    expect(exec.isError).toBe(true);
+    expect(fx.postMock).not.toHaveBeenCalled();
   });
 });

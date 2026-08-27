@@ -16,6 +16,8 @@ import {
 } from "../../services/calcularTotales.js";
 import { createHash } from "node:crypto";
 import { limpiarMarcasProfundo } from "../../security/untrusted.js";
+import { rechazoSesionAjena, requiereRemitente } from "../../security/remitentes.js";
+import { normalizarTelefono } from "../../config.js";
 import type { RateLimitClass } from "../../utils/rateLimit.js";
 import { BillerConfirmationError } from "../../utils/errors.js";
 import { checkConfirmationToken, computeConfirmationToken } from "../../write/confirm.js";
@@ -177,10 +179,19 @@ export interface RunWriteParams {
    */
   contextoPreview?: ContextoPreview;
   /**
-   * Quién pidió la operación. Va al audit log enmascarado y NO entra en el hash
-   * del confirmation_token: si entrara, un dry-run pedido desde un teléfono y
-   * confirmado desde otro daría "el payload cambió", que es un diagnóstico falso
-   * para un caso legítimo (el dueño arranca la factura y la confirma el encargado).
+   * Quién pidió la operación. Va al audit log enmascarado Y —desde que el token
+   * lleva identidad— ata el `confirmation_token` a esta conversación.
+   *
+   * ANTES ESTABA ANOTADO AL REVÉS: que no entrara al hash, para no romper "el
+   * dueño arranca la factura y la confirma el encargado". Ese caso no es
+   * legítimo, es el agujero: el payload queda congelado, así que el encargado no
+   * puede cambiar QUÉ se emite, pero sí puede disparar la emisión del dueño, y
+   * lo que sale es un CFE real con la numeración de la empresa. Aprobar por otro
+   * es justo lo que el human-in-the-loop existe para impedir. El que quiera
+   * emitir hace su propio dry-run y confirma sobre el preview que leyó él.
+   *
+   * Lo que entra al hash no es este valor sino su clave opaca: ver
+   * `identidadDeEscritura`.
    */
   remitente?: string;
   /**
@@ -192,6 +203,44 @@ export interface RunWriteParams {
    * que ya está hasheado, igual que `totalesEstimados`.
    */
   montoExplicito?: MontoExplicito;
+}
+
+/**
+ * A QUIÉN PERTENECE ESTE TOKEN.
+ *
+ * VA ACÁ, en el runner, y no en cada tool: `runWriteOperation` es la única
+ * costura por la que pasan las SIETE tools de escritura —emitir, anular, recibo,
+ * pago, cliente, producto, cancelar recibo— y las dos fases del ciclo (el
+ * dry-run que emite el token y el confirm que lo verifica) son dos llamadas a
+ * esta misma función. Puesto acá, una tool de escritura nueva queda atada sin
+ * que nadie se acuerde; puesto tool por tool, la que se olvide es exactamente la
+ * que va a usar el que quiera saltear. Es el mismo argumento por el que la
+ * barrera de entrada intercepta `registerTool` en vez de chequear tool por tool.
+ *
+ * Devuelve la clave OPACA del store, no el teléfono: el valor termina dentro del
+ * hash de un token que viaja por el modelo (ver `confirm.ts`).
+ *
+ * TRES CASOS EN LOS QUE DA `null`, y los tres tienen que dar null:
+ *  - sin Kapso configurado: no hay canal no confiable, y el modo escritorio
+ *    valida igual que antes de este cambio;
+ *  - config ilegible: convertir un problema de entorno en un rechazo de
+ *    autorización manda a diagnosticar al lugar equivocado — y el error de
+ *    configuración lo reporta igual el resto del runner, con mejor mensaje;
+ *  - con Kapso pero SIN remitente: la barrera de entrada ya rechaza eso antes
+ *    del handler, así que acá no se puede exigir sin romper la emisión directa
+ *    (la que no viene de la guiada) en los tests y en cualquier caller propio.
+ *    No abre nada: el ciclo sin remitente es consistente consigo mismo, pero un
+ *    token emitido POR alguien sigue sin validar sin ese alguien.
+ */
+function identidadDeEscritura(ctx: ToolContext, remitente: string | undefined): string | null {
+  try {
+    if (!requiereRemitente(ctx.getConfig())) return null;
+    const verificado = normalizarTelefono(remitente ?? "");
+    if (verificado === "") return null;
+    return ctx.getBorradorStore().clave(verificado);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -239,7 +288,8 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
     const gate = evaluateWriteGate(config, { allowProduction: p.allowProduction });
     // El token (y la idempotencia/audit) ligan tanto el body como la query.
     const subject = { payload, query: p.query ?? null };
-    const token = computeConfirmationToken(endpoint, environment, subject);
+    const identidad = identidadDeEscritura(ctx, p.remitente);
+    const token = computeConfirmationToken(endpoint, environment, subject, Date.now(), identidad);
 
     // --- Fase DRY-RUN ---
     if (!p.confirm) {
@@ -306,8 +356,15 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
     // El chequeo distingue el motivo: "vencido" se arregla repitiendo el
     // dry-run, "no coincide" significa que el payload cambió. Devolver el mismo
     // mensaje para los dos hace que el modelo reintente lo que no debe.
-    const check = checkConfirmationToken(p.confirmationToken, endpoint, environment, subject);
+    const check = checkConfirmationToken(p.confirmationToken, endpoint, environment, subject, {
+      identidad,
+    });
     if (!check.ok) {
+      // El token de otra conversación no es un problema de confirmación sino de
+      // autorización, y sale con la misma forma que los otros rechazos de sesión
+      // ajena (`motivo: "sesion_ajena"`) para que el modelo lo reconozca como lo
+      // que es: algo que no se reintenta.
+      if (check.motivo === "sesion_ajena") return rechazoSesionAjena(check.mensaje, ctx);
       throw new BillerConfirmationError(check.mensaje);
     }
 

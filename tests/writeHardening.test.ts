@@ -71,8 +71,8 @@ describe("S5 — TTL del confirmation_token", () => {
     // El timestamp está DENTRO del hash: alterarlo invalida el token.
     const t0 = 1_000_000_000_000;
     const token = computeConfirmationToken(ENDPOINT, ENV, PAYLOAD, t0);
-    const hash = token.split(".")[1]!;
-    const falsificado = `${t0 + CONFIRMATION_TTL_MS * 10}.${hash}`;
+    const [, huella, hash] = token.split(".");
+    const falsificado = `${t0 + CONFIRMATION_TTL_MS * 10}.${huella}.${hash}`;
     const check = checkConfirmationToken(falsificado, ENDPOINT, ENV, PAYLOAD, {
       ahora: t0 + CONFIRMATION_TTL_MS * 10,
     });
