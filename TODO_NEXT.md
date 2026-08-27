@@ -26,6 +26,43 @@ borrarse: saber qué se resolvió y dónde vale más que una lista corta.
   Cambiar `private: true` en `package.json` cuando se quiera distribuir.
   Agregar `README` con instrucciones de instalación global (`npm i -g biller-mcp`).
 
+## P0 — Hallazgos fiscales sin resolver (encontrados agosto 2026, NO tocados)
+
+Los dos salieron de la ola de refactors y ninguno se arregló ahí a propósito:
+mezclar un arreglo de conducta con un refactor de diferencial cero hace
+imposible saber qué movió qué. Los dos terminan en un número o un texto
+equivocado en un documento fiscal.
+
+- [ ] **El resumen y los rankings pueden contestar totales distintos para los
+  mismos comprobantes.** Hay dos `clasificarEstado`:
+  `src/services/resumenFacturacion.ts:167` y `src/services/estadoDgi.ts:49`. El
+  resumen excluye solo lo que sabe rechazado (`=== "no_aceptado"`) y **cuenta el
+  estado desconocido**, con el argumento escrito de que "la ausencia del dato no
+  es evidencia de rechazo". Las otras siete implementaciones —rankings,
+  comparación, cohortes, posición IVA, y la regla unificada de
+  `comprobanteFilters`— filtran con `!== "aceptado"` y **lo excluyen**. Un
+  comprobante con `estado: null` suma en un lado y no en el otro. Falta la
+  decisión: el criterio fijado es contar solo "Aceptado DGI" para coincidir con
+  lo que muestra Biller, lo que da la razón a los rankings, pero si el `null`
+  viene de un problema de la API y no del comprobante, excluirlo da un total
+  bajo sin motivo. Decidir y unificar en un commit propio, con el diferencial
+  que muestre qué comprobantes cambian de lado.
+  Relacionado: `esVentaValida` (`estadoDgi.ts`) sostiene que "Envío no
+  corresponde" **debería** contar —"es una venta real y facturada"— y ningún
+  consumidor le hace caso. El propio archivo avisa de la discrepancia.
+
+- [ ] **Un ítem incompleto en el MEDIO le corre los conceptos a las demás
+  líneas.** `borradorComprobante` (`src/kapso/borradorEmision.ts:351`) filtra los
+  ítems sin concepto o sin precio, y el texto de `completar` (:364) le pide al
+  agente los conceptos "en el mismo orden en que la dijo". Con
+  `[{A,100}, {B, sin precio}, {C,300}]` el borrador sale con dos líneas y el
+  agente, copiando por posición, le pone **el concepto B a la línea de C**. Es
+  alcanzable porque `siguientePaso` (`src/kapso/emision.ts:1299`) solo mira el
+  **último** ítem: con el último completo el flujo dice `confirmar` y nada avisa
+  del agujero del medio. Termina en un concepto equivocado sobre una línea de un
+  CFE real. Los dos arreglos posibles cambian conducta: mandar el índice
+  original en cada ítem, o frenar el `listo` cuando se filtró algo.
+
 ## P1 — Mejoras prioritarias
 
 - [x] **Tool de PDF** (`GET /v2/comprobantes/pdf`) — hecha: `biller_obtener_pdf`
