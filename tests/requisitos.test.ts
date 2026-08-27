@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { inspectConfig } from "../src/config.js";
 import { METRICAS_NULAS } from "../src/observabilidad/metricas.js";
 import { validarComprobante, ComprobanteBodySchema } from "../src/biller/cfeSchema.js";
 import {
@@ -164,6 +165,9 @@ describe("biller_requisitos_comprobante", () => {
       },
       metricas: METRICAS_NULAS,
     getBorradorStore: () => new BorradorStoreMemoria(),
+    // El contexto de test no viene de un env: se inspecciona uno vacío, que es la
+    // verdad (no hay config de tenant detrás) y nunca el `process.env` del runner.
+    inspeccionar: () => inspectConfig({}),
     };
     const res = handleRequisitosComprobante({ tipo_comprobante: 101 }, ctx);
     expect(res.isError).toBeUndefined();

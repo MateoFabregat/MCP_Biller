@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { vi } from "vitest";
 import type { BillerClient, BillerGetOptions } from "../src/biller/client.js";
-import type { BillerConfig } from "../src/config.js";
+import { inspectConfig, type BillerConfig } from "../src/config.js";
 import type { ToolContext } from "../src/tools/shared.js";
 import type { AuditEntry, AuditInput, AuditSink } from "../src/write/audit.js";
 import { BorradorStoreMemoria } from "../src/kapso/borradorStore.js";
@@ -84,6 +84,9 @@ export function makeCtx(opts: FakeCtxOptions = {}): FakeCtx {
     getWriteContext: () => ({ config, writeClient, auditor, idempotency }),
     metricas,
     getBorradorStore: () => borradores,
+    // El contexto de test no viene de un env: se inspecciona uno vacío, que es la
+    // verdad (no hay config de tenant detrás) y nunca el `process.env` del runner.
+    inspeccionar: () => inspectConfig({}),
   };
 
   return { ctx, getMock, postMock, config, auditEntries, idempotency, metricas, borradores };
@@ -113,5 +116,8 @@ export function makeUnconfiguredCtx(): ToolContext {
     // que garantiza que ningún llamador tenga que chequear si existe.
     metricas: METRICAS_NULAS,
     getBorradorStore: () => new BorradorStoreMemoria(),
+    // El contexto de test no viene de un env: se inspecciona uno vacío, que es la
+    // verdad (no hay config de tenant detrás) y nunca el `process.env` del runner.
+    inspeccionar: () => inspectConfig({}),
   };
 }

@@ -236,9 +236,25 @@ export class RegistroMetricas implements Metricas {
   private total = 0;
   private readonly emitirLog: boolean;
 
+  /**
+   * Id de empresa para la LÍNEA DE LOG. `undefined` en mono-tenant.
+   *
+   * No entra en los contadores en memoria: esos ya son uno por empresa (viven en
+   * el contexto), así que ahí sería una etiqueta constante que solo gasta
+   * cardinalidad. En el log sí hace falta, porque el log es la única salida que
+   * se mezcla entre empresas — y sin esto, con veinte tenants, el agregador no
+   * puede contestar de quién es el embudo de emisión que se cayó.
+   *
+   * Pasa por `normalizarValor` como cualquier otra etiqueta: el id de tenant es
+   * `[a-z0-9_-]` y no es secreto, pero la garantía del módulo es estructural, no
+   * "confiamos en el llamador".
+   */
+  private readonly tenantId: string | undefined;
+
   /** `emitirLog=false` en los tests: no ensucia la salida ni prueba el logger. */
-  constructor(opciones: { emitirLog?: boolean; ahora?: () => Date } = {}) {
+  constructor(opciones: { emitirLog?: boolean; ahora?: () => Date; tenantId?: string } = {}) {
     this.emitirLog = opciones.emitirLog ?? true;
+    this.tenantId = opciones.tenantId === undefined ? undefined : (normalizarValor(opciones.tenantId) ?? undefined);
     this.ahora = opciones.ahora ?? (() => new Date());
     this.desde = this.ahora().toISOString();
   }
@@ -286,7 +302,11 @@ export class RegistroMetricas implements Metricas {
       // Una línea por evento. Solo el nombre y las etiquetas YA normalizadas:
       // nunca el valor crudo que llegó.
       const muestra = this.contadores.get(clave);
-      logger.info("metrica", { nombre, ...(muestra?.etiquetas ?? {}) });
+      logger.info("metrica", {
+        nombre,
+        ...(this.tenantId !== undefined ? { empresa: this.tenantId } : {}),
+        ...(muestra?.etiquetas ?? {}),
+      });
     }
   }
 

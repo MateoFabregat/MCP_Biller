@@ -14,7 +14,12 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BillerClient } from "../biller/client.js";
-import { loadConfig, type BillerCapabilityMode, type BillerConfig } from "../config.js";
+import {
+  inspectConfig,
+  loadConfig,
+  type BillerCapabilityMode,
+  type BillerConfig,
+} from "../config.js";
 import { crearBorradorStore, type BorradorStore } from "../kapso/borradorStore.js";
 import { RegistroMetricas } from "../observabilidad/metricas.js";
 import { createDefaultRateLimiters } from "../utils/rateLimit.js";
@@ -151,10 +156,18 @@ export function getRegisteredToolNames(
  * compartiría también las claves de idempotencia — y una clave "ya usada" por
  * una empresa bloquearía la emisión de la otra.
  */
-export function createToolContext(env: Record<string, string | undefined> = process.env): ToolContext {
+export function createToolContext(
+  env: Record<string, string | undefined> = process.env,
+  opciones: { tenantId?: string } = {},
+): ToolContext {
   // Un registro por contexto = uno por empresa. Ver el comentario de `metricas`
   // en ToolContext: compartirlo entre tenants expondría el uso de una a la otra.
-  const metricas = new RegistroMetricas();
+  //
+  // El id de tenant NO va a los contadores en memoria —ya son por empresa, sería
+  // una etiqueta constante— sino a la línea de log, que es la única salida que
+  // se mezcla: a veinte empresas, el agregador no podía contestar de quién era
+  // el embudo de emisión que se cayó.
+  const metricas = new RegistroMetricas({ tenantId: opciones.tenantId });
   let cachedConfig: BillerConfig | undefined;
   let cachedClient: BillerClient | undefined;
   let cachedWriteClient: BillerWriteClient | undefined;
@@ -215,7 +228,19 @@ export function createToolContext(env: Record<string, string | undefined> = proc
     return cachedBorradores;
   };
 
-  return { getConfig, getClient, getWriteContext, metricas, getBorradorStore };
+  // `inspeccionar` cierra sobre el MISMO `env` que `getConfig`, y ese es todo el
+  // punto: no hay forma de construir un contexto cuya config diga una cosa y
+  // cuyo diagnóstico diga otra. No se memoiza —a diferencia de la config y el
+  // cliente, que son caros y se usan en cada request— porque el diagnóstico se
+  // pide de a una vez y conviene que lea el env tal como está.
+  return {
+    getConfig,
+    getClient,
+    getWriteContext,
+    metricas,
+    getBorradorStore,
+    inspeccionar: () => inspectConfig(env),
+  };
 }
 
 export function registerAllTools(
@@ -224,7 +249,7 @@ export function registerAllTools(
   capabilityMode: BillerCapabilityMode = "read_only",
 ): void {
   // Las tools de lectura se registran siempre.
-  registerHealthCheck(server);
+  registerHealthCheck(server, ctx);
   registerBuscarClientePorRut(server, ctx);
   registerListarEmitidos(server, ctx);
   registerListarRecibidos(server, ctx);

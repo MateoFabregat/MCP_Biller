@@ -8,7 +8,7 @@
 // estos tests son los que la fijan.
 // =============================================================================
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -330,5 +330,58 @@ describe("regresiones", () => {
     expect(normalizarValor("21.000.000.0011")).toBe(VALOR_INVALIDO);
     expect(normalizarValor("+59899123456")).toBe(VALOR_INVALIDO);
     expect(normalizarValor("14.640,00")).toBe(VALOR_INVALIDO);
+  });
+});
+
+describe("de qué empresa es esta línea de log", () => {
+  // A veinte empresas, `metrica {nombre, tool}` no contesta la única pregunta
+  // que se le hace al agregador: DE QUIÉN es el embudo que se cayó. Los
+  // contadores en memoria ya son por empresa (uno por contexto); la línea de log
+  // es la única salida que se mezcla, y es la única que lleva el id.
+  function capturarStderr(fn: () => void): string[] {
+    const lineas: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: unknown) => {
+        lineas.push(String(chunk));
+        return true;
+      });
+    try {
+      fn();
+    } finally {
+      spy.mockRestore();
+    }
+    return lineas;
+  }
+
+  it("con tenantId, la línea lleva la empresa", () => {
+    const lineas = capturarStderr(() => {
+      new RegistroMetricas({ tenantId: "almacen-lopez" }).contar("tool.invocacion", {
+        tool: "biller_metricas",
+      });
+    });
+    const meta = JSON.parse(lineas[0]!).meta;
+    expect(meta.empresa).toBe("almacen-lopez");
+    expect(meta.tool).toBe("biller_metricas");
+  });
+
+  it("sin tenantId (mono-tenant) la línea sale como siempre", () => {
+    const lineas = capturarStderr(() => {
+      new RegistroMetricas().contar("tool.invocacion", { tool: "biller_metricas" });
+    });
+    expect(JSON.parse(lineas[0]!).meta).not.toHaveProperty("empresa");
+  });
+
+  it("el id NO entra a los contadores en memoria: ahí sería una etiqueta constante", () => {
+    const reg = new RegistroMetricas({ emitirLog: false, tenantId: "almacen-lopez" });
+    reg.contar("tool.invocacion", { tool: "biller_metricas" });
+    expect(reg.instantanea().muestras[0]!.etiquetas).toEqual({ tool: "biller_metricas" });
+  });
+
+  it("un id que no pasa el filtro de etiquetas sale como 'invalido', no crudo", () => {
+    const lineas = capturarStderr(() => {
+      new RegistroMetricas({ tenantId: "Almacén 21.000.000.0011" }).contar("tool.invocacion");
+    });
+    expect(JSON.parse(lineas[0]!).meta.empresa).toBe(VALOR_INVALIDO);
   });
 });
