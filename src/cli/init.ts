@@ -20,7 +20,7 @@
 //     en pantalla lo muestra recortado.
 // =============================================================================
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
@@ -69,7 +69,10 @@ export function escribirConfigDesktop(ruta: string, token: string, baseUrl: stri
       // puede tener otros servers que el usuario no quiere perder.
       config = JSON.parse(crudo) as Record<string, unknown>;
     }
+    // El .bak lleva el token adentro (el viejo o el mismo): 0600 para que no lo
+    // lea otro usuario del sistema, igual que el archivo real.
     copyFileSync(ruta, `${ruta}.bak`);
+    chmodSync(`${ruta}.bak`, 0o600);
     backup = true;
   } else {
     mkdirSync(dirname(ruta), { recursive: true });
@@ -77,7 +80,11 @@ export function escribirConfigDesktop(ruta: string, token: string, baseUrl: stri
   const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
   servers.biller = bloqueServidor(token, baseUrl);
   config.mcpServers = servers;
-  writeFileSync(ruta, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  // 0600: el archivo tiene el BILLER_API_TOKEN en claro. Sin esto queda 0644 y
+  // cualquier proceso de otro usuario lo lee — el escenario del host compartido
+  // que el README de multi-empresa describe.
+  writeFileSync(ruta, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  chmodSync(ruta, 0o600); // writeFileSync no baja los permisos de un archivo que YA existía
   return { backup };
 }
 
@@ -94,10 +101,26 @@ function recortado(token: string): string {
  * `line` se encola, y una pregunta consume de la cola o espera la próxima.
  * EOF con la cola vacía es un error claro, no un cuelgue.
  */
-function crearPreguntador(rl: Interface): { pregunta: (texto: string) => Promise<string> } {
+function crearPreguntador(rl: Interface): {
+  pregunta: (texto: string, oculto?: boolean) => Promise<string>;
+} {
   const cola: string[] = [];
   const esperas: Array<(linea: string | null) => void> = [];
   let cerrado = false;
+
+  // Eco controlado: cuando `ocultar` está activo, readline NO escribe las teclas
+  // que el usuario tipea. Es lo que evita que el token quede en pantalla —y en el
+  // scrollback, y en una videollamada con pantalla compartida, que es EL caso de
+  // uso de este comando—. El prompt lo escribimos nosotros aparte, así que sigue
+  // visible. Sin TTY (pipe, tests) no hay eco de por sí y esto no hace nada.
+  let ocultar = false;
+  const rlInterno = rl as unknown as { _writeToOutput?: (s: string) => void };
+  const escribirOriginal = rlInterno._writeToOutput?.bind(rl);
+  rlInterno._writeToOutput = (s: string): void => {
+    if (ocultar) return;
+    escribirOriginal?.(s);
+  };
+
   rl.on("line", (linea) => {
     const espera = esperas.shift();
     if (espera) espera(linea);
@@ -108,15 +131,26 @@ function crearPreguntador(rl: Interface): { pregunta: (texto: string) => Promise
     for (const espera of esperas.splice(0)) espera(null);
   });
   return {
-    pregunta: async (texto: string): Promise<string> => {
+    pregunta: async (texto: string, oculto = false): Promise<string> => {
+      ocultar = false;
       process.stderr.write(texto);
+      ocultar = oculto;
+      const finalizar = (): void => {
+        ocultar = false;
+        if (oculto) process.stderr.write("\n"); // el Enter no se ecoó: cerramos la línea
+      };
       const encolada = cola.shift();
       if (encolada !== undefined) {
-        process.stderr.write("\n");
+        finalizar();
+        if (!oculto) process.stderr.write("\n");
         return encolada;
       }
-      if (cerrado) throw new Error("Se terminó la entrada antes de responder todas las preguntas.");
+      if (cerrado) {
+        finalizar();
+        throw new Error("Se terminó la entrada antes de responder todas las preguntas.");
+      }
       const linea = await new Promise<string | null>((resolve) => esperas.push(resolve));
+      finalizar();
       if (linea === null) throw new Error("Se terminó la entrada antes de responder todas las preguntas.");
       return linea;
     },
@@ -137,7 +171,8 @@ export async function runInit(): Promise<void> {
 
     let token = "";
     while (token === "") {
-      token = (await pregunta(`Pegá tu token de la API de Biller (${baseUrl}): `)).trim();
+      // `oculto`: el token no se ecoa mientras se pega. Ver `crearPreguntador`.
+      token = (await pregunta(`Pegá tu token de la API de Biller (${baseUrl}): `, true)).trim();
     }
 
     const destino = (

@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { KapsoConfig } from "../src/config.js";
 import { normalizeComprobantesEmitidos } from "../src/biller/normalize.js";
 import { calcularCuentaCorriente } from "../src/services/cuentaCorriente.js";
+import { hoyComoDateUy } from "../src/services/fechaUy.js";
 import { construirRecordatorio } from "../src/services/recordatorioCobro.js";
 import { handleRecordatorioCobro } from "../src/tools/recordatorioCobro.js";
 import type { ToolResult } from "../src/tools/shared.js";
@@ -54,7 +55,10 @@ function sc(res: ToolResult): Record<string, any> {
 
 /** Factura a crédito, vencida hace `atraso` días respecto de hoy. */
 function factura(over: Record<string, unknown> = {}): Record<string, unknown> {
-  const hoy = new Date();
+  // Ancla en el "día uruguayo" (mediodía UTC), igual que el código bajo prueba
+  // resuelve "hoy" con hoyComoDateUy(). Con `new Date()` crudo, entre las 21:00
+  // y la medianoche UY el test corría en el día UTC siguiente y el atraso daba 29.
+  const hoy = hoyComoDateUy();
   const emision = new Date(hoy.getTime() - 60 * 86_400_000).toISOString().slice(0, 10);
   const vencimiento = new Date(hoy.getTime() - 30 * 86_400_000).toISOString().slice(0, 10);
   return {
@@ -119,7 +123,7 @@ describe("armado del mensaje", () => {
   });
 
   it("no reclama lo que todavía no venció", () => {
-    const futuro = new Date(Date.now() + 20 * 86_400_000).toISOString().slice(0, 10);
+    const futuro = new Date(hoyComoDateUy().getTime() + 20 * 86_400_000).toISOString().slice(0, 10);
     const r = construirRecordatorio(cuenta([factura({ fecha_vencimiento: futuro })]), RUT_A);
     expect(r.mensaje).toBeNull();
     expect(r.motivo).toBe("sin_documentos_vencidos");
@@ -127,7 +131,7 @@ describe("armado del mensaje", () => {
   });
 
   it("con incluir_por_vencer sí lo reclama", () => {
-    const futuro = new Date(Date.now() + 20 * 86_400_000).toISOString().slice(0, 10);
+    const futuro = new Date(hoyComoDateUy().getTime() + 20 * 86_400_000).toISOString().slice(0, 10);
     const r = construirRecordatorio(cuenta([factura({ fecha_vencimiento: futuro })]), RUT_A, {
       incluir_por_vencer: true,
     });

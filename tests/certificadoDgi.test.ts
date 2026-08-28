@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { normalizeDgiCertificado } from "../src/biller/normalize.js";
 import { handleAlertas } from "../src/tools/alertas.js";
+import { hoyComoDateUy } from "../src/services/fechaUy.js";
 import { makeCtx } from "./helpers.js";
 
 /**
@@ -87,7 +88,7 @@ describe("alerta de certificado — los tres estados", () => {
   });
 
   it("un certificado vigente y lejos de vencer no genera alerta", async () => {
-    const dentroDeUnAnio = new Date(Date.now() + 300 * 86_400_000).toISOString().slice(0, 10);
+    const dentroDeUnAnio = new Date(hoyComoDateUy().getTime() + 300 * 86_400_000).toISOString().slice(0, 10);
     const { ctx } = ctxCon({
       ...CERT_REAL_SIN_CERTIFICADO,
       Estado: "Certificado de Vigencia Anual Habilitado.",
@@ -99,7 +100,7 @@ describe("alerta de certificado — los tres estados", () => {
   });
 
   it("un certificado por vencer usa el campo Vencimiento explícito", async () => {
-    const enDiezDias = new Date(Date.now() + 10 * 86_400_000).toISOString().slice(0, 10);
+    const enDiezDias = new Date(hoyComoDateUy().getTime() + 10 * 86_400_000).toISOString().slice(0, 10);
     const { ctx } = ctxCon({
       ...CERT_REAL_SIN_CERTIFICADO,
       Estado: "Certificado de Vigencia Anual Habilitado.",

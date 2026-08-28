@@ -145,6 +145,57 @@ describe("ComprobanteBodySchema — ejemplos oficiales de la doc", () => {
     }
   });
 
+  // El punto es de miles, no decimal. Un CFE emitido con 6.5 donde iba 6.500
+  // está mal por cien veces y sale bien formado: es el bug que `plata()` cierra.
+  describe("un precio con separador de miles NO se lee como decimal", () => {
+    const emitir = (precio: unknown) =>
+      ComprobanteBodySchema.safeParse({
+        tipo_comprobante: 111,
+        sucursal: 347,
+        indicador_facturacion: 2,
+        montos_brutos: true,
+        cliente: { tipo_documento: 2, documento: "218435730016", razon_social: "X", pais: "UY" },
+        items: [{ concepto: "Portland", cantidad: 1, precio, indicador_facturacion: 2 }],
+      });
+
+    it('"6.500" es seis mil quinientos, no 6.5', () => {
+      const r = emitir("6.500");
+      expect(r.success).toBe(true);
+      if (r.success) expect(r.data.items![0]!.precio).toBe(6500);
+    });
+
+    it("un número ya resuelto pasa intacto (el caso del borrador)", () => {
+      const r = emitir(6500);
+      expect(r.success).toBe(true);
+      if (r.success) expect(r.data.items![0]!.precio).toBe(6500);
+    });
+
+    it('"1.234,56" con los dos separadores se lee sin ambigüedad', () => {
+      const r = emitir("1.234,56");
+      expect(r.success).toBe(true);
+      if (r.success) expect(r.data.items![0]!.precio).toBe(1234.56);
+    });
+
+    it('"6.50" (un punto, dos decimales) es AMBIGUO y se rechaza, no se emite a ciegas', () => {
+      const r = emitir("6.50");
+      expect(r.success).toBe(false);
+      if (!r.success) expect(r.error.issues[0]!.message).toContain("dos lecturas");
+    });
+
+    it("la cantidad también: \"1.500\" unidades no son 1.5", () => {
+      const r = ComprobanteBodySchema.safeParse({
+        tipo_comprobante: 111,
+        sucursal: 347,
+        indicador_facturacion: 2,
+        montos_brutos: true,
+        cliente: { tipo_documento: 2, documento: "218435730016", razon_social: "X", pais: "UY" },
+        items: [{ concepto: "Tornillos", cantidad: "1.500", precio: 2, indicador_facturacion: 2 }],
+      });
+      expect(r.success).toBe(true);
+      if (r.success) expect(r.data.items![0]!.cantidad).toBe(1500);
+    });
+  });
+
   it("acepta el e-Ticket con retenciones e indicador_agente_responsable", () => {
     expect(
       ComprobanteBodySchema.safeParse({

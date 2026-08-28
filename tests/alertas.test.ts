@@ -13,6 +13,7 @@ import {
 } from "../src/services/alertas.js";
 import { extraerVencimientoCertificado } from "../src/services/certificadoDgi.js";
 import { handleAlertas } from "../src/tools/alertas.js";
+import { hoyComoDateUy } from "../src/services/fechaUy.js";
 import { makeCtx } from "./helpers.js";
 
 const HOY = new Date("2026-07-27T12:00:00Z");
@@ -264,7 +265,7 @@ describe("generarAlertas", () => {
 
 describe("tool biller_alertas_operativas", () => {
   it("devuelve las alertas del período y filtra por severidad", async () => {
-    const hoyReal = new Date();
+    const hoyReal = hoyComoDateUy();
     const diaReal = (offset: number): string =>
       new Date(hoyReal.getTime() + offset * 86_400_000).toISOString().slice(0, 10);
 
@@ -367,7 +368,7 @@ describe("tool biller_alertas_operativas", () => {
             moneda: "UYU",
             total: 100,
             estado: "Rechazado DGI",
-            fecha_emision: new Date().toISOString().slice(0, 10),
+            fecha_emision: hoyComoDateUy().toISOString().slice(0, 10),
             cae: {},
           },
         ];
@@ -410,7 +411,7 @@ describe("tool biller_alertas_operativas", () => {
             moneda: "UYU",
             total: 100,
             estado: "Rechazado DGI",
-            fecha_emision: new Date().toISOString().slice(0, 10),
+            fecha_emision: hoyComoDateUy().toISOString().slice(0, 10),
             cae: {},
           },
         ];

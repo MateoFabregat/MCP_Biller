@@ -5,6 +5,126 @@ Cosas pendientes para la siguiente iteración, ordenadas por prioridad.
 Lo que ya está hecho queda marcado `[x]` con el archivo donde vive, en vez de
 borrarse: saber qué se resolvió y dónde vale más que una lista corta.
 
+## Auditoría integral (agosto 2026) — cuatro revisiones en paralelo
+
+Seguridad, fiscal, arquitectura (CTO) y capa conversacional revisaron todo el
+repo, cada hallazgo verificado ejecutando código. Lo que se arregló en esta
+tanda está marcado; lo que queda tiene repro y prioridad. El resto de este
+archivo son los backlogs previos, todavía válidos.
+
+### Ya arreglado en esta tanda
+
+- [x] **Los fixtures de fecha se anclaban a UTC → la suite fallaba 4 tests todas
+  las noches (21:00–00:00 UY).** Anclados a `hoyComoDateUy()` en
+  `tests/{recordatorioCobro,certificadoDgi,alertas}.test.ts`. Verificado con la
+  suite bajo `TZ=UTC`. (commit `fix(tests): los fixtures de fecha…`)
+- [x] **CRÍTICO fiscal: el punto de miles convertía un precio de emisión en su
+  centésima** (`"6.500"` → 6.5, un CFE de $6,50 donde iba $6.500). Nuevo
+  `plata()` en `src/biller/coerce.ts`, aplicado a los campos de importe/cantidad
+  de `cfeSchema` y `operacionesSchema`. Era **bloqueante de publicación**.
+- [x] **Seguridad: la envoltura `⟦dato-no-confiable⟧` era case-sensitive** y DGI
+  devuelve claves en PascalCase (`Denominacion`). Comparación en minúsculas.
+- [x] **Seguridad: `npx ... init` ecoaba el token** al pegarlo. Muteado.
+- [x] **Seguridad: token y datos comerciales en disco con 0644.** Ahora 0600/0700.
+
+### P0 de seguridad — falta (alta severidad, commit propio)
+
+- [ ] **El canal de ERROR saltea la envoltura de datos no confiables.** ALTA.
+  `sanitizeToolResult` (`src/security/sanitize.ts`) solo envuelve
+  `structuredContent`; un error no lo tiene, así que solo corre `redactSecrets`.
+  `BillerApiError.toSafe()` (`src/utils/errors.ts:165`) devuelve `details` con
+  hasta 600 chars del cuerpo crudo de Biller, y `parseValidationBody` mete el
+  texto del 422 dentro de `message`. Vector: un proveedor hostil pone una
+  inyección en el `concepto` de un CFE; una consulta que dé 422/500 (los 500 son
+  "normales" en Biller) devuelve ese texto **crudo** al modelo, en la misma
+  conversación donde se le prometió que todo lo de terceros vendría marcado.
+  Los dos sub-vectores (`message` embebido y `details` crudo) NO se cubren por
+  clave: el fix es envolver el bloque de error de Biller como no-confiable de
+  punta a punta, en `toSafe()` o en `sanitizeToolResult` cuando `structured`
+  es undefined. Decisión de diseño antes de código.
+
+### P0 fiscal — falta (cada uno mueve un número, commit propio)
+
+- [ ] **`biller_recordatorio_cobro` no ata el `confirmation_token` a la
+  identidad** (`src/tools/recordatorioCobro.ts:273,300`): llama a
+  `computeConfirmationToken`/`checkConfirmationToken` sin el 5º argumento, a
+  diferencia de `tools/write/shared.ts`. Intra-empresa, otro usuario podría
+  confirmar un envío que no previsualizó. Exportar `identidadDeEscritura`.
+- [ ] **NC recibida suma IVA compras en vez de restarlo.** `posicionIva.ts:166`
+  y `proveedores.ts` no miran `r.tipo`: una compra anulada por el proveedor
+  infla el crédito fiscal. **Antes de codear: confirmar con `npm run contrato`
+  si Biller devuelve `total_iva` negativo en las NC recibidas** — si ya viene
+  negativo, el fix es el opuesto. No tocar a ciegas.
+- [ ] **La NC que sugiere `biller_plan_anulacion` va siempre a 22%.**
+  `anulacion.ts:257`, `indicador_facturacion: 3` hardcodeado. Anular una factura
+  de tasa mínima (10%) sobreacredita IVA. Derivar el indicador del desglose del
+  original; si hay mezcla de tasas, no sugerir cuerpo.
+- [ ] **El aviso "receptor obligatorio" no llega al resumen que aprueba el
+  humano.** Nace en `cfeSchema.ts:636` (`validarComprobante`) y va solo a
+  `structuredContent.warnings` (el modelo), no al resumen de WhatsApp
+  (`render.ts` / `formatearTotales`). La regla de DGI "que más caro sale" viaja
+  por el canal que el proyecto declaró no confiable. Pasar los warnings
+  bloqueantes fiscales a `advertenciasDelPreview` (`calcularTotales.ts:576`),
+  arriba de todo.
+
+### P0/P1 conversacional — falta (repro confirmado; fixes con archivo:línea)
+
+- [ ] **Línea a $0/negativa al final deja el flujo mudo.** Darle interactivo a
+  la rama `precio` cuando el ítem ya tiene un número ≤0 (`emision.ts:1622`), con
+  botones "dejarlo" / "sacar la línea". Cambia un test pineado a propósito.
+- [ ] **`precio_copiado` sobrevive a `items` explícitos** → línea a $0 emitida en
+  silencio. `borradorStore.ts:248`: `if (nuevo.precio !== undefined) delete
+  item.precio_copiado`. **Este mueve un número**, no es cosmético.
+- [ ] **Un producto queda como razón social en el paso `cliente`**
+  ("coca 2 litros" → `razon_social: "coca"`). `extraerPedido.ts` + guarda en
+  `borradorEmision.ts:308` para lectura posicional vs. explícita. Mueve un dato
+  del CFE.
+- [ ] **`calidad()` del enrutador empata exacto con inclusión**
+  (`enrutador.ts:735`): en `read_only`, "me equivoqué con el recibo" cae en
+  `menu:anular` (una NC por un recibo). Puntuar exacto=3, inclusión=2, aprox=1.
+- [ ] **Ecos crudos**: `$-200` en pregunta/botón (`emision.ts:1577`), precios
+  huérfanos sin formatear (`borradorEmision.ts:423`). Usar el helper `importe()`.
+- [ ] **`SKILL.md` §fechas**: dice pasar fechas concretas; debe decir usar los
+  **alias simbólicos** (`hoy`, `mes_actual`…) que el server resuelve en hora UY.
+  Si el modelo calcula la fecha, contesta cero después de las 21:00.
+- [ ] **`SKILL.md`**: cubre 16 de 27 tools; afirma "esta instalación es de solo
+  lectura" (falso en `write_enabled`) y niega `biller_plan_anulacion` (que
+  funciona en read_only); falta el matiz de monedas (nunca sumar UYU+USD).
+- [ ] **Corpus de evals**: 29 casos nuevos propuestos (jerga de mostrador,
+  "ayer", singulares, vencimientos). Meterlos JUNTO con los fixes de sinónimos o
+  el gate `--min 95` frena el commit. Archivo en el scratchpad de la sesión.
+- [ ] **Texto**: el encabezado del menú muestra el RUT donde va el nombre
+  (`render.ts:37` recibe `defaultEmpresaRut`); "CFE"/"ambiente"/"servidor" son
+  jerga; "una de estas dos cosas" con 3 candidatas (`render.ts:66`).
+
+### Arquitectura / deuda (CTO) — falta
+
+- [ ] **`CacheDetalles` comparte presupuesto entre empresas**
+  (`src/biller/traerDetalles.ts`): mismo bug ya arreglado en `cacheVentanas.ts`
+  (mapa único + FIFO en vez de LRU por empresa), en el cache más caro (391ms/miss).
+  Erosión del invariante 4. El arreglo está escrito al lado: portarlo.
+- [ ] **Zod v4 NO borra `transport/dialecto.ts`** (verificado contra el SDK
+  1.29.0: llama a `toJsonSchemaCompat` sin `target`), y `inlinearRefs` no depende
+  del dialecto. Corregir `README.md:677`, `docs/EQUIPO.md:100,254` que prometen
+  lo contrario. El canario de `tests/dialecto.test.ts` es la única condición de
+  retiro.
+- [ ] **Publicar en npm**: falta `npm publish` + `LICENSE` (MIT declarada, sin
+  archivo). El README manda `npx biller-mcp-server` que da 404. Nombre libre.
+- [ ] **`.env.example` dice "6 tools"** (son 27+7) y no está bajo el guard de
+  `conteosDoc`. Sumarlo. El conteo de tests en docs (1050/1376) también divergió.
+- [ ] **Alta plug-and-play** (ver el plan en la respuesta de la sesión): fase 1
+  `onboard --crear` que deriva RUT/sucursal de la API; fase 2 recarga en caliente
+  del registro (hoy dar de alta una empresa = reiniciar todas); fase 3 formulario.
+- [ ] **Pista 2 (remoto + OAuth)**: Resource Server contra un IdP de tercero con
+  DCR (no construir Authorization Server propio). Reusa `autenticarConTenants`
+  como segunda rama. Escritura remota queda para el final (no hay `remitente`
+  verificado: falta un equivalente al ancla de `identidadDeConversacion`).
+- [ ] **Extender el guard `fechaUyGuard` a `tests/`** con patrones de fixture y
+  allowlist para tokens/timestamps. Hoy solo barre `src/`.
+- [ ] **Partir `handleEmisionGuiada`** (555 líneas en una función) y sacar los 11
+  `construirSubmenu*` de `emision.ts` a `render.ts`. Por diferencial contra el
+  corpus.
+
 ## P0 — Antes de poner en producción
 
 - [ ] **Validar endpoints de escritura contra la API real de test.**

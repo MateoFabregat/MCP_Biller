@@ -8,6 +8,7 @@
 // =============================================================================
 
 import { z } from "zod";
+import { parsearImporte } from "../services/importe.js";
 
 /** Convierte un string numérico a número; deja pasar el resto tal cual. */
 export function aNumero(v: unknown): unknown {
@@ -16,6 +17,60 @@ export function aNumero(v: unknown): unknown {
     if (t !== "" && Number.isFinite(Number(t))) return Number(t);
   }
   return v;
+}
+
+/** Un string que es SOLO un número: signo, dígitos y separadores. Sin moneda ni letras. */
+const SOLO_NUMERO = /^[+-]?[\d.,]+$/;
+
+/**
+ * Campo de PLATA de un documento fiscal (un importe o una cantidad que suma o
+ * multiplica al total del CFE).
+ *
+ * Por qué NO alcanza `numero()`/`aNumero` acá: usan `Number()`, y `Number("6.500")`
+ * es 6.5 — en JavaScript el punto es decimal, en Uruguay es de miles. Un CFE
+ * emitido con 6.5 donde iba 6.500 está mal por CIEN VECES, sale bien formado, y
+ * nadie lo ve hasta el reclamo semanas después. Es el mismo caso que
+ * `biller_emision_guiada` ya trata con `parsearImporte`; esta es la misma regla
+ * en la tool que REALMENTE emite.
+ *
+ * - Un `number` ya resuelto pasa intacto. Es el caso normal: el borrador de la
+ *   emisión guiada llega con `precio: number` porque ya lo parseó antes.
+ * - Un string se lee con `parsearImporte` (los mismos criterios escritos y
+ *   testeados): "6.500" → 6500, "1.234,56" → 1234.56.
+ * - Un string genuinamente ambiguo (un punto con dos decimales, una coma de
+ *   miles: la diferencia es de cien veces) se RECHAZA pidiendo el número sin
+ *   separador. La emisión es irreversible y acá no hay a quién preguntarle;
+ *   ante la duda no se elige.
+ */
+export function plata(campo: string) {
+  return z.union([z.number(), z.string()]).transform((v, ctx): number => {
+    if (typeof v === "number") {
+      if (Number.isFinite(v)) return v;
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${campo} debe ser numérico.` });
+      return z.NEVER;
+    }
+    const t = v.trim();
+    if (t === "" || !SOLO_NUMERO.test(t)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${campo} debe ser numérico.` });
+      return z.NEVER;
+    }
+    const leido = parsearImporte(t);
+    if (leido.valor === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${campo} debe ser numérico.` });
+      return z.NEVER;
+    }
+    if (leido.ambiguo) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          `${campo}: "${t}" admite dos lecturas y la diferencia puede ser de cien veces. ` +
+          "Mandá el número sin separador de miles (por ejemplo 6500, no \"6.500\"), " +
+          "usando el punto solo para decimales (6.5 = seis con cincuenta).",
+      });
+      return z.NEVER;
+    }
+    return leido.valor;
+  });
 }
 
 /** Booleano flexible: true/false, 0/1, "0"/"1". La doc usa las tres formas. */

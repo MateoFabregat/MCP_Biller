@@ -16,7 +16,7 @@
 // =============================================================================
 
 import { z } from "zod";
-import { booleano, codigo, entero, numero, texto } from "./coerce.js";
+import { booleano, codigo, entero, numero, plata, texto } from "./coerce.js";
 import { FAMILIA_EFACTURA, FAMILIA_ETICKET, exigeReceptor } from "./requisitos.js";
 
 // ---------------------------------------------------------------------------
@@ -224,7 +224,7 @@ export const RetencionPercepcionSchema = z
       "Código de retención/percepción registrado en DGI (formulario + línea).",
     ),
     tasa: numero("tasa"),
-    monto_sujeto: numero("monto_sujeto"),
+    monto_sujeto: plata("monto_sujeto"),
     indicador_facturacion: codigo(
       INDICADORES_FACTURACION,
       "retencionesPercepciones.indicador_facturacion",
@@ -235,9 +235,9 @@ export const RetencionPercepcionSchema = z
 export const ItemSchema = z
   .object({
     codigo: z.union([texto(35, "items.codigo"), z.number()]).optional(),
-    cantidad: numero("items.cantidad"),
+    cantidad: plata("items.cantidad"),
     concepto: texto(80, "items.concepto"),
-    precio: numero("items.precio").optional(),
+    precio: plata("items.precio").optional(),
     unidad_medida: texto(4, "items.unidad_medida").optional(),
     codigo_ean: entero("items.codigo_ean").optional(),
     codigo_dun: entero("items.codigo_dun").optional(),
@@ -299,7 +299,7 @@ export const DescuentoRecargoGlobalSchema = z
       errorMap: () => ({ message: 'descuentosRecargos.desc_rec_tipo debe ser "$" o "%".' }),
     }),
     glosa: texto(50, "descuentosRecargos.glosa").optional(),
-    valor: numero("descuentosRecargos.valor"),
+    valor: plata("descuentosRecargos.valor"),
     indicador_facturacion: codigo(
       INDICADORES_FACTURACION,
       "descuentosRecargos.indicador_facturacion",

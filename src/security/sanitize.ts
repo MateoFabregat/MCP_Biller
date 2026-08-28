@@ -32,6 +32,23 @@ import {
 const MAX_DEPTH = 12;
 
 /**
+ * El set de campos no confiables, en minúsculas, para comparar sin depender del
+ * casing.
+ *
+ * Por qué: los normalizadores de DGI devuelven el objeto crudo de la API, con
+ * las claves capitalizadas a su manera —`Denominacion`, `RazonSocial`,
+ * `NombreFantasia`—. Una comparación exacta contra `razon_social` no las ve, y
+ * los mismos bytes que salían envueltos como `razon_social` salían crudos como
+ * `RazonSocial`. Es el mismo lavado de barrera que el renombre a `cliente_nombre`,
+ * pero por mayúscula en vez de por clave nueva. Comparar en minúsculas lo cierra
+ * para toda la familia de una vez, incluida cualquier clave que Biller agregue
+ * mañana con su convención.
+ */
+const CAMPOS_NO_CONFIABLES_LOWER: ReadonlySet<string> = new Set(
+  [...CAMPOS_NO_CONFIABLES].map((c) => c.toLowerCase()),
+);
+
+/**
  * Recorre un valor arbitrario envolviendo los strings cuya CLAVE está en
  * `CAMPOS_NO_CONFIABLES`. `claveActual` es el nombre bajo el que vino el valor.
  *
@@ -49,7 +66,12 @@ function envolverCamposNoConfiables(
   if (depth > MAX_DEPTH) return valor;
 
   if (typeof valor === "string") {
-    if (!propio && claveActual !== null && CAMPOS_NO_CONFIABLES.has(claveActual) && !yaEnvuelto(valor)) {
+    if (
+      !propio &&
+      claveActual !== null &&
+      CAMPOS_NO_CONFIABLES_LOWER.has(claveActual.toLowerCase()) &&
+      !yaEnvuelto(valor)
+    ) {
       return envolverNoConfiable(valor);
     }
     return valor;
