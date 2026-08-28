@@ -41,3 +41,4 @@
 {"mensaje": "me equivoque con el recibo", "modo": "write_enabled", "esperado_opcion": "menu:cancelar_recibo", "origen": "revision-flujo ago-2026 (intencion nueva)"}
 {"mensaje": "el rut es 210475730011", "modo": "write_enabled", "en_flujo": true, "esperado_via": "flujo_emision", "origen": "revision-flujo ago-2026 (correccion en flujo)"}
 {"mensaje": "sin iva", "modo": "write_enabled", "en_flujo": true, "esperado_via": "flujo_emision", "origen": "revision-flujo ago-2026 (correccion en flujo)"}
+{"mensaje": "me equivoque con el recibo", "modo": "read_only", "esperado_opcion": "menu:cancelar_recibo", "origen": "calidad() ago-2026: exacto empataba con inclusion y ganaba menu:anular"}

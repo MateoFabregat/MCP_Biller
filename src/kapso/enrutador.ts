@@ -207,7 +207,19 @@ export interface Interpretacion {
  * ya escribió lo que quería.
  */
 type Busqueda =
-  | { clase: "hit"; opcion: MenuOpcion; via: "sinonimo" | "aproximado"; confianza: number }
+  | {
+      clase: "hit";
+      opcion: MenuOpcion;
+      via: "sinonimo" | "aproximado";
+      confianza: number;
+      /**
+       * CÓMO se encontró, no cuán segura es. `confianza` vale 1 tanto para una
+       * igualdad exacta como para una inclusión, así que sin esto las dos son
+       * indistinguibles al comparar dos búsquedas — y ahí un sinónimo que
+       * aparece de pasada en una frase le empata a uno que ES la frase.
+       */
+      precision?: "exacto" | "inclusion";
+    }
   | { clase: "empate"; opciones: MenuOpcion[] }
   | null;
 
@@ -333,7 +345,7 @@ function buscarPorTexto(norm: string, candidatas: readonly MenuOpcion[]): Busque
   // a. Igualdad exacta con un sinónimo: lo más barato y lo más confiable.
   for (const o of candidatas) {
     if (indiceDe(o).todos.some((s) => s.norm === norm)) {
-      return { clase: "hit", opcion: o, via: "sinonimo", confianza: 1 };
+      return { clase: "hit", opcion: o, via: "sinonimo", confianza: 1, precision: "exacto" };
     }
   }
 
@@ -397,7 +409,13 @@ function buscarPorTexto(norm: string, candidatas: readonly MenuOpcion[]): Busque
       return { clase: "empate", opciones: [mejorInclusion.opcion, ...independientes] };
     }
 
-    return { clase: "hit", opcion: mejorInclusion.opcion, via: "sinonimo", confianza: 1 };
+    return {
+      clase: "hit",
+      opcion: mejorInclusion.opcion,
+      via: "sinonimo",
+      confianza: 1,
+      precision: "inclusion",
+    };
   }
 
   // c. Coincidencia por palabras con contenido. Esto es lo que hace que
@@ -730,12 +748,27 @@ export function interpretarMensaje(raw: string, opciones: MenuOpciones = {}): In
 
 /**
  * Cuán buena es una búsqueda, para poder comparar dos conjuntos de candidatas.
- * Exacto/inclusión (2) > empate (1.5) > parecido (1) > nada (0).
+ * Exacto (3) > inclusión (2) > empate (1.5) > parecido (1) > nada (0).
+ *
+ * POR QUÉ EXACTO E INCLUSIÓN NO PUEDEN VALER LO MISMO.
+ *
+ * Empataban, y el empate lo desempataba el orden del código: ganaba lo
+ * bloqueado. El caso real, en modo consulta: "me equivoqué con el recibo".
+ * "recibo" es sinónimo de registrar un cobro —bloqueado— y aparece por
+ * INCLUSIÓN; "me equivoqué" es sinónimo de anular y también entra por
+ * inclusión. Dos inclusiones con la misma nota, y el usuario terminaba en el
+ * flujo de anular: una NOTA DE CRÉDITO por un recibo, que es un documento
+ * fiscal que nadie pidió.
+ *
+ * Una frase que ES el sinónimo dice lo que el usuario quiere; una frase que lo
+ * CONTIENE puede estar hablando de otra cosa y mencionarlo al pasar. Son dos
+ * cosas de distinta fuerza y ahora puntúan distinto.
  */
 function calidad(b: Busqueda): number {
   if (b === null) return 0;
   if (b.clase === "empate") return 1.5;
-  return b.via === "sinonimo" ? 2 : 1;
+  if (b.via !== "sinonimo") return 1;
+  return b.precision === "exacto" ? 3 : 2;
 }
 
 /** Por qué una opción del catálogo no está habilitada, en castellano. */

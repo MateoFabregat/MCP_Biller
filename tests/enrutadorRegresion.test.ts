@@ -361,3 +361,28 @@ describe("V4.2 · el IVA tiene intención propia", () => {
     expect(r.opcion?.tools).toContain("biller_catalogo_datos");
   });
 });
+
+// --- Un sinónimo EXACTO no puede empatarle a una inclusión ------------------
+
+describe("exacto le gana a inclusión, aunque lo exacto esté bloqueado", () => {
+  it('"me equivoqué con el recibo" en consulta NO abre el flujo de anular', () => {
+    const r = interpretarMensaje("me equivoqué con el recibo", { capabilityMode: "read_only" });
+    // El sinónimo exacto es de cancelar_recibo; "me equivoqué" entraba por
+    // inclusión en anular y empataba. El desempate lo hacía el orden del
+    // código, y ganaba anular: una NOTA DE CRÉDITO por un recibo.
+    expect(r.opcion?.id).toBe("menu:cancelar_recibo");
+    expect(r.opcion?.id).not.toBe("menu:anular");
+    // En modo consulta no se puede hacer, y decirlo es la respuesta correcta.
+    expect(r.via).toBe("no_disponible");
+  });
+
+  it("con escritura habilitada va a cancelar el recibo, no a anular", () => {
+    const r = interpretarMensaje("me equivoqué con el recibo", { capabilityMode: "write_enabled" });
+    expect(r.opcion?.id).toBe("menu:cancelar_recibo");
+  });
+
+  it("una inclusión sola sigue enrutando: el cambio no sube el listón", () => {
+    const r = interpretarMensaje("necesito anular algo", { capabilityMode: "write_enabled" });
+    expect(r.opcion?.id).toBe("menu:anular");
+  });
+});
