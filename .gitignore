@@ -44,3 +44,8 @@ data/
 .agents/
 .claude/skills/
 .claude/settings.local.json
+
+# Extracción analítica: es la contabilidad de la empresa en claro.
+# La escribe `scripts/exportar-analitica.mjs` con permisos 0600.
+analitica-*.json
+analitica-*.html
