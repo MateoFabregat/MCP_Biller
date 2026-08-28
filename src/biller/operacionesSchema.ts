@@ -20,7 +20,7 @@ import {
   TIPOS_DOCUMENTO,
   parseFechaDgi,
 } from "./cfeSchema.js";
-import { booleano, codigo, entero, fechaIso, numero, round2, texto } from "./coerce.js";
+import { booleano, codigo, entero, fechaIso, numero, plata, round2, texto } from "./coerce.js";
 
 // ---------------------------------------------------------------------------
 // Recibos — POST /v2/recibos/crear
@@ -55,7 +55,7 @@ export const ClienteReciboSchema = z
 export const ReferenciaReciboSchema = z
   .object({
     padre: entero("referencias.padre").describe("ID en Biller del comprobante que se quiere pagar."),
-    total: numero("referencias.total").describe("Monto imputado a ese comprobante."),
+    total: plata("referencias.total").describe("Monto imputado a ese comprobante."),
   })
   .passthrough();
 
@@ -63,7 +63,7 @@ export const ReferenciaReciboSchema = z
 export const PagoReciboSchema = z
   .object({
     fecha: fechaIso("pago.fecha"),
-    monto: numero("pago.monto").describe("Debe ser mayor o igual al total de las referencias."),
+    monto: plata("pago.monto").describe("Debe ser mayor o igual al total de las referencias."),
     referencia: z
       .string()
       .optional()
@@ -203,14 +203,14 @@ const fechaPago = z.string().superRefine((value, ctx) => {
 export const ComprobantePagoSchema = z
   .object({
     id: entero("comprobantes.id").describe("ID en Biller del comprobante al que se asigna el pago."),
-    monto: numero("comprobantes.monto").describe("No puede superar el saldo pendiente del comprobante."),
+    monto: plata("comprobantes.monto").describe("No puede superar el saldo pendiente del comprobante."),
   })
   .passthrough();
 
 export const PagoBodySchema = z
   .object({
     fecha: fechaPago,
-    monto: numero("monto").describe("Puede ser negativo para revertir un pago anterior."),
+    monto: plata("monto").describe("Puede ser negativo para revertir un pago anterior."),
     referencia: texto(255, "referencia").describe("Obligatorio: información para identificar el pago."),
     comprobantes: z
       .array(ComprobantePagoSchema)
@@ -301,7 +301,7 @@ export const ProductoSchema = z
   .object({
     codigo: texto(35, "codigo").describe('Código del producto, ej: "PROD-001".'),
     nombre: texto(80, "nombre"),
-    precio: numero("precio").describe("Precio unitario con hasta 6 decimales."),
+    precio: plata("precio").describe("Precio unitario con hasta 6 decimales."),
     moneda: z.string().min(1, "moneda es obligatoria.").describe("UYU, USD, ..."),
     indicador_facturacion: codigo(INDICADORES_FACTURACION, "indicador_facturacion"),
     es_servicio: booleano().describe("true = servicio (sin stock); false = producto (con stock)."),
