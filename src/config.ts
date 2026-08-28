@@ -487,7 +487,7 @@ export function directorioDeDatos(dataDir: string, tenantId: string): string {
  */
 function asegurarDirectorio(dir: string): void {
   try {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch (err) {
     throw new BillerConfigError(
       `No se pudo crear el directorio de datos "${dir}" (BILLER_DATA_DIR): ` +

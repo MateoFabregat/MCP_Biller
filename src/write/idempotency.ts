@@ -111,8 +111,8 @@ export class FileIdempotencyStore implements IdempotencyStore {
   markUsed(key: string): void {
     this.used.add(key);
     try {
-      mkdirSync(dirname(this.path), { recursive: true });
-      appendFileSync(this.path, `${JSON.stringify({ key, ts: new Date().toISOString() })}\n`, "utf8");
+      mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+      appendFileSync(this.path, `${JSON.stringify({ key, ts: new Date().toISOString() })}\n`, { encoding: "utf8", mode: 0o600 });
     } catch (err) {
       this.degradar("escribir", err);
     }

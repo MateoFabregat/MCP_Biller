@@ -93,7 +93,7 @@ export class Auditor implements AuditSink {
       // Con appendFile async (fire-and-forget) la línea podía perderse si el
       // proceso moría justo después de un POST ya marcado como ejecutado.
       try {
-        appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, "utf8");
+        appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
       } catch (err) {
         logger.warn("No se pudo escribir el audit log en archivo.", {
           path: this.filePath,
