@@ -267,6 +267,50 @@ describe("la tool: dry-run y confirmación", () => {
     expect(llamadas).toHaveLength(0);
   });
 
+  // El token autoriza mandarle un reclamo de plata a un cliente. Dentro de una
+  // misma empresa puede haber más de un número autorizado, y el que previsualizó
+  // el texto tiene que ser el que confirma: si no, uno lee el mensaje y otro lo
+  // manda. Mismo invariante que las siete tools de escritura.
+  it("el token de un remitente NO lo puede confirmar otro", async () => {
+    const { fn, llamadas } = fakeFetch();
+    vi.stubGlobal("fetch", fn);
+    const fx = makeCtx({ config: { kapso: kapsoConfig() }, response: [factura()] });
+
+    const dry = await handleRecordatorioCobro(
+      { cliente_rut: RUT_A, destinatario: PERMITIDO, remitente: PERMITIDO },
+      fx.ctx,
+    );
+    const token = String(sc(dry).confirmation_token);
+
+    const ajeno = await handleRecordatorioCobro(
+      {
+        cliente_rut: RUT_A,
+        destinatario: PERMITIDO,
+        remitente: BLOQUEADO,
+        confirm: true,
+        confirmation_token: token,
+      },
+      fx.ctx,
+    );
+    expect(ajeno.isError).toBe(true);
+    expect(llamadas).toHaveLength(0);
+
+    // Y el mismo token, con su dueño, sí vale: el rechazo es por identidad y no
+    // porque el token esté roto.
+    const propio = await handleRecordatorioCobro(
+      {
+        cliente_rut: RUT_A,
+        destinatario: PERMITIDO,
+        remitente: PERMITIDO,
+        confirm: true,
+        confirmation_token: token,
+      },
+      fx.ctx,
+    );
+    expect(propio.isError).toBeFalsy();
+    expect(llamadas).toHaveLength(1);
+  });
+
   it("confirm sin token no manda nada", async () => {
     const { fn, llamadas } = fakeFetch();
     vi.stubGlobal("fetch", fn);

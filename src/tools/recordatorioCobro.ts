@@ -32,6 +32,7 @@
 // tiene anotaciones de escritura: manda un mensaje irreversible a un tercero.
 // =============================================================================
 
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { normalizarTelefono } from "../config.js";
@@ -39,6 +40,8 @@ import { KapsoClient } from "../kapso/client.js";
 import { correrCuentaCorriente } from "../services/corridaCuentaCorriente.js";
 import { construirRecordatorio } from "../services/recordatorioCobro.js";
 import { checkConfirmationToken, computeConfirmationToken } from "../write/confirm.js";
+import { identidadDeEscritura } from "./write/shared.js";
+import { remitenteSchema } from "../security/remitentes.js";
 import {
   WRITE_ANNOTATIONS,
   errorToolResult,
@@ -83,6 +86,15 @@ const inputShape = {
     .string()
     .optional()
     .describe("El token devuelto por el dry-run. Va tal cual, sin modificar."),
+  /**
+   * El remitente ya verificado por la barrera de entrada.
+   *
+   * Declarado acá aunque `guardarEntrada` se lo agregue al schema de toda tool:
+   * el input se parsea con `z.object`, que DESCARTA lo que no esté en el shape.
+   * Sin esta línea el handler nunca lo ve —llega y se tira en silencio— y el
+   * `confirmation_token` volvería a no tener dueño. Ver `identidadDeEscritura`.
+   */
+  remitente: remitenteSchema,
   nota: z
     .string()
     .max(300)
@@ -180,9 +192,29 @@ const outputShape = {
   warnings: z.array(z.string()),
 };
 
-/** Clave del registro anti-duplicado: un recordatorio por cliente, número y día. */
+/**
+ * Clave del registro anti-duplicado: un recordatorio por cliente, número y día.
+ *
+ * EL PAR IDENTIFICATORIO VA HASHEADO, Y NO ES PARANOIA.
+ *
+ * Esta clave se escribe TAL CUAL al registro persistente de idempotencia
+ * (`idempotency.ts` la appendea al archivo). En claro, cada línea de ese archivo
+ * era el RUT de un cliente y el teléfono de una persona: una lista de a quién se
+ * le reclama plata, en texto plano, creciendo sola. Las otras siete tools de
+ * escritura no tienen el problema porque derivan su clave de `claveDesdeToken`,
+ * que ya hashea; esta es la excepción justamente porque no pasa por el runner.
+ *
+ * El DÍA queda en claro a propósito: es lo que hace legible "cuántos
+ * recordatorios salieron el martes" sin identificar a nadie, y no dice de quién.
+ *
+ * La semántica anti-duplicado no cambia: mismo cliente + mismo número + mismo
+ * día siguen dando la misma clave. Sí cambia el VALOR, así que un recordatorio
+ * mandado hoy con la versión vieja no se reconoce como duplicado: la ventana de
+ * corte es de un día y se cierra sola.
+ */
 export function claveRecordatorio(rut: string, destinatario: string, hoyIso: string): string {
-  return `recordatorio_cobro:${rut}:${destinatario}:${hoyIso}`;
+  const huella = createHash("sha256").update(`${rut}\u0000${destinatario}`).digest("hex").slice(0, 32);
+  return `recordatorio_cobro:${huella}:${hoyIso}`;
 }
 
 export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): Promise<ToolResult> {
@@ -252,6 +284,12 @@ export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): 
     // y la confirmación entró un cobro, el mensaje cambia y el token deja de
     // coincidir. Es exactamente lo que se quiere que pase.
     const payload = { destinatario: destino, mensaje: recordatorio.mensaje };
+    // A QUIÉN PERTENECE ESTE TOKEN. Misma identidad que usan las siete tools de
+    // escritura, y por el mismo motivo: dentro de una empresa puede haber más de
+    // un número autorizado, y sin esto el token que previsualizó uno lo confirma
+    // otro. Acá el daño no es un CFE sino un mensaje a un cliente reclamándole
+    // plata — irreversible de cara al cliente, aunque no ante DGI.
+    const identidad = identidadDeEscritura(ctx, a.remitente);
     const base = {
       dry_run: !a.confirm,
       mensaje: recordatorio.mensaje,
@@ -274,6 +312,8 @@ export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): 
           ENDPOINT_TOKEN,
           config.environment,
           payload,
+          Date.now(),
+          identidad,
         ),
         message_id: null,
         warnings: [
@@ -302,6 +342,7 @@ export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): 
       ENDPOINT_TOKEN,
       config.environment,
       payload,
+      { identidad },
     );
     if (!check.ok) {
       const extra =

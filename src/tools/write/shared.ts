@@ -220,6 +220,13 @@ export interface RunWriteParams {
  * Devuelve la clave OPACA del store, no el teléfono: el valor termina dentro del
  * hash de un token que viaja por el modelo (ver `confirm.ts`).
  *
+ * SE EXPORTA porque hay una octava tool que emite y verifica un
+ * `confirmation_token` sin pasar por `runWriteOperation`:
+ * `biller_recordatorio_cobro`. No escribe un CFE —manda un WhatsApp— así que no
+ * usa el runner, pero su token autoriza igual una acción irreversible de cara
+ * al cliente. Sin esta identidad, dentro de una misma empresa el token que
+ * previsualizó un número lo podía confirmar otro.
+ *
  * TRES CASOS EN LOS QUE DA `null`, y los tres tienen que dar null:
  *  - sin Kapso configurado: no hay canal no confiable, y el modo escritorio
  *    valida igual que antes de este cambio;
@@ -232,7 +239,7 @@ export interface RunWriteParams {
  *    No abre nada: el ciclo sin remitente es consistente consigo mismo, pero un
  *    token emitido POR alguien sigue sin validar sin ese alguien.
  */
-function identidadDeEscritura(ctx: ToolContext, remitente: string | undefined): string | null {
+export function identidadDeEscritura(ctx: ToolContext, remitente: string | undefined): string | null {
   try {
     if (!requiereRemitente(ctx.getConfig())) return null;
     const verificado = normalizarTelefono(remitente ?? "");
