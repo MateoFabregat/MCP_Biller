@@ -11,8 +11,9 @@ import {
   resolverClaveSesion,
   crearBorradorStore,
   fusionarEstado,
+  fusionarItems,
 } from "../src/kapso/borradorStore.js";
-import type { EstadoEmision } from "../src/kapso/emision.js";
+import { itemIncompleto, type EstadoEmision } from "../src/kapso/emision.js";
 import { handleEmisionGuiada } from "../src/tools/emisionGuiada.js";
 import { handleEmitirComprobante } from "../src/tools/write/emitirComprobante.js";
 import { makeCtx } from "./helpers.js";
@@ -761,5 +762,38 @@ describe("la clave de sesión separa empresas", () => {
     expect(store.leer(id)?.estado.moneda).toBe("UYU");
     // Y el id devuelto vuelve a caer en su propia sesión.
     expect(store.clave(id)).toBe(id);
+  });
+});
+
+// El 0 heredado: la marca `precio_copiado` justifica un precio 0 SOLO mientras
+// la línea siga siendo la que se copió del CFE. Si cambió, un 0 sin preguntar
+// es una línea facturada de menos, en silencio.
+describe("precio_copiado no sobrevive a una línea que cambió", () => {
+  it("un precio explícito borra la marca", () => {
+    const r = fusionarItems(
+      [{ concepto: "Servicio", precio: 0, precio_copiado: true }],
+      [{ precio: 500 }],
+    );
+    expect(r[0]!.precio).toBe(500);
+    expect(r[0]!.precio_copiado).toBeUndefined();
+  });
+
+  it("un concepto distinto en la misma posición borra la marca", () => {
+    const r = fusionarItems(
+      [{ concepto: "Servicio bonificado", precio: 0, precio_copiado: true }],
+      [{ concepto: "Otra cosa" }],
+    );
+    expect(r[0]!.precio_copiado).toBeUndefined();
+    // Y por lo tanto el flujo vuelve a pedir el precio en vez de emitir $0.
+    expect(itemIncompleto(r[0]!)).toBe(true);
+  });
+
+  it("el mismo concepto sin precio la conserva: sigue siendo la línea copiada", () => {
+    const r = fusionarItems(
+      [{ concepto: "Servicio", precio: 0, precio_copiado: true }],
+      [{ concepto: "Servicio", cantidad: 2 }],
+    );
+    expect(r[0]!.precio_copiado).toBe(true);
+    expect(itemIncompleto(r[0]!)).toBe(false);
   });
 });
