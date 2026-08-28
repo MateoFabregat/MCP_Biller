@@ -112,9 +112,10 @@ archivo son los backlogs previos, todavía válidos.
   archivo). El README manda `npx biller-mcp-server` que da 404. Nombre libre.
 - [ ] **`.env.example` dice "6 tools"** (son 27+7) y no está bajo el guard de
   `conteosDoc`. Sumarlo. El conteo de tests en docs (1050/1376) también divergió.
-- [ ] **Alta plug-and-play** (ver el plan en la respuesta de la sesión): fase 1
-  `onboard --crear` que deriva RUT/sucursal de la API; fase 2 recarga en caliente
-  del registro (hoy dar de alta una empresa = reiniciar todas); fase 3 formulario.
+- [x] **Alta plug-and-play, fase 1**: `onboard --crear` deriva RUT/sucursal de
+  la API, genera la credencial, valida el registro entero antes de escribir
+  (0600) y verifica contra la API real. Fases 2 (recarga en caliente) y 3
+  (OAuth/remoto) diseñadas en detalle en `docs/PLAN_PLUG_AND_PLAY.md`.
 - [ ] **Pista 2 (remoto + OAuth)**: Resource Server contra un IdP de tercero con
   DCR (no construir Authorization Server propio). Reusa `autenticarConTenants`
   como segunda rama. Escritura remota queda para el final (no hay `remitente`

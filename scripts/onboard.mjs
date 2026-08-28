@@ -29,15 +29,30 @@
 //                                                 # mismo código que el server)
 //   node scripts/onboard.mjs --json          # salida para un pipeline
 //
-// NO ESCRIBE NADA. Solo GET: no emite, no da de alta, no manda mensajes. Se
-// puede correr contra producción sin miedo.
+//   node scripts/onboard.mjs --crear --nombre="Panadería Rivera"
+//       # ALTA de una empresa nueva: pregunta el token y el ambiente, deriva el
+//       # RUT y la sucursal de la propia API, genera la credencial de entrada,
+//       # la escribe en BILLER_TENANTS_PATH (0600) validando el registro ENTERO
+//       # con el validador real ANTES de tocar el disco, y verifica el alta
+//       # contra la API. Flags para pipelines: --token= --ambiente= --sucursal=
+//       # --id= --registro= --max-uyu= --max-usd=
+//       # Las barreras humanas (allowlists, capability mode, escritura) NO se
+//       # autocompletan jamás: quedan listadas como pendientes.
+//
+// En modo verificación NO ESCRIBE NADA (solo GET). En modo --crear escribe UNA
+// cosa: la entrada nueva en el archivo del registro, y solo si el registro
+// resultante valida entero.
 // =============================================================================
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
 const modoJson = args.includes("--json");
-const tenantPedido = (args.find((a) => a.startsWith("--tenant=")) ?? "").split("=")[1] ?? null;
+const modoCrear = args.includes("--crear");
+const flag = (nombre) => (args.find((a) => a.startsWith(`--${nombre}=`)) ?? "").split("=").slice(1).join("=") || null;
+let tenantPedido = flag("tenant");
 
 // --- Entorno efectivo (con overlay del tenant si se pidió uno) --------------
 
@@ -184,9 +199,242 @@ function haceDias(dias) {
   return d.toISOString().slice(0, 10);
 }
 
+// --- El modo --crear: dar de alta escribiendo, no solo verificando ----------
+//
+// EL PRINCIPIO QUE ORDENA QUÉ SE AUTOMATIZA: se deriva lo que sale de un hecho
+// verificable (el RUT y las sucursales vienen en los comprobantes que la API ya
+// devuelve con el token). NO se automatiza ninguna barrera: capability mode,
+// flags de escritura, topes de monto y las dos allowlists de teléfonos quedan
+// vacíos a propósito — un alta que los rellena sola es un alta que le regala a
+// una empresa nueva el permiso de emitir en producción. Es el mismo criterio de
+// VARIABLES_QUE_NO_SE_HEREDAN, un nivel más arriba.
+//
+// Y la regla del null honesto: si de 90 días salen TRES sucursales, no se elige
+// la más frecuente — se listan y se pregunta. Ante la duda no se elige.
+
+/** Preguntas por stdin con cola de líneas (mismo patrón que cli/init: no pierde
+ *  respuestas que llegan por pipe, y EOF corta con error en vez de colgarse). */
+function crearPreguntador() {
+  const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: process.stdin.isTTY === true });
+  const cola = [];
+  const esperas = [];
+  let cerrado = false;
+  rl.on("line", (l) => (esperas.length > 0 ? esperas.shift()(l) : cola.push(l)));
+  rl.on("close", () => {
+    cerrado = true;
+    for (const e of esperas.splice(0)) e(null);
+  });
+  return {
+    cerrar: () => rl.close(),
+    pregunta: async (texto) => {
+      process.stderr.write(texto);
+      const enCola = cola.shift();
+      if (enCola !== undefined) {
+        process.stderr.write("\n");
+        return enCola;
+      }
+      if (cerrado) fatal("Se terminó la entrada antes de responder todas las preguntas.");
+      const linea = await new Promise((res) => esperas.push(res));
+      if (linea === null) fatal("Se terminó la entrada antes de responder todas las preguntas.");
+      return linea;
+    },
+  };
+}
+
+/** "Panadería Rivera S.R.L." -> "panaderia-rivera-srl" (el charset que exige el registro). */
+function slug(nombre) {
+  const s = nombre
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return s === "" ? null : s;
+}
+
+async function crear() {
+  // El .env del proceso se lee igual que en el modo verificación: de ahí salen
+  // BILLER_TENANTS_PATH y el entorno base sobre el que se aplica el overlay.
+  const { env: envBase } = await cargarEnv();
+  const preguntador = crearPreguntador();
+  const { pregunta } = preguntador;
+
+  process.stderr.write("Alta de una empresa nueva en el registro multi-empresa.\n\n");
+
+  // 1. Nombre, ambiente y token (flags para pipelines, preguntas para humanos).
+  let nombre = flag("nombre");
+  while (!nombre || slug(nombre) === null) {
+    nombre = (await pregunta("Nombre de la empresa (como lo conoce el operador): ")).trim();
+  }
+  const id = flag("id") ?? slug(nombre);
+
+  let ambiente = flag("ambiente");
+  if (ambiente !== "test" && ambiente !== "produccion") {
+    const r = (await pregunta("¿Ambiente? [1] test (recomendado)  [2] producción: ")).trim();
+    ambiente = r === "2" ? "produccion" : "test";
+  }
+  const baseUrl = ambiente === "produccion" ? "https://biller.uy" : "https://test.biller.uy";
+
+  let apiToken = flag("token");
+  while (!apiToken) {
+    apiToken = (await pregunta(`Token de la API de Biller de ${nombre} (${baseUrl}): `)).trim();
+  }
+
+  // 2. Sondar la API con ESE token: de acá salen el RUT y las sucursales que
+  //    hasta hoy se copiaban a mano (y se copiaban mal: el clásico sucursal=1).
+  const envSonda = { BILLER_API_BASE_URL: baseUrl, BILLER_API_TOKEN: apiToken };
+  process.stderr.write("\nSondeando la API de Biller (90 días de comprobantes, solo lectura)…\n");
+  const sonda = await get(envSonda, "/v2/comprobantes/obtener", {
+    fecha_desde: `${haceDias(90)} 00:00:00`,
+    fecha_hasta: `${haceDias(0)} 23:59:59`,
+  });
+  if (sonda.status === 401 || sonda.status === 403) {
+    fatal(`La API contestó ${sonda.status}: el token no sirve. Revisalo en ${baseUrl}/api/tokens.`);
+  }
+  if (sonda.status >= 400) {
+    process.stderr.write(
+      `! La sonda contestó ${sonda.status} (con rangos grandes Biller devuelve 500 en vez de paginar): ` +
+        "el RUT y la sucursal no se derivan esta vez, se pueden agregar después.\n",
+    );
+  }
+  const comprobantes = Array.isArray(sonda.cuerpo) ? sonda.cuerpo : [];
+
+  const ruts = [...new Set(comprobantes.map((c) => String(c.rut_emisor ?? "").trim()).filter(Boolean))];
+  const sucursales = [...new Set(comprobantes.map((c) => String(c.sucursal ?? "").trim()).filter(Boolean))];
+
+  // El RUT: un token es de UNA empresa, así que más de un rut_emisor sería un
+  // dato roto — se avisa y no se elige.
+  let rut = null;
+  if (ruts.length === 1) rut = ruts[0];
+  else if (ruts.length > 1) {
+    process.stderr.write(`! La API devolvió ${ruts.length} RUT emisores distintos (${ruts.join(", ")}): no se configura ninguno.\n`);
+  } else {
+    process.stderr.write("! Sin comprobantes en 90 días: el RUT no se puede derivar (se puede agregar después).\n");
+  }
+
+  // La sucursal: una → default; varias → SE PREGUNTA; cero → null honesto.
+  let sucursal = flag("sucursal");
+  if (sucursal === null) {
+    if (sucursales.length === 1) {
+      sucursal = sucursales[0];
+      process.stderr.write(`✓ Una sola sucursal en 90 días: ${sucursal}. Queda como default.\n`);
+    } else if (sucursales.length > 1) {
+      const r = (
+        await pregunta(
+          `La empresa facturó desde ${sucursales.length} sucursales (${sucursales.join(", ")}). ` +
+            "¿Cuál es la principal? (el ID, o Enter para no fijar ninguna): ",
+        )
+      ).trim();
+      sucursal = r === "" ? null : r;
+    }
+  }
+
+  // 2b. Los topes de monto: si el proceso los define, el registro EXIGE que cada
+  //     empresa declare el suyo (heredar aplica el número de otro; borrar deja
+  //     sin freno). No se autocompleta: se PREGUNTA, que es lo que el diseño
+  //     pide — el operador elige, explícito y por empresa.
+  const topesProceso = Object.keys(envBase).filter(
+    (k) => k.startsWith("BILLER_MAX_MONTO_") && (envBase[k] ?? "").trim() !== "",
+  );
+  const topes = {};
+  if (topesProceso.length > 0) {
+    for (const clave of topesProceso) {
+      const moneda = clave.slice("BILLER_MAX_MONTO_".length);
+      let valor = flag(`max-${moneda.toLowerCase()}`);
+      while (valor === null || !/^[0-9]+$/.test(valor)) {
+        valor = (
+          await pregunta(
+            `Tope máximo por emisión en ${moneda} para ${nombre} ` +
+              `(el proceso usa ${envBase[clave]}; escribí el número, sin puntos): `,
+          )
+        ).trim();
+      }
+      topes[clave] = valor;
+    }
+  }
+
+  // 3. Credencial de entrada al MCP: generada, no inventada por un humano.
+  const authToken = randomBytes(32).toString("hex");
+
+  // 4. La entrada del registro. Las cuatro barreras humanas NO van: quedan como
+  //    la lista de pendientes que se imprime al final.
+  const entrada = {
+    id,
+    nombre,
+    auth_token: authToken,
+    env: {
+      BILLER_API_TOKEN: apiToken,
+      BILLER_API_BASE_URL: baseUrl,
+      ...(rut !== null ? { BILLER_DEFAULT_EMPRESA_RUT: rut } : {}),
+      ...(sucursal !== null && sucursal !== undefined ? { BILLER_DEFAULT_SUCURSAL_ID: sucursal } : {}),
+      ...topes,
+    },
+  };
+
+  // 5. Al ARCHIVO, nunca al JSON inline: registry.ts ya explica por qué (un JSON
+  //    con veinte tokens dentro de una variable termina copiado con uno de menos).
+  const rutaRegistro = flag("registro") ?? ((envBase.BILLER_TENANTS_PATH ?? "").trim() || null);
+  if (!rutaRegistro) {
+    fatal(
+      "No sé DÓNDE escribir el registro: configurá BILLER_TENANTS_PATH (o pasá --registro=ruta). " +
+        "El registro va en un archivo, no en BILLER_TENANTS_JSON inline.",
+    );
+  }
+  let existentes = [];
+  if (existsSync(rutaRegistro)) {
+    try {
+      existentes = JSON.parse(readFileSync(rutaRegistro, "utf8"));
+    } catch (err) {
+      fatal(`El registro existente (${rutaRegistro}) no es JSON válido: ${err.message}. No lo piso.`);
+    }
+    if (!Array.isArray(existentes)) fatal(`El registro existente (${rutaRegistro}) no es un array. No lo piso.`);
+  }
+  const candidato = [...existentes, entrada];
+
+  // 6. Validar el registro ENTERO con el validador REAL antes de escribir una
+  //    letra: token de Biller repetido, id repetido, archivos compartidos — todo
+  //    lo que haría que el server no arranque falla ACÁ, con el disco intacto.
+  const { construirRegistro, entornoDe } = await cargarRegistroTenants();
+  let registro;
+  try {
+    registro = construirRegistro(candidato, envBase);
+  } catch (err) {
+    fatal(`El alta dejaría un registro con el que el server NO arranca:\n      ${err.message}`);
+  }
+
+  // Escribir y RELEER: lo que se verifica es lo que quedó en el disco.
+  writeFileSync(rutaRegistro, `${JSON.stringify(candidato, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  const releido = construirRegistro(JSON.parse(readFileSync(rutaRegistro, "utf8")), envBase);
+  const tenant = releido.tenants.find((t) => t.id === id);
+
+  process.stderr.write(
+    `\n✓ Empresa "${nombre}" agregada a ${rutaRegistro} (id: ${id}).\n\n` +
+      "CREDENCIAL DE ENTRADA (se muestra UNA vez; es lo que va en el cliente MCP como Bearer):\n\n" +
+      `  ${authToken}\n\n` +
+      "QUEDA PENDIENTE, A MANO Y A CONCIENCIA (ninguna barrera se autocompleta):\n" +
+      "  · BILLER_REMITENTES_AUTORIZADOS / KAPSO_* — quién puede preguntar y el canal de WhatsApp\n" +
+      "  · BILLER_CAPABILITY_MODE / BILLER_WRITE_ENABLED — hoy queda en solo lectura\n" +
+      (Object.keys(topes).length === 0 ? "  · BILLER_MAX_MONTO_UYU / _USD — topes de emisión\n" : "") +
+      "  · BILLER_VALOR_UI + _FECHA — el umbral de 5.000 UI\n\n" +
+      "Verificando el alta contra la API real…\n",
+  );
+
+  preguntador.cerrar();
+  // La verificación usa el MISMO entorno que va a usar el server: overlay real.
+  return { env: entornoDe(tenant, envBase), nombre: tenant.nombre };
+}
+
 async function main() {
+  if (modoCrear) {
+    const creado = await crear();
+    return await verificar(creado.env, creado.nombre);
+  }
   const { env, tenant } = await cargarEnv();
   const nombre = tenant?.nombre ?? tenant?.id ?? "(la empresa del entorno)";
+  return await verificar(env, nombre);
+}
+
+async function verificar(env, nombre) {
 
   // 1. Lo mínimo, antes de gastar una request.
   if (!env.BILLER_API_BASE_URL) fatal("Falta BILLER_API_BASE_URL.");
