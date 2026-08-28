@@ -30,6 +30,7 @@
 // =============================================================================
 
 import { hoyIsoUy } from "../dist/services/fechaUy.js";
+import { clasificarEstado, ESTADO_ACEPTADO, ESTADO_ENVIO_NO_CORRESPONDE } from "../dist/services/estadoDgi.js";
 
 const ESC = "";
 const OK = `${ESC}[32m✓${ESC}[0m`;
@@ -81,6 +82,49 @@ async function get(ruta, params = {}) {
 const hoy = hoyIsoUy();
 
 console.log(`Contrato de la API de Biller — ${BASE}\n`);
+
+/**
+ * Una muestra reciente de comprobantes, en ventanas.
+ *
+ * NO es `{ fecha_desde, fecha_hasta }`: esos son los parámetros de
+ * `/v2/comprobantes/recibidos/obtener`. `/v2/comprobantes/obtener` filtra con
+ * `desde` y `hasta`, y los nombres que no conoce los IGNORA — así que la
+ * consulta que este script hacía antes devolvía lo que la API quisiera darle
+ * (en la práctica, nada). El chequeo de imputación de recibos venía diciendo
+ * "no hay recibos en el ambiente" con la cuenta llena de recibos: un "sin
+ * verificar" que parecía un dato del ambiente y era un bug del test.
+ *
+ * En ventanas porque la API no pagina y devuelve 500 con rangos amplios.
+ */
+async function muestraReciente(dias = 90) {
+  const fin = new Date(`${hoy}T00:00:00Z`);
+  const ventanas = [];
+  for (let i = 0; i < Math.ceil(dias / 7); i += 1) {
+    const hasta = new Date(fin.getTime() - i * 7 * 86400000);
+    const desde = new Date(hasta.getTime() - 6 * 86400000);
+    ventanas.push({ desde: desde.toISOString().slice(0, 10), hasta: hasta.toISOString().slice(0, 10) });
+  }
+  const porId = new Map();
+  const sueltos = [];
+  for (const v of ventanas) {
+    const r = await get("/v2/comprobantes/obtener", {
+      desde: `${v.desde} 00:00:00`,
+      hasta: `${v.hasta} 23:59:59`,
+    });
+    if (r.status >= 400) continue;
+    const lista = Array.isArray(r.datos) ? r.datos : (r.datos?.comprobantes ?? []);
+    for (const c of lista) {
+      if (c?.id === undefined || c?.id === null) sueltos.push(c);
+      else porId.set(c.id, c);
+    }
+  }
+  return [...porId.values(), ...sueltos];
+}
+
+// Se trae UNA vez y la comparten los chequeos que necesitan datos reales.
+const MUESTRA = await muestraReciente();
+
+
 
 // --- 3. Un numero_interno inexistente devuelve 422, no lista vacía -----------
 //
@@ -165,13 +209,13 @@ console.log(`Contrato de la API de Biller — ${BASE}\n`);
 // Es lo que convirtió `biller_cuenta_corriente` de estimación FIFO a imputación
 // exacta. Depende de que el ambiente tenga algún recibo: si no hay, se dice.
 {
-  const r = await get("/v2/comprobantes/obtener", {
-    fecha_desde: "2020-01-01",
-    fecha_hasta: hoy,
-  });
-  const lista = Array.isArray(r.datos) ? r.datos : (r.datos?.comprobantes ?? []);
-  // 701/702/703 es la familia de recibos (e-Remito/Resguardo aparte).
-  const recibo = lista.find((c) => [701, 702, 703].includes(Number(c?.tipo_comprobante)));
+  // 701/702/703 es la familia de recibos (e-Remito/Resguardo aparte). Ojo: un
+  // recibo también puede venir como 101/111 con indicador_cobranza_propia=1.
+  const recibo = MUESTRA.find(
+    (c) =>
+      [701, 702, 703].includes(Number(c?.tipo_comprobante)) ||
+      Number(c?.indicador_cobranza_propia) === 1,
+  );
   if (recibo === undefined) {
     anotar("ojo", "Imputación de recibos: no hay ningún recibo en el ambiente para verificarlo");
   } else {
@@ -183,6 +227,124 @@ console.log(`Contrato de la API de Biller — ${BASE}\n`);
       "La imputación de un recibo viaja en items[].concepto",
       conConcepto ? undefined : "El recibo no trae conceptos: `cuenta_corriente` volvería a estimar FIFO.",
     );
+  }
+}
+
+// --- 5, 6 y 7. Los dos campos de los que depende TODO total de plata ---------
+//
+// POR QUÉ ESTOS DOS Y NO OTROS. `tasa_cambio` y `estado` no son dos campos más:
+// son los únicos dos de los que depende que un número sea correcto o esté mal
+// sin que nada falle.
+//
+//   · `estado` decide QUÉ SUMA. `clasificarEstado` normaliza mayúsculas y
+//     tildes, así que "aceptado dgi" sigue contando; lo que NO sobrevive es un
+//     texto DISTINTO ("Aceptado por DGI", "Autorizado"), que cae en
+//     `desconocido` y por lo tanto no suma. Si la API renombrara ese estado,
+//     todos los totales del proyecto se irían a CERO en silencio: sin
+//     excepción, sin warning, sin un solo test rojo.
+//   · `tasa_cambio` decide CUÁNTO VALE lo que está en dólares. Si dejara de
+//     venir, el equivalente en pesos no se rompe: queda incompleto y avisa. Si
+//     viniera como texto con coma decimal ("40,18"), `toNumberOrNull` daría
+//     null y pasaría lo mismo pero para todos los comprobantes a la vez.
+//
+// Los 1593 tests usan fixtures —que es lo correcto para ellos— y por lo tanto
+// ninguno puede ver este cambio. Esto sí.
+{
+  const lista = MUESTRA;
+
+  if (lista.length === 0) {
+    anotar("ojo", "tasa_cambio y estado: no hay comprobantes en el ambiente para verificarlos");
+  } else {
+    // --- 5. Los `estado` que devuelve la API siguen siendo los que conocemos --
+    const estados = [...new Set(lista.map((c) => c?.estado).filter((e) => typeof e === "string" && e.trim() !== ""))];
+    const desconocidos = estados.filter((e) => clasificarEstado(e) === "desconocido");
+    anotar(
+      desconocidos.length === 0 ? "ok" : "mal",
+      `Los estados de la API siguen siendo los conocidos (${estados.length} distintos)`,
+      desconocidos.length === 0
+        ? `Vistos: ${estados.join(" · ")}`
+        : `ESTADOS QUE NO RECONOCEMOS: ${desconocidos.join(" · ")}. Un estado desconocido NO SUMA en ` +
+          "ningún total: si alguno de estos es en realidad una venta buena, los totales están cortos.",
+    );
+
+    // Las variantes de escritura NO son un fallo —`clasificarEstado` normaliza
+    // mayúsculas y tildes— pero sí son una señal de que el texto se movió, y el
+    // día que se mueva de verdad esto es lo que lo va a mostrar.
+    const variantes = [
+      ...new Set(
+        lista
+          .map((c) => c?.estado)
+          .filter((e) => typeof e === "string" && clasificarEstado(e) === "aceptado" && e !== ESTADO_ACEPTADO),
+      ),
+    ];
+    const aceptados = lista.filter((c) => c?.estado === ESTADO_ACEPTADO).length;
+    anotar(
+      variantes.length === 0 ? "ok" : "ojo",
+      `El texto exacto "${ESTADO_ACEPTADO}" es el que llega (${aceptados} comprobantes)`,
+      variantes.length === 0
+        ? undefined
+        : `Además llegan variantes de escritura: ${variantes.join(" · ")}. Hoy suman igual (la ` +
+          "comparación normaliza mayúsculas y tildes), pero el texto se está moviendo.",
+    );
+
+    // --- 6. `tasa_cambio` sigue viniendo, y como número ---------------------
+    const extranjera = lista.filter((c) => {
+      const m = String(c?.moneda ?? "").trim().toUpperCase();
+      return m !== "" && m !== "UYU" && m !== "858" && m !== "UY";
+    });
+    if (extranjera.length === 0) {
+      anotar("ojo", "tasa_cambio: no hay comprobantes en moneda extranjera para verificarlo");
+    } else {
+      const sinTasa = extranjera.filter((c) => {
+        const t = typeof c?.tasa_cambio === "string" ? Number(c.tasa_cambio) : c?.tasa_cambio;
+        return typeof t !== "number" || !Number.isFinite(t) || t <= 0;
+      });
+      const tipos = [...new Set(extranjera.map((c) => typeof c?.tasa_cambio))];
+      anotar(
+        sinTasa.length === 0 ? "ok" : "mal",
+        `tasa_cambio llega en los ${extranjera.length} comprobantes en moneda extranjera (tipo: ${tipos.join("/")})`,
+        sinTasa.length === 0
+          ? undefined
+          : `${sinTasa.length} sin tasa usable. Esos comprobantes NO se convierten a pesos: el ` +
+            "equivalente en UYU queda incompleto (lo avisa, pero el número queda corto).",
+      );
+      // Una coma decimal rompe `toNumberOrNull` y se lleva puestos TODOS.
+      const conComa = extranjera.filter((c) => typeof c?.tasa_cambio === "string" && c.tasa_cambio.includes(","));
+      if (conComa.length > 0) {
+        anotar("mal", "tasa_cambio viene con COMA decimal", "Number() da NaN: ninguna factura en dólares se convierte.");
+      }
+    }
+
+    // --- 7. Cuánto pesa "Envío no corresponde" (la medición del ticket T05) --
+    //
+    // LO QUE ESTE SCRIPT IMPRIME: agregados, nunca por comprobante. Un total por
+    // moneda es el mismo número que el operador ve en su panel; una línea por
+    // comprobante traería cliente y RUT a una terminal que puede terminar en un
+    // log de CI. Si algún día se agrega un chequeo más, esa es la línea.
+    //
+    // No es un pass/fail: es el número que falta para decidir. Estos
+    // comprobantes son ventas VÁLIDAS que hoy no suman en ningún total, porque
+    // el criterio es "Aceptado DGI" a secas para coincidir con el panel de
+    // Biller. Cambiar eso mueve todos los números del proyecto, así que la
+    // decisión necesita saber cuánto es. Ver `esVentaValida` en estadoDgi.ts.
+    const noCorresponde = lista.filter((c) => clasificarEstado(c?.estado) === "no_corresponde_enviar");
+    if (noCorresponde.length === 0) {
+      anotar("ojo", `Sin comprobantes en "${ESTADO_ENVIO_NO_CORRESPONDE}" en este ambiente`);
+    } else {
+      const porMoneda = {};
+      for (const c of noCorresponde) {
+        const m = String(c?.moneda ?? "?").trim().toUpperCase() || "?";
+        const t = typeof c?.total === "string" ? Number(c.total) : c?.total;
+        if (typeof t === "number" && Number.isFinite(t)) porMoneda[m] = (porMoneda[m] ?? 0) + t;
+      }
+      const detalle = Object.entries(porMoneda).map(([m, t]) => `${m} ${t.toFixed(2)}`).join(" · ");
+      anotar(
+        "ojo",
+        `"${ESTADO_ENVIO_NO_CORRESPONDE}": ${noCorresponde.length} comprobante(s) fuera de los totales`,
+        `Suman ${detalle}. Son ventas válidas que HOY no cuentan. Comparalo contra el panel de ` +
+          "Biller: si Biller las muestra, el criterio de los totales está corto (ticket T05).",
+      );
+    }
   }
 }
 
