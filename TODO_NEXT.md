@@ -5,6 +5,112 @@ Cosas pendientes para la siguiente iteración, ordenadas por prioridad.
 Lo que ya está hecho queda marcado `[x]` con el archivo donde vive, en vez de
 borrarse: saber qué se resolvió y dónde vale más que una lista corta.
 
+## Analítica de serie temporal (agosto 2026)
+
+### Hecho
+
+- [x] **`scripts/exportar-analitica.mjs`** — extracción de N meses a un JSON, y
+  con `--html` un tablero autocontenido (mes a mes, mismo mes del año anterior,
+  zafralidad, clientes). GET-only por estructura, igual que `contrato.mjs`.
+  **No calcula plata**: importa `resumirFacturacion` y `filterEmitidos` de
+  `dist/`, o sea las mismas funciones que contestan por MCP, justamente para que
+  no exista un segundo criterio de qué es una venta. Verifica antes de escribir
+  que el total del período **sea** la suma de los meses, y si no lo es escribe el
+  aviso arriba de todo en vez de publicar un archivo que se contradice. El
+  archivo sale 0600 y está en `.gitignore`: es la contabilidad de la empresa en
+  claro.
+- [x] **El contrato ahora cubre los dos campos de los que depende todo total.**
+  `estado` (comparación exacta contra `"Aceptado DGI"`: un cambio de texto en la
+  API vaciaría todos los totales **en silencio**) y `tasa_cambio` (que siga
+  viniendo, y como número: una coma decimal se llevaría puesta la conversión de
+  todas las facturas en dólares). Los ~1600 tests usan fixtures y por
+  construcción no pueden ver esto.
+- [x] **El contrato mide "Envío no corresponde"** (cuántos y cuánto suman) para
+  que la decisión del ticket T05 se tome con un número y no de memoria.
+
+### OJO: la serie mensual NO necesita una tool nueva
+
+`biller_resumen_facturacion_periodo` con `agrupar_por: ["mes"]` y `desde`/`hasta`
+explícitos **ya** devuelve la serie: la dimensión `"mes"` existe en
+`DIMENSIONES` y `valorDimension` la resuelve por `fecha_emision.slice(0,7)`. Se
+estuvo a punto de escribir una `biller_serie_mensual` que habría sido una segunda
+implementación del mismo corte. Lo único que el grupo NO trae es el equivalente
+en pesos y los excluidos por estado; por eso el script corre un
+`resumirFacturacion` **por mes** en vez de un `agrupar_por` de una pasada.
+
+### Lo que dejaron las dos revisiones del propio arreglo (ago-2026)
+
+El fix de la tasa de la nota de crédito **abrió seis puertas nuevas** para
+acreditar mal, y las encontró la revisión, no la suite. Todas cerradas y con
+test; se listan porque son el mapa de por dónde se rompe este módulo:
+
+- [x] un ítem con `indicador_facturacion: null` contaba como unanimidad y
+  acreditaba el total entero a la tasa del resto (610 exentos al 22%);
+- [x] el camino por ítems iba **antes** que las guardas de "otra tasa" y "el
+  desglose no cierra", así que las hacía inalcanzables;
+- [x] `total` null o 0 emitía una nota de crédito por **$0**: un CFE real que
+  consume numeración y no anula nada;
+- [x] el epsilon de 0,02 no contemplaba que dividir por 0,22 **amplifica el
+  redondeo 4,55 veces**: dejaba la nota un centavo corta, o reportaba "no cierra"
+  sobre facturas sanas de diez líneas. Ahora el residuo se absorbe en la línea
+  gravada más grande y solo se rechaza lo que el redondeo no explica;
+- [x] faltaba `tasa_cambio` en el cuerpo: sin él Biller usa la cotización de
+  HOY, no la del original (~1.600 pesos de IVA de más en una factura de U$S 10.000);
+- [x] una exportación se acreditaba con indicador 1 (exento) en vez de 10.
+
+Y de la revisión de seguridad:
+
+- [x] `claveRecordatorio` escribía **RUT y teléfono en claro** al registro
+  persistente de idempotencia, una línea por recordatorio. Ahora va hasheado; el
+  día queda en claro (no identifica y hace legible el archivo).
+- [x] `--out` de `exportar-analitica.mjs` era libre y `.gitignore` protege por
+  patrón: `--out=./resumen.json` dejaba la contabilidad sin ignorar dentro del
+  repo. Ahora exige `analitica-*.json`, y valida **antes** de pedir nada.
+
+### Falta, de esas mismas revisiones
+
+- [ ] **El invariante del `confirmation_token` volvió a ser una convención.**
+  Antes era estructural ("si pasás por `runWriteOperation`, quedás atado");
+  ahora `biller_recordatorio_cobro` tiene que **acordarse** de llamar a
+  `identidadDeEscritura`, y en dos lugares (emitir y verificar). La tool número
+  9 que emita su propio token puede olvidarse, y falla hacia el lado inseguro.
+  Dos arreglos posibles, el segundo es más barato: (a) extraer el CICLO —
+  `tokenDeConfirmacion(ctx, {...})` que devuelva `{emitir, verificar}` con la
+  identidad adentro, y que lo usen tanto el runner como esta tool; la costura
+  correcta no es "escribir un CFE" sino "emitir un confirmation_token";
+  (b) una regla estática al estilo `scripts/check-readonly.mjs` que falle el
+  build si un archivo llama a `computeConfirmationToken` sin llamar también a
+  `identidadDeEscritura`.
+- [ ] **`cuerpo_sugerido` sale con las marcas `⟦dato-no-confiable⟧` adentro**
+  (preexistente). Es *exactamente* "algo pensado para volver a entrar en un
+  payload" y usa dos claves de `CAMPOS_NO_CONFIABLES` (`razon_referencia`,
+  `concepto`). `limpiarMarcasProfundo` las saca y avisa, así que no llega a un
+  CFE — pero el caso mixto pasó de 1 ítem a hasta 3, o sea tres veces más
+  superficie para ese warning.
+- [ ] **La identidad del token vale lo que valga el cliente.** Un modelo (o una
+  inyección) puede afirmar ser **otro número ya autorizado** y `verificarRemitente`
+  lo acepta. El binding separa a dos humanos autorizados bajo un cliente honesto;
+  no protege contra el reenvío deliberado. Vale para las ocho tools, no es nuevo,
+  pero el comentario de `recordatorioCobro.ts` promete un poco más de lo que da.
+- [ ] **Las retenciones/percepciones del original no se revierten** en la nota
+  sugerida (hoy se avisa, no se resuelve).
+
+### Falta — y necesita una decisión, no código
+
+- [ ] **Productos y descuento por cliente siguen bloqueados.** Es el N+1 de
+  `items`, y lo desbloquea el store de `docs/STORE.md` (Fase 1 de
+  `docs/PLAN_V2.md`, cero líneas escritas). El brainstorm lo bajó a Ola 4 con el
+  argumento de que era "infraestructura especulativa para un solo caso de uso" —
+  **ese argumento ya no aplica**: con la analítica de serie encima, los casos son
+  productos, descuento real por cliente, rubro y cobertura completa del período.
+  Lo que sigue abierto es lo que el propio doc marca en su §6: el store deja la
+  contabilidad completa **en un archivo sin cifrar**, y hay que decidir permisos,
+  cifrado en reposo y qué pasa con ese archivo cuando la empresa se va. Es
+  decisión del dueño del producto, no del que teclea.
+- [ ] **Rubro del cliente.** Derivable hoy: `GET /v2/dgi/empresas/actividad-empresarial`
+  por RUT. **Rate limit de 1 req/s** (las consultas a DGI van por el límite
+  estricto, no por el de 30), así que se cachea por cliente o no se hace.
+
 ## Auditoría integral (agosto 2026) — cuatro revisiones en paralelo
 
 Seguridad, fiscal, arquitectura (CTO) y capa conversacional revisaron todo el
@@ -45,20 +151,30 @@ archivo son los backlogs previos, todavía válidos.
 
 ### P0 fiscal — falta (cada uno mueve un número, commit propio)
 
-- [ ] **`biller_recordatorio_cobro` no ata el `confirmation_token` a la
-  identidad** (`src/tools/recordatorioCobro.ts:273,300`): llama a
-  `computeConfirmationToken`/`checkConfirmationToken` sin el 5º argumento, a
-  diferencia de `tools/write/shared.ts`. Intra-empresa, otro usuario podría
-  confirmar un envío que no previsualizó. Exportar `identidadDeEscritura`.
+- [x] **`biller_recordatorio_cobro` no ata el `confirmation_token` a la
+  identidad**: hecho (ago-2026). Se exportó `identidadDeEscritura` de
+  `tools/write/shared.ts` y se pasa como 5º argumento en las dos fases.
+  Además hubo que **declarar `remitente` en el inputShape**: `z.object`
+  descartaba el campo que agrega la barrera, así que la identidad habría sido
+  `null` siempre y el arreglo no habría atado nada. Fijado en
+  `tests/recordatorioCobro.test.ts` ("el token de un remitente NO lo puede
+  confirmar otro").
 - [ ] **NC recibida suma IVA compras en vez de restarlo.** `posicionIva.ts:166`
   y `proveedores.ts` no miran `r.tipo`: una compra anulada por el proveedor
   infla el crédito fiscal. **Antes de codear: confirmar con `npm run contrato`
   si Biller devuelve `total_iva` negativo en las NC recibidas** — si ya viene
   negativo, el fix es el opuesto. No tocar a ciegas.
-- [ ] **La NC que sugiere `biller_plan_anulacion` va siempre a 22%.**
-  `anulacion.ts:257`, `indicador_facturacion: 3` hardcodeado. Anular una factura
-  de tasa mínima (10%) sobreacredita IVA. Derivar el indicador del desglose del
-  original; si hay mezcla de tasas, no sugerir cuerpo.
+- [x] **La NC que sugiere `biller_plan_anulacion` va siempre a 22%**: hecho
+  (ago-2026). `lineasNota` (`src/services/anulacion.ts`) deriva la tasa en tres
+  escalones: (1) `items[].indicador_facturacion` del original cuando todas las
+  líneas comparten indicador —el dato, no una reconstrucción—; (2) si no hay
+  ítems, reconstruye el bruto de cada porción desde `tot_iva_tasa_min/bas/otra`
+  con `bruto = iva + iva/tasa`, válido porque el cuerpo va con
+  `montos_brutos: true`, y abre una línea por tasa más una exenta con el resto;
+  (3) si no puede saberlo —sin ítems y sin desglose, IVA a "otra tasa", o un
+  desglose que no cierra contra el total— devuelve `cuerpo_sugerido: null` con
+  el motivo, en vez de adivinar. `planAnulacion.ts` ahora pasa `iva` e `items`.
+  10 tests nuevos en `tests/anulacion.test.ts`.
 - [ ] **El aviso "receptor obligatorio" no llega al resumen que aprueba el
   humano.** Nace en `cfeSchema.ts:636` (`validarComprobante`) y va solo a
   `structuredContent.warnings` (el modelo), no al resumen de WhatsApp
@@ -72,16 +188,24 @@ archivo son los backlogs previos, todavía válidos.
 - [ ] **Línea a $0/negativa al final deja el flujo mudo.** Darle interactivo a
   la rama `precio` cuando el ítem ya tiene un número ≤0 (`emision.ts:1622`), con
   botones "dejarlo" / "sacar la línea". Cambia un test pineado a propósito.
-- [ ] **`precio_copiado` sobrevive a `items` explícitos** → línea a $0 emitida en
-  silencio. `borradorStore.ts:248`: `if (nuevo.precio !== undefined) delete
-  item.precio_copiado`. **Este mueve un número**, no es cosmético.
+- [x] **`precio_copiado` sobrevive a `items` explícitos**: hecho (ago-2026).
+  `fusionarItems` borra la marca con **dos** disparadores, no uno: precio
+  explícito (el prescripto) y **concepto distinto al previo**. El segundo es el
+  que cierra el agujero real: la fusión es posicional, así que la marca de la
+  línea 1 de la venta copiada le quedaba puesta a otro producto en esa posición,
+  y su 0 heredado pasaba por bonificación. 3 tests en `tests/borradorStore.test.ts`.
 - [ ] **Un producto queda como razón social en el paso `cliente`**
   ("coca 2 litros" → `razon_social: "coca"`). `extraerPedido.ts` + guarda en
   `borradorEmision.ts:308` para lectura posicional vs. explícita. Mueve un dato
   del CFE.
-- [ ] **`calidad()` del enrutador empata exacto con inclusión**
-  (`enrutador.ts:735`): en `read_only`, "me equivoqué con el recibo" cae en
-  `menu:anular` (una NC por un recibo). Puntuar exacto=3, inclusión=2, aprox=1.
+- [x] **`calidad()` del enrutador empata exacto con inclusión**: hecho
+  (ago-2026). `Busqueda` lleva ahora `precision: "exacto" | "inclusion"` —
+  `confianza` valía 1 para las dos y eran indistinguibles— y `calidad()` puntúa
+  exacto=3, inclusión=2, empate=1.5, aproximado=1. Verificado antes/después:
+  "me equivoqué con el recibo" en `read_only` pasó de `menu:anular` (una NOTA DE
+  CRÉDITO por un recibo) a `menu:cancelar_recibo`. El sinónimo exacto ya existía
+  en el catálogo; lo que fallaba era el desempate. 3 tests de regresión + caso de
+  eval (44/44).
 - [ ] **Ecos crudos**: `$-200` en pregunta/botón (`emision.ts:1577`), precios
   huérfanos sin formatear (`borradorEmision.ts:423`). Usar el helper `importe()`.
 - [ ] **`SKILL.md` §fechas**: dice pasar fechas concretas; debe decir usar los
@@ -99,17 +223,27 @@ archivo son los backlogs previos, todavía válidos.
 
 ### Arquitectura / deuda (CTO) — falta
 
-- [ ] **`CacheDetalles` comparte presupuesto entre empresas**
-  (`src/biller/traerDetalles.ts`): mismo bug ya arreglado en `cacheVentanas.ts`
-  (mapa único + FIFO en vez de LRU por empresa), en el cache más caro (391ms/miss).
-  Erosión del invariante 4. El arreglo está escrito al lado: portarlo.
+- [ ] **`CacheDetalles`: presupuesto compartido Y habilitación del proceso**
+  (`src/biller/traerDetalles.ts`). Reverificado ago-2026, son **dos** cosas y la
+  nota vieja solo nombraba la primera:
+  1. mapa único con techo global (1024) y desalojo **FIFO**, no LRU por empresa
+     como sí hace `cacheVentanas.ts`: una empresa que baja 500 detalles desaloja
+     las entradas calientes de las otras. No hay cruce de datos —la clave lleva
+     el `cacheId`—, es *noisy neighbor* en el cache más caro (~391 ms/miss);
+  2. `BILLER_CACHE_ENABLED` se lee de `process.env` **una vez al cargar el
+     módulo**, así que la resolución por empresa que sí tiene `CacheVentanas` no
+     aplica acá: apagar el cache para diagnosticar un total sigue sirviendo
+     detalles cacheados.
+  El arreglo del punto 1 está escrito al lado: portarlo.
 - [ ] **Zod v4 NO borra `transport/dialecto.ts`** (verificado contra el SDK
   1.29.0: llama a `toJsonSchemaCompat` sin `target`), y `inlinearRefs` no depende
   del dialecto. Corregir `README.md:677`, `docs/EQUIPO.md:100,254` que prometen
   lo contrario. El canario de `tests/dialecto.test.ts` es la única condición de
   retiro.
-- [ ] **Publicar en npm**: falta `npm publish` + `LICENSE` (MIT declarada, sin
-  archivo). El README manda `npx biller-mcp-server` que da 404. Nombre libre.
+- [x] **Publicar en npm**: hecho. `biller-mcp-server@0.1.1` está publicado y
+  se instala con `npx biller-mcp-server`; el 404 de esta nota ya no aplica.
+  Se agregó el `LICENSE` (MIT) que faltaba en el repo (`package.json` ya
+  declaraba la licencia, pero no había archivo).
 - [ ] **`.env.example` dice "6 tools"** (son 27+7) y no está bajo el guard de
   `conteosDoc`. Sumarlo. El conteo de tests en docs (1050/1376) también divergió.
 - [x] **Alta plug-and-play, fase 1**: `onboard --crear` deriva RUT/sucursal de
@@ -143,9 +277,9 @@ archivo son los backlogs previos, todavía válidos.
   Actualmente la idempotencia es in-process (in-memory por sesión).
   Si el servidor Biller lo soporta, la protección se extiende entre sesiones.
 
-- [ ] **Publicar como npm package o binario.**
-  Cambiar `private: true` en `package.json` cuando se quiera distribuir.
-  Agregar `README` con instrucciones de instalación global (`npm i -g biller-mcp`).
+- [x] **Publicar como npm package o binario.** Hecho: `biller-mcp-server@0.1.1`
+  publicado (`package.json` sin `private: true`), instalable con
+  `npx biller-mcp-server`. El README ya documenta el flujo de instalación.
 
 ## P0 — Hallazgos fiscales sin resolver (encontrados agosto 2026, NO tocados)
 
@@ -302,17 +436,13 @@ cada uno está acá para no tener que volver a encontrarlo.
   "no registrada" sea una decisión visible y no un olvido. Cuando Biller documente
   el GET de clientes propios, agregarla con el patrón de las otras de lectura.
 
-- [ ] **Webhook de Kapso multi-empresa.** `atenderWebhook`
-  (`src/transport/http.ts`) usa la config **del proceso**: el capability mode y
-  la allowlist de remitentes con los que decide son los de la empresa de las
-  variables de arriba, no los de la empresa a la que le escribieron. En un
-  despliegue con varios números eso es la barrera de entrada de A validando un
-  mensaje dirigido a B. El dato para resolverlo ya llega: el `phone_number_id`
-  del receptor viene en `value.metadata` del evento de Kapso, y `normalizarEvento`
-  (`src/kapso/webhook.ts`) lo **descarta**. Falta leerlo, mapearlo al tenant por
-  su `KAPSO_PHONE_NUMBER_ID` y atender con el contexto de esa empresa —y decidir
-  qué hacer con un `phone_number_id` que no mapea a ninguna, que tiene que ser
-  ignorar, no caer al proceso.
+- [x] **Webhook de Kapso multi-empresa**: YA ESTABA HECHO — esta nota estaba
+  desactualizada y se verificó en ago-2026. `normalizarEvento`
+  (`src/kapso/webhook.ts`) **sí** lee el `phone_number_id` antes de cualquier
+  salida temprana, `registry.ts` mantiene el índice `porPhoneNumberId`, y
+  `http.ts` atiende con el contexto de esa empresa (ruta
+  `/kapso/webhook/<tenant-id>`, y 404 en la ruta vieja con multi-empresa).
+  Cubierto por `tests/webhookMultiEmpresa.test.ts` (15 tests).
 
 - [ ] **Filtros nativos de moneda/cliente en emitidos.**
   Confirmar si la API acepta `moneda` o `rut_receptor` como query params;
@@ -363,13 +493,14 @@ cada uno está acá para no tener que volver a encontrarlo.
   por el que `BILLER_CACHE_ENABLED` se volvió la única variable imposible de
   pisar.
 
-- [ ] **Enchufar la habilitación de cache por empresa.**
-  `registrarHabilitacionCache` (`src/services/periodo.ts`) está exportada y
-  **nadie la llama**: el mecanismo quedó listo y el comportamiento de hoy
-  intacto, o sea que `BILLER_CACHE_ENABLED` sigue siendo del proceso. Falta que
-  quien arma el registro de tenants la registre resolviendo por `cacheId`.
-  Mientras tanto, apagar el cache para diagnosticar un total que no cierra en una
-  empresa lo apaga para las veinte.
+- [x] **Enchufar la habilitación de cache por empresa**: YA ESTABA HECHO para
+  `CacheVentanas` — nota desactualizada, verificada en ago-2026.
+  `ContextosPorTenant` la llama en su constructor (`src/tenants/contextos.ts`),
+  cubierto por `tests/cachePorEmpresa.test.ts`. **Queda vivo el otro lado**, que
+  se movió al ítem de `CacheDetalles` de la sección de arquitectura: ese cache
+  lee `BILLER_CACHE_ENABLED` de `process.env` una sola vez al cargar el módulo,
+  así que apagar el cache de una empresa no lo apaga ahí. Ojo también con el
+  singleton de módulo: manda la ÚLTIMA instancia construida (hoy hay una sola).
 
 - [ ] **Derivar las rutas de persistencia de un `BILLER_DATA_DIR` + `tenant.id`.**
   Hoy cada tenant tiene que declarar las tres a mano (`BILLER_AUDIT_LOG_PATH`,
