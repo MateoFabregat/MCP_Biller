@@ -25,7 +25,8 @@
 // patrón produciría, en silencio, una nota de crédito de un tipo inexistente.
 // =============================================================================
 
-import { TIPOS_COMPROBANTE } from "../biller/cfeSchema.js";
+import { TIPOS_COMPROBANTE, TIPOS_EXPORTACION } from "../biller/cfeSchema.js";
+import { TASA_IVA } from "./calcularTotales.js";
 import { estaAceptado } from "./resumenFacturacion.js";
 
 /** tipo original -> tipo de la Nota de Crédito que lo anula. */
@@ -68,6 +69,35 @@ export interface ComprobanteAAnular {
   total: number | null;
   fecha_emision: string | null;
   estado: string | null;
+  /**
+   * Desglose de IVA del original, tal como lo normaliza `normalizeComprobanteEmitido`.
+   *
+   * NO es decorativo: es lo único que dice a qué TASA hay que acreditar. Sin
+   * esto la nota de crédito salía siempre a la básica (22%), y anular una
+   * factura de tasa mínima sobreacreditaba IVA — plata que DGI no debe.
+   * `undefined` o todo en null = el comprobante no trajo desglose.
+   */
+  iva?: { tasa_minima: number | null; tasa_basica: number | null; tasa_otra: number | null } | null;
+  /**
+   * Los ítems del original, si se consultó por `id` (el listado no los trae).
+   *
+   * Es la fuente MEJOR que el desglose de IVA: dice la tasa de cada línea en
+   * vez de dejar que la reconstruyamos con aritmética. Cuando todas las líneas
+   * comparten indicador —el caso normal—, la nota sale con ese indicador y una
+   * sola línea por el total exacto, sin división ni redondeo de por medio.
+   */
+  items?: ReadonlyArray<{ indicador_facturacion?: number | null }> | null;
+  /**
+   * Cotización declarada por el original. Va al cuerpo cuando la moneda no es
+   * el peso, y no es un detalle: `ComprobanteBodySchema` documenta que si se
+   * omite, Biller toma **la cotización de cierre anterior a fecha_emision** —
+   * o sea la de HOY, no la del comprobante que se está anulando. Una factura de
+   * U$S 10.000 anulada con el dólar 3% arriba acredita ~1.600 pesos de IVA de
+   * más, y no deja saldado el original en pesos.
+   */
+  tasa_cambio?: number | null;
+  /** Retenciones/percepciones del original, solo para saber si las hay. */
+  retenciones_percepciones?: unknown;
 }
 
 export interface PlanAnulacion {
@@ -123,6 +153,7 @@ export function planAnulacion(
   // --- Caso 2: lo que hay que deshacer es una NOTA DE CRÉDITO ---------------
   const tipoNd = NOTA_DEBITO_DE[tipo];
   if (tipoNd !== undefined) {
+    const nota = cuerpoNota(tipoNd, c, opciones.razon ?? "Reversión de nota de crédito");
     return {
       accion: "nota_debito_reversion",
       tipo_a_emitir: tipoNd,
@@ -132,7 +163,7 @@ export function planAnulacion(
         `Emitir una ${TIPOS_COMPROBANTE[tipoNd]} contra ella revierte la anulación: el comprobante ` +
         "original vuelve a tener validez económica.",
       usa_endpoint_anular: false,
-      cuerpo_sugerido: cuerpoNota(tipoNd, c, opciones.razon ?? "Reversión de nota de crédito"),
+      cuerpo_sugerido: nota.cuerpo,
       pasos: [
         `Emitir un CFE tipo ${tipoNd} (${TIPOS_COMPROBANTE[tipoNd]}) por el mismo importe (${c.moneda ?? "?"} ${Math.abs(c.total ?? 0)}).`,
         `Referenciarlo a la nota de crédito ${c.serie ?? "?"}-${c.numero ?? "?"}${c.id !== null ? ` (id ${c.id})` : ""}.`,
@@ -141,6 +172,7 @@ export function planAnulacion(
       advertencias: [
         "Una nota de débito SUMA: si el objetivo no era resucitar el comprobante original sino " +
           "corregir un importe, revisá que el monto sea el correcto antes de emitir.",
+        ...nota.advertencias,
       ],
     };
   }
@@ -178,6 +210,12 @@ export function planAnulacion(
   }
 
   const puedeEndpoint = ANULABLES_POR_ENDPOINT.has(tipo) && !yaAnulado;
+  // Solo se arma el cuerpo cuando hay que emitir a mano: si Biller lo arma solo
+  // (`usa_endpoint_anular`), la tasa la decide él con el detalle real y derivarla
+  // acá sería una segunda opinión sin dueño.
+  const nota = puedeEndpoint
+    ? { cuerpo: null, advertencias: [] as string[] }
+    : cuerpoNota(tipoNc, c, opciones.razon ?? "Anulación de comprobante");
 
   return {
     accion: "nota_credito",
@@ -189,9 +227,7 @@ export function planAnulacion(
       "existiendo ante DGI con su numeración, pero queda saldado. Si esto fuera un error, se " +
       `revierte después con una ${TIPOS_COMPROBANTE[NOTA_DEBITO_DE[tipoNc]!] ?? "nota de débito"}.`,
     usa_endpoint_anular: puedeEndpoint,
-    cuerpo_sugerido: puedeEndpoint
-      ? null
-      : cuerpoNota(tipoNc, c, opciones.razon ?? "Anulación de comprobante"),
+    cuerpo_sugerido: nota.cuerpo,
     pasos: puedeEndpoint
       ? [
           `Usar biller_anular_comprobante con id=${c.id ?? "(o tipo+serie+numero)"} y ` +
@@ -199,14 +235,27 @@ export function planAnulacion(
           "Correr primero el dry-run (sin confirm) para leer el preview.",
           "Verificar después con biller_obtener_comprobante que la NC quedó \"Aceptado DGI\".",
         ]
-      : [
-          `Emitir un CFE tipo ${tipoNc} (${TIPOS_COMPROBANTE[tipoNc]}) con biller_emitir_comprobante.`,
-          `Referenciarlo al comprobante ${c.serie ?? "?"}-${c.numero ?? "?"}${c.id !== null ? ` (id ${c.id})` : ""}.`,
-          `Por el mismo importe: ${c.moneda ?? "?"} ${c.total ?? "?"}.`,
-          "Correr primero el dry-run para verificar el total calculado.",
-        ],
+      : nota.cuerpo === null
+        ? [
+            // SIN CUERPO LOS PASOS TIENEN QUE CAMBIAR. Decir "emitir un 112 por
+            // el mismo importe" cuando no hay cuerpo sugerido hace que el modelo
+            // lo arme él — y lo va a armar con indicador 3, que es exactamente
+            // el bug que la falta de cuerpo está evitando.
+            `Traer el detalle del comprobante ${c.serie ?? "?"}-${c.numero ?? "?"} con biller_obtener_comprobante: ` +
+              "trae los items con su indicador_facturacion.",
+            "Armar la nota copiando la tasa de cada línea del original. NO asumir 22%: mirá las advertencias.",
+            `Referenciarla al comprobante ${c.serie ?? "?"}-${c.numero ?? "?"}${c.id !== null ? ` (id ${c.id})` : ""}.`,
+            "Correr el dry-run y verificar que el total dé exactamente el del original.",
+          ]
+        : [
+            `Emitir un CFE tipo ${tipoNc} (${TIPOS_COMPROBANTE[tipoNc]}) con biller_emitir_comprobante.`,
+            `Referenciarlo al comprobante ${c.serie ?? "?"}-${c.numero ?? "?"}${c.id !== null ? ` (id ${c.id})` : ""}.`,
+            `Por el mismo importe: ${c.moneda ?? "?"} ${c.total ?? "?"}.`,
+            "Correr primero el dry-run para verificar el total calculado.",
+          ],
     advertencias: [
       ...advertencias,
+      ...nota.advertencias,
       ...(puedeEndpoint
         ? [
             "POST /v2/comprobantes/anular solo funciona si el comprobante NO tiene comprobantes " +
@@ -226,39 +275,335 @@ export function planAnulacion(
   };
 }
 
+/**
+ * A QUÉ TASA SE ACREDITA: se deriva del original, no se asume.
+ *
+ * EL BUG QUE CIERRA. Hasta agosto de 2026 toda nota de crédito sugerida salía
+ * con `indicador_facturacion: 3` (tasa básica, 22%) hardcodeado. Anular una
+ * factura de tasa mínima —comida, medicamentos, el rubro de media PyME
+ * uruguaya— acreditaba 22% de IVA sobre una venta que había pagado 10%: el
+ * comprobante sale bien formado, DGI lo acepta, y la empresa se acredita IVA
+ * que no pagó. Nadie se entera hasta una inspección.
+ *
+ * DE DÓNDE SALE LA TASA. El CFE trae el IVA ya discriminado por tasa
+ * (`tot_iva_tasa_min`, `tot_iva_tasa_bas`, `tot_iva_tasa_otra`). Con el importe
+ * de IVA y la tasa se reconstruye el bruto de cada porción:
+ *
+ *     bruto = iva + iva/tasa        (porque `montos_brutos: true`)
+ *
+ * y lo que sobra del total es la parte exenta. Es aritmética sobre campos que
+ * la API ya devuelve, no una estimación.
+ *
+ * CUÁNDO NO SE ARMA EL CUERPO. Ante la duda no se adivina: si el comprobante
+ * tiene IVA a "otra tasa" (no sabemos cuál es) o si el desglose no cierra
+ * contra el total, se devuelve `null` y se dice por qué. Un cuerpo que parece
+ * correcto y acredita mal es peor que no tener cuerpo: el primero se firma, el
+ * segundo se revisa.
+ */
+const TASA_BASICA = 0.22;
+const TASA_MINIMA = 0.1;
+
+/** Indicadores de facturación de DGI que usa la nota. */
+const IND_EXENTO = 1;
+const IND_MINIMA = 2;
+const IND_BASICA = 3;
+
+/** Tolerancia al comparar plata: dos decimales, más el ruido de la división. */
+const EPSILON = 0.02;
+
+/** El peso, en las formas en las que la API lo devuelve. Ver `tipoCambio.ts`. */
+function esMonedaBase(moneda: string | null): boolean {
+  const m = (moneda ?? "").trim().toUpperCase();
+  return m === "" || m === "UYU" || m === "858" || m === "UY";
+}
+
+function redondear2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** Valor absoluto de un campo de IVA que puede venir null, string o negativo. */
+function montoIva(v: number | null | undefined): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return 0;
+  return Math.abs(v);
+}
+
+export interface LineasNota {
+  /** Líneas listas para el cuerpo, o null si no se pudo derivar sin adivinar. */
+  items: Array<Record<string, unknown>> | null;
+  advertencias: string[];
+}
+
+/**
+ * Cuánto puede desviarse la reconstrucción antes de que sea un problema real.
+ *
+ * NO es un epsilon de centavos, y esa fue la primera versión equivocada.
+ * Reconstruir el bruto divide por la tasa, así que el redondeo del IVA se
+ * AMPLIFICA: dividir por 0,22 lo multiplica por 4,55. Y el IVA del CFE es la
+ * suma de los IVA por línea YA redondeados, así que diez líneas con centavos
+ * dan un desvío de decenas de centavos sobre una factura perfectamente sana.
+ * Con un epsilon de 0,02 eso se reportaba como "el desglose no cierra" y
+ * mandaba a auditar un comprobante correcto.
+ */
+function tolerancia(total: number): number {
+  return Math.max(0.5, total * 0.005);
+}
+
+/** Indicadores cuya tasa conocemos. Uno que no esté acá NO se adivina. */
+function tasaDe(indicador: number): number | null {
+  const t = TASA_IVA[indicador];
+  return typeof t === "number" ? t : null;
+}
+
+/**
+ * Arma las líneas de la nota respetando las tasas del original.
+ *
+ * Exportada para poder testearla sin construir un plan entero.
+ */
+export function lineasNota(c: ComprobanteAAnular, razon: string): LineasNota {
+  const referencia = `${razon} ${c.serie ?? ""}-${c.numero ?? ""}`.trim();
+  // Positivo: el signo lo da el TIPO de comprobante, no el importe. Una nota de
+  // crédito con importe negativo se resta dos veces.
+  const total = redondear2(Math.abs(c.total ?? 0));
+
+  const linea = (concepto: string, precio: number, indicador: number): Record<string, unknown> => ({
+    concepto,
+    cantidad: 1,
+    precio,
+    indicador_facturacion: indicador,
+  });
+
+  // --- Sin total no hay nota ------------------------------------------------
+  //
+  // `Math.abs(null ?? 0)` daba 0 y el cuerpo salía con una línea en $0: un CFE
+  // tipo 112 real, que consume numeración, parece haber anulado la factura y no
+  // anula nada.
+  if (!(total > 0)) {
+    return {
+      items: null,
+      advertencias: [
+        "El comprobante original no trae un total mayor a cero, así que no se puede armar la nota: " +
+          "saldría por $0 y sería un documento fiscal que consume numeración sin anular nada. " +
+          "Traé el comprobante con biller_obtener_comprobante y revisá su total.",
+      ],
+    };
+  }
+
+  const desglose = c.iva ?? null;
+  const bas = montoIva(desglose?.tasa_basica);
+  const min = montoIva(desglose?.tasa_minima);
+  const otra = montoIva(desglose?.tasa_otra);
+  const sinDesglose =
+    desglose === null ||
+    (desglose.tasa_basica === null && desglose.tasa_minima === null && desglose.tasa_otra === null);
+
+  const advertencias: string[] = [];
+  // Las retenciones del original NO se revierten con esta nota: no se copian.
+  // Se dice, porque una factura con retención de IRPF "anulada" así deja la
+  // retención en pie y nadie lo ve.
+  if (c.retenciones_percepciones !== undefined && c.retenciones_percepciones !== null) {
+    advertencias.push(
+      "El comprobante original tiene retenciones/percepciones y esta nota NO las revierte: el " +
+        "cuerpo sugerido no las copia. Revisá con tu contador qué corresponde para esa parte.",
+    );
+  }
+
+  // --- IVA a una tasa que no conocemos: se aborta ANTES de cualquier camino --
+  //
+  // Va arriba de todo a propósito. Estaba después del camino por ítems, así que
+  // un comprobante con ítems e IVA a "otra tasa" salía igual, con indicador 4 y
+  // sin la tasa que ese indicador necesita: el módulo declaraba por escrito que
+  // no adivinaba, y adivinaba.
+  if (otra > 0) {
+    return {
+      items: null,
+      advertencias: [
+        ...advertencias,
+        `El comprobante tiene ${redondear2(otra)} de IVA a "otra tasa", y la tabla de valores no dice ` +
+          "cuál es. Sin la tasa no se puede reconstruir el importe bruto de esa porción: la nota hay " +
+          "que armarla a mano, copiando las líneas del original con biller_obtener_comprobante.",
+      ],
+    };
+  }
+
+  const ivaDeclarado = redondear2(bas + min);
+
+  // --- Camino 1: los ítems del original dicen la tasa ------------------------
+  //
+  // Es el dato y no una reconstrucción, pero tiene TRES guardas, y las tres
+  // salieron de casos que producían plata mal:
+  //
+  //  · un ítem SIN indicador no puede contar como unanimidad. Filtrar los null
+  //    antes de contar los distintos los hacía invisibles: una factura con una
+  //    línea al 22% y otra exenta sin indicador salía entera al 22%;
+  //  · un indicador cuya tasa no conocemos (4, "otra tasa") no se usa;
+  //  · si el IVA que implica esa tasa no coincide con el que declara el CFE,
+  //    las dos fuentes se contradicen y no se elige una en silencio.
+  const indicadoresCrudos = (c.items ?? []).map((i) => i?.indicador_facturacion);
+  const indicadores = indicadoresCrudos.filter(
+    (i): i is number => typeof i === "number" && Number.isFinite(i),
+  );
+  const unanimes =
+    indicadoresCrudos.length > 0 &&
+    indicadores.length === indicadoresCrudos.length &&
+    new Set(indicadores).size === 1;
+
+  if (unanimes) {
+    const indicador = indicadores[0]!;
+    const tasa = tasaDe(indicador);
+    if (tasa === null) {
+      return {
+        items: null,
+        advertencias: [
+          ...advertencias,
+          `Todas las líneas del original usan indicador_facturacion ${indicador}, cuya tasa no está ` +
+            "en la tabla de valores. No se arma el cuerpo: la nota necesita una tasa conocida para " +
+            "acreditar el importe correcto.",
+        ],
+      };
+    }
+    // El IVA que implica esa tasa sobre el total bruto.
+    const ivaImplicito = redondear2(total - total / (1 + tasa));
+    if (sinDesglose || Math.abs(ivaImplicito - ivaDeclarado) <= tolerancia(total)) {
+      return { items: [linea(referencia, total, indicador)], advertencias };
+    }
+    advertencias.push(
+      `Los ítems del original dicen indicador ${indicador} (IVA ${redondear2(ivaImplicito)}) pero su ` +
+        `desglose declara ${ivaDeclarado}. Las dos fuentes se contradicen, así que la tasa se toma ` +
+        "del desglose, que es el que DGI tiene registrado.",
+    );
+  }
+
+  // --- Sin ítems utilizables y sin desglose: no se adivina -------------------
+  if (sinDesglose) {
+    return {
+      items: null,
+      advertencias: [
+        ...advertencias,
+        "El comprobante original no trae ni los ítems ni el desglose de IVA por tasa, así que NO se " +
+          "puede saber a qué tasa hay que acreditar. No se arma el cuerpo: armarlo asumiendo la tasa " +
+          "básica (22%) es lo que sobreacreditaba IVA cuando el original era de tasa mínima. Traé el " +
+          "detalle con biller_obtener_comprobante y armá la nota con esas líneas.",
+      ],
+    };
+  }
+
+  // --- Camino 2: reconstruir el bruto de cada porción desde el desglose ------
+  //
+  // Vale porque el cuerpo va con `montos_brutos: true`: el precio de la línea
+  // ES el importe con IVA adentro. `bruto = iva + iva/tasa` es exactamente el
+  // inverso del `neto = linea/(1+tasa)` que hace `calcularTotales`.
+  //
+  // Exento: una exportación no es "exento" (indicador 1) sino indicador 10, y
+  // mandarla como 1 empuja al modelo al tratamiento equivocado.
+  const indExento = TIPOS_EXPORTACION.has(c.tipo_comprobante ?? -1) ? 10 : IND_EXENTO;
+
+  if (bas === 0 && min === 0) {
+    if (indExento === 10) {
+      advertencias.push(
+        "Es una nota sobre un comprobante de EXPORTACIÓN: además del indicador 10, el cuerpo " +
+          "necesita modalidad_venta, clausula_venta, via_transporte y el ncm de cada ítem. No se " +
+          "completan acá porque salen del original: traelo con biller_obtener_comprobante.",
+      );
+    }
+    return { items: [linea(referencia, total, indExento)], advertencias };
+  }
+
+  const brutoBas = bas > 0 ? redondear2(bas + bas / TASA_BASICA) : 0;
+  const brutoMin = min > 0 ? redondear2(min + min / TASA_MINIMA) : 0;
+  const resto = redondear2(total - brutoBas - brutoMin);
+  const tol = tolerancia(total);
+
+  // --- El desglose no cierra por más de lo que explica el redondeo ----------
+  if (resto < -tol) {
+    return {
+      items: null,
+      advertencias: [
+        ...advertencias,
+        `El desglose de IVA del original no cierra contra su total: las porciones gravadas suman ` +
+          `${redondear2(brutoBas + brutoMin)} y el total es ${total}. No se arma el cuerpo porque ` +
+          "acreditaría más de lo facturado. Revisá el comprobante con biller_obtener_comprobante.",
+      ],
+    };
+  }
+
+  const items: Array<Record<string, unknown>> = [];
+  const mixto = brutoBas > 0 && brutoMin > 0;
+  // El residuo que el redondeo explica se ABSORBE en la línea gravada más
+  // grande, en vez de descartarse. Descartarlo dejaba la nota uno o dos centavos
+  // por debajo de la factura, que es lo contrario de "anula por el importe
+  // exacto del original". Solo lo que supera la tolerancia es una porción exenta
+  // de verdad.
+  const esExento = resto > tol;
+  const ajuste = esExento ? 0 : resto;
+  const basFinal = redondear2(brutoBas + (brutoBas >= brutoMin ? ajuste : 0));
+  const minFinal = redondear2(brutoMin + (brutoBas >= brutoMin ? 0 : ajuste));
+
+  if (basFinal > 0) {
+    items.push(linea(mixto ? `${referencia} (IVA básica)` : referencia, basFinal, IND_BASICA));
+  }
+  if (minFinal > 0) {
+    items.push(linea(mixto ? `${referencia} (IVA mínima)` : referencia, minFinal, IND_MINIMA));
+  }
+  if (esExento) {
+    items.push(linea(items.length > 0 ? `${referencia} (exento)` : referencia, resto, indExento));
+  }
+
+  if (mixto) {
+    advertencias.push(
+      "El comprobante original mezcla tasa básica y mínima, así que la nota va con una línea por " +
+        "tasa. Verificá los importes en el preview antes de confirmar: si el original tenía " +
+        "descuentos por línea, el reparto puede no coincidir peso a peso con el detalle original.",
+    );
+  }
+  if (min > 0 && bas === 0) {
+    advertencias.push(
+      "El original es de TASA MÍNIMA (10%): la nota se arma con indicador_facturacion 2, no 3. Si " +
+        "la emitís a mano, no la pases a básica.",
+    );
+  }
+
+  return { items, advertencias };
+}
+
 /** Cuerpo listo para `biller_emitir_comprobante`, referenciando el original. */
 function cuerpoNota(
   tipo: number,
   c: ComprobanteAAnular,
   razon: string,
-): Record<string, unknown> {
+): { cuerpo: Record<string, unknown> | null; advertencias: string[] } {
   const referencia =
     c.id !== null
       ? [c.id]
       : [{ tipo: c.tipo_comprobante, serie: c.serie, numero: c.numero }];
 
+  const { items, advertencias } = lineasNota(c, razon);
+  if (items === null) return { cuerpo: null, advertencias };
+
   return {
-    tipo_comprobante: tipo,
-    moneda: c.moneda ?? "UYU",
-    referencias: referencia,
-    razon_referencia: razon,
-    // CRÍTICO: `total` de un CFE ya viene con IVA incluido. Sin montos_brutos,
-    // Biller interpreta el precio como neto y le SUMA el IVA otra vez: la nota
-    // de crédito saldría por total × 1,22 y acreditaría de más. Este flag es lo
-    // único que hace que la nota anule por el importe exacto del original.
-    montos_brutos: true,
-    items: [
-      {
-        concepto: `${razon} ${c.serie ?? ""}-${c.numero ?? ""}`.trim(),
-        cantidad: 1,
-        // Positivo: el signo lo da el TIPO de comprobante, no el importe. Una
-        // nota de crédito con importe negativo se resta dos veces.
-        precio: Math.abs(c.total ?? 0),
-        indicador_facturacion: 3,
-      },
-    ],
-    // El receptor de la nota tiene que ser el mismo del original; se completa
-    // desde el comprobante consultado y no se inventa acá.
-    cliente: "<mismo receptor que el comprobante original>",
+    cuerpo: {
+      tipo_comprobante: tipo,
+      moneda: c.moneda ?? "UYU",
+      referencias: referencia,
+      razon_referencia: razon,
+      // CRÍTICO: `total` de un CFE ya viene con IVA incluido. Sin montos_brutos,
+      // Biller interpreta el precio como neto y le SUMA el IVA otra vez: la nota
+      // de crédito saldría por total × 1,22 y acreditaría de más. Este flag es lo
+      // único que hace que la nota anule por el importe exacto del original.
+      //
+      // Y es lo que hace que `lineasNota` pueda reconstruir el bruto de cada
+      // porción sumándole su IVA: las dos cosas son la misma decisión.
+      montos_brutos: true,
+      // La cotización del ORIGINAL, no la de hoy. Sin este campo Biller usa la
+      // de cierre anterior a la fecha de emisión de la nota, y la nota acredita
+      // en pesos un importe distinto al que registró la factura.
+      ...(c.tasa_cambio !== null && c.tasa_cambio !== undefined && !esMonedaBase(c.moneda)
+        ? { tasa_cambio: c.tasa_cambio }
+        : {}),
+      items,
+      // El receptor de la nota tiene que ser el mismo del original; se completa
+      // desde el comprobante consultado y no se inventa acá.
+      cliente: "<mismo receptor que el comprobante original>",
+    },
+    advertencias,
   };
 }

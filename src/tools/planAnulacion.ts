@@ -219,6 +219,12 @@ export async function handlePlanAnulacion(args: unknown, ctx: ToolContext): Prom
         total: original.total,
         fecha_emision: original.fecha_emision?.slice(0, 10) ?? null,
         estado: original.estado,
+        // Qué decide a qué TASA se acredita. Sin esto la nota salía siempre a
+        // la básica y anular una factura de tasa mínima sobreacreditaba IVA.
+        // Los ítems solo vienen si se consultó por id; el desglose es el
+        // respaldo cuando no están. Ver `lineasNota`.
+        iva: original.iva,
+        items: original.items,
       },
       { ya_tiene_nota_credito: encontradas.length > 0, razon: a.razon },
     );

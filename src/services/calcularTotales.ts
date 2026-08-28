@@ -20,7 +20,7 @@ import { formatearUy } from "./importe.js";
  * Tasas de IVA por indicador de facturación (Uruguay: básica 22%, mínima 10%).
  * `null` = la tasa no se puede determinar desde el payload.
  */
-const TASA_IVA: Record<number, number | null> = {
+export const TASA_IVA: Record<number, number | null> = {
   1: 0, // Exento de IVA
   2: 0.1, // Tasa mínima
   3: 0.22, // Tasa básica
