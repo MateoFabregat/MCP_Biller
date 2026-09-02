@@ -37,6 +37,7 @@ import { createInterface, type Interface } from "node:readline";
 
 const TEST_URL = "https://test.biller.uy";
 const PROD_URL = "https://biller.uy";
+const PAQUETE_REVISADO = "biller-mcp-server@0.1.1";
 
 interface EntornoRutaClaudeDesktop {
   plataforma?: NodeJS.Platform;
@@ -58,11 +59,11 @@ export function rutaConfigClaudeDesktop(opciones: EntornoRutaClaudeDesktop = {})
   }
 }
 
-/** El bloque que se registra. `npx -y` para que Desktop no pregunte en cada arranque. */
+/** El bloque que se registra, fijado a la versión revisada del paquete. */
 export function bloqueServidor(token: string, baseUrl: string): Record<string, unknown> {
   return {
     command: "npx",
-    args: ["-y", "biller-mcp-server"],
+    args: ["-y", PAQUETE_REVISADO],
     env: {
       BILLER_API_BASE_URL: baseUrl,
       BILLER_API_TOKEN: token,

@@ -83,6 +83,7 @@ describe("escribirConfigDesktop", () => {
 
   it("el bloque registrado queda en solo lectura", () => {
     const b = bloqueServidor("tok", "https://test.biller.uy") as any;
+    expect(b.args).toEqual(["-y", "biller-mcp-server@0.1.1"]);
     expect(b.env.BILLER_CAPABILITY_MODE).toBe("read_only");
     expect(b.env.BILLER_WRITE_ENABLED).toBe("false");
     expect(b.env.BILLER_API_TOKEN).toBe("tok");

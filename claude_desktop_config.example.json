@@ -4,7 +4,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "biller-mcp-server"
+        "biller-mcp-server@0.1.1"
       ],
       "env": {
         "BILLER_API_BASE_URL": "https://test.biller.uy",
