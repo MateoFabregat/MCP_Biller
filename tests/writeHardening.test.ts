@@ -257,6 +257,21 @@ describe("S7 — tope de monto por operación", () => {
       ),
     ).toThrow(BillerMontoInvalidoError);
   });
+
+  it("monto autoritativo no puede ser tapado por un total decorativo", () => {
+    expect(() =>
+      verificarLimiteMonto({ moneda: "UYU", monto: 2000, total: 1 }, { UYU: 1000 }),
+    ).toThrow(BillerMontoExcedidoError);
+  });
+
+  it("no presume UYU para un pago cuya moneda no viene en el payload", () => {
+    expect(() =>
+      verificarLimiteMonto({ monto: 100, comprobantes: [{ id: 1, monto: 100 }] }, { USD: 50 }),
+    ).toThrow(BillerMontoInvalidoError);
+    expect(() =>
+      verificarLimiteMonto({ monto: 100, comprobantes: [{ id: 1, monto: 100 }] }, { UYU: 1000 }),
+    ).toThrow(/moneda/i);
+  });
 });
 
 describe("S6 — idempotencia persistente", () => {
@@ -284,6 +299,14 @@ describe("S6 — idempotencia persistente", () => {
 
     const reiniciado = new FileIdempotencyStore(path);
     expect(reiniciado.claim("key-en-vuelo")).toBe(false);
+  });
+
+  it("dos stores vivos sobre el mismo archivo no reclaman la misma key", () => {
+    const procesoA = new FileIdempotencyStore(path);
+    const procesoB = new FileIdempotencyStore(path);
+
+    expect(procesoA.claim("key-dos-procesos")).toBe(true);
+    expect(procesoB.claim("key-dos-procesos")).toBe(false);
   });
 
   it("los estados ambiguous y executed nunca se reemiten al reiniciar", () => {
@@ -345,13 +368,14 @@ describe("S6 — idempotencia persistente", () => {
     expect(store.has("x")).toBe(false);
   });
 
-  it("una línea corrupta no descarta el resto del archivo", () => {
+  it("una línea corrupta conserva las keys válidas pero bloquea claims nuevos", () => {
     const store = new FileIdempotencyStore(path);
     store.markUsed("buena-1");
     // Escritura interrumpida a mitad de línea.
     appendFileSync(path, '{"key":"rota\n', "utf8");
     const recargado = new FileIdempotencyStore(path);
     expect(recargado.has("buena-1")).toBe(true);
+    expect(() => recargado.claim("nueva-despues-de-corrupcion")).toThrow(/leer el registro/i);
   });
 
   it("no guarda el payload, solo la key, el estado y el timestamp", () => {

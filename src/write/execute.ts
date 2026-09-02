@@ -3,7 +3,8 @@
 //
 // Aplica, en orden, todas las barreras antes (y alrededor) del POST real:
 //   1. Gate (write_enabled + producción)  -> audita "blocked" si no pasa.
-//   2. Idempotencia in-process             -> evita doble ejecución.
+//   2. Reserva de idempotencia              -> evita doble ejecución; con
+//      BILLER_IDEMPOTENCY_LOG_PATH también coordina procesos y reinicios.
 //   3. POST vía writeClient                -> audita "executed"/"error".
 // =============================================================================
 

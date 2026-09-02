@@ -106,8 +106,8 @@ export function extraerMonto(payload: unknown): { monto: number; moneda: string 
         { valor: pago?.monto, permiteNegativo: false },
       ]
     : [
-        { valor: p.total, permiteNegativo: true },
         { valor: p.monto, permiteNegativo: true },
+        { valor: p.total, permiteNegativo: true },
         { valor: p.importe, permiteNegativo: true },
       ];
   const moneda = monedaDelPayload(payload);
@@ -152,6 +152,23 @@ export function verificarLimiteMonto(
   // Tolera `undefined`: una config vieja sin este campo debe seguir escribiendo,
   // no romper toda la capa de escritura con un TypeError.
   if (limites === undefined || Object.keys(limites).length === 0) return;
+
+  // `/pagos/crear` lleva `monto` y `comprobantes`, pero no lleva moneda. Biller
+  // la deriva de los CFE imputados. Presumir UYU acá haría que un tope en pesos
+  // se aplicara a un pago en dólares (o que un tope USD se salteara). Mientras
+  // la tool no resuelva y verifique la moneda de esos CFE, una instalación que
+  // habilitó topes debe fallar cerrado.
+  if (payload !== null && typeof payload === "object") {
+    const p = payload as Record<string, unknown>;
+    const esPago =
+      Object.prototype.hasOwnProperty.call(p, "monto") && Array.isArray(p.comprobantes);
+    const tieneMoneda = typeof p.moneda === "string" && p.moneda.trim() !== "";
+    if (esPago && !tieneMoneda) {
+      throw new BillerMontoInvalidoError(
+        "no se puede determinar la moneda del pago para aplicar el tope configurado",
+      );
+    }
+  }
   if (
     explicito !== undefined &&
     Number.isFinite(explicito.monto) &&

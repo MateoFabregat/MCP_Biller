@@ -13,15 +13,26 @@
 //
 // Ahora hay dos implementaciones:
 //   · InMemoryIdempotencyStore — la de siempre; default cuando no se configura ruta.
-//   · FileIdempotencyStore     — append-only en disco, sobrevive reinicios.
+//   · FileIdempotencyStore     — journal append-only más lock O_EXCL por key;
+//                                sobrevive reinicios y coordina procesos.
 //
 // El archivo guarda SOLO la key, el estado y el timestamp. Nunca el payload:
 // los datos de facturación no tienen por qué estar ahí.
 // =============================================================================
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { logger } from "../logger.js";
 
 export function generateIdempotencyKey(): string {
@@ -86,7 +97,8 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
  * una línea. El volumen sigue siendo pequeño en el orden de magnitud de una
  * PyME (miles de escrituras al año).
  *
- * Un claim nuevo solo se concede si su `in_flight` quedó persistido. Las
+ * Un claim nuevo solo se concede si obtuvo el lock exclusivo entre procesos y
+ * su `in_flight` quedó persistido. Las
  * transiciones posteriores al POST son best-effort: si fallan, el `in_flight`
  * ya grabado sigue bloqueando el reinicio y evita una reemisión insegura.
  */
@@ -95,6 +107,11 @@ export class FileIdempotencyStore implements IdempotencyStore {
   private readonly path: string;
   private degradado = false;
   private cargaConfiable = true;
+
+  private lockPath(key: string): string {
+    const huella = createHash("sha256").update(key).digest("hex");
+    return `${this.path}.claims/${huella}.lock`;
+  }
 
   constructor(path: string) {
     this.path = path;
@@ -108,7 +125,10 @@ export class FileIdempotencyStore implements IdempotencyStore {
         if (linea.trim() === "") continue;
         try {
           const entrada = JSON.parse(linea) as { key?: unknown; state?: unknown };
-          if (typeof entrada.key !== "string") continue;
+          if (typeof entrada.key !== "string") {
+            this.cargaConfiable = false;
+            continue;
+          }
 
           // Formato histórico `{ key, ts }`: una key se escribía únicamente
           // después de un POST exitoso, así que es inequívocamente `executed`.
@@ -118,11 +138,18 @@ export class FileIdempotencyStore implements IdempotencyStore {
             this.states.set(entrada.key, entrada.state);
           } else if (entrada.state === "released") {
             this.states.delete(entrada.key);
+          } else {
+            this.cargaConfiable = false;
           }
         } catch {
-          // Línea corrupta (p.ej. escritura interrumpida): se ignora esa sola,
-          // no se descarta el archivo entero.
+          // Conservamos las entradas anteriores para diagnóstico, pero una
+          // línea truncada puede ser justamente el último `in_flight`. Por eso
+          // el store deja de conceder claims nuevos: ignorarla sería reemitir.
+          this.cargaConfiable = false;
         }
+      }
+      if (!this.cargaConfiable) {
+        this.degradar("validar", new Error("el journal contiene una entrada corrupta"));
       }
       logger.info("idempotencia.cargada", { keys: this.states.size });
     } catch (err) {
@@ -152,7 +179,15 @@ export class FileIdempotencyStore implements IdempotencyStore {
         "No se pudo leer el registro de idempotencia; por seguridad el POST NO se ejecutó.",
       );
     }
+    const lock = this.adquirirLock(key);
+    if (!lock) return false;
     if (!this.persistir(key, "in_flight")) {
+      try {
+        unlinkSync(this.lockPath(key));
+      } catch {
+        // Un lock huérfano falla cerrado. Es preferible diagnosticarlo a
+        // conceder la misma operación desde otro proceso.
+      }
       throw new Error(
         "No se pudo persistir la reserva de idempotencia; por seguridad el POST NO se ejecutó.",
       );
@@ -178,7 +213,14 @@ export class FileIdempotencyStore implements IdempotencyStore {
 
   release(key: string): void {
     if (this.states.get(key) !== "in_flight") return;
-    if (this.persistir(key, "released")) this.states.delete(key);
+    if (this.persistir(key, "released")) {
+      this.states.delete(key);
+      try {
+        unlinkSync(this.lockPath(key));
+      } catch {
+        // Si no se pudo borrar, el lock conserva el comportamiento seguro.
+      }
+    }
   }
 
   markUsed(key: string): void {
@@ -194,16 +236,39 @@ export class FileIdempotencyStore implements IdempotencyStore {
       // ser /tmp o una carpeta compartida). El directorio privado que crea el
       // store sí queda explícitamente en 0700.
       if (!directoryYaExistia) chmodSync(directory, 0o700);
-      appendFileSync(
-        this.path,
-        `${JSON.stringify({ key, state, ts: new Date().toISOString() })}\n`,
-        { encoding: "utf8", mode: 0o600 },
-      );
+      const fd = openSync(this.path, "a", 0o600);
+      try {
+        writeSync(fd, `${JSON.stringify({ key, state, ts: new Date().toISOString() })}\n`, undefined, "utf8");
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
       chmodSync(this.path, 0o600);
       return true;
     } catch (err) {
       this.degradar("escribir", err);
       return false;
+    }
+  }
+
+  /** O_EXCL es la parte atómica entre procesos; el Map solo acelera el caso local. */
+  private adquirirLock(key: string): boolean {
+    const directory = `${this.path}.claims`;
+    let fd: number | null = null;
+    try {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      chmodSync(directory, 0o700);
+      fd = openSync(this.lockPath(key), "wx", 0o600);
+      fsyncSync(fd);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+      this.degradar("crear la reserva atómica", err);
+      throw new Error(
+        "No se pudo crear la reserva atómica de idempotencia; por seguridad el POST NO se ejecutó.",
+      );
+    } finally {
+      if (fd !== null) closeSync(fd);
     }
   }
 

@@ -314,9 +314,10 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
           "⚠️ Ambiente PRODUCCIÓN: ejecutar este POST emite/anula un comprobante REAL ante DGI.",
         );
       }
-      if (p.idempotencyKey !== undefined) {
+      if (p.idempotencyKey !== undefined && config.idempotencyLogPath === undefined) {
         warnings.push(
-          "La protección de idempotencia es in-process y se resetea al reiniciar el servidor MCP.",
+          "La protección de idempotencia vive solo en este proceso y se pierde al reiniciar. " +
+            "Configurá BILLER_IDEMPOTENCY_LOG_PATH para coordinar procesos y reinicios.",
         );
       }
       // El tope se APLICA en `executeWrite`, o sea con confirm=true. Acá se

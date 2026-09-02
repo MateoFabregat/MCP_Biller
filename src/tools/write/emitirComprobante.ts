@@ -303,9 +303,9 @@ export async function handleEmitirComprobante(
   }
 
   // --- Deduplicación contra la API ----------------------------------------
-  // La idempotencia in-process se pierde al reiniciar el server. Esta consulta
-  // pregunta a Biller si el numero_interno ya se usó, que es lo único que
-  // sobrevive a un reinicio o a un reintento desde otro proceso.
+  // La idempotencia persistente protege la key local; esta consulta suma una
+  // segunda defensa de negocio preguntando si `numero_interno` ya fue usado en
+  // Biller, incluso frente a otro cliente o una key distinta.
   if (a.confirm && a.verificar_duplicado && payload.numero_interno !== undefined) {
     try {
       const existente = await buscarPorNumeroInterno(ctx, payload.numero_interno);
