@@ -5,6 +5,15 @@
 - **Asignado:** —
 - **Bloqueado por:** [Qué se puede anular, cómo, y qué pasa cuando no se puede](T02-reglas-de-anulacion.md)
 
+## Avance implementado (2026-09-02)
+
+El caso simple de anulación total ya tiene doble confirmación por WhatsApp:
+paso 1 de revisión con token no ejecutable, paso 2 visualmente distinto con el
+token final ligado al payload, y cancelación explícita. Un cambio de comprobante
+entre ambos pasos invalida la revisión y el primer token no puede disparar el
+POST. Siguen pendientes el selector de comprobante, el bloqueo comprobado por
+cobro, el camino parcial y el PDF posterior; dependen del research de T02.
+
 ## Question
 
 ¿Cómo es la conversación completa para anular, desde "me equivoqué en una

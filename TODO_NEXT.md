@@ -135,7 +135,9 @@ archivo son los backlogs previos, todavía válidos.
 
 ### P0 de seguridad — falta (alta severidad, commit propio)
 
-- [ ] **El canal de ERROR saltea la envoltura de datos no confiables.** ALTA.
+- [x] **El canal de ERROR saltea la envoltura de datos no confiables.** Hecho
+  (sep-2026): los textos de validación 422 y `details` del upstream se envuelven
+  como no confiables, sin doble envoltura y con redacción de secretos.
   `sanitizeToolResult` (`src/security/sanitize.ts`) solo envuelve
   `structuredContent`; un error no lo tiene, así que solo corre `redactSecrets`.
   `BillerApiError.toSafe()` (`src/utils/errors.ts:165`) devuelve `details` con
@@ -175,19 +177,28 @@ archivo son los backlogs previos, todavía válidos.
   desglose que no cierra contra el total— devuelve `cuerpo_sugerido: null` con
   el motivo, en vez de adivinar. `planAnulacion.ts` ahora pasa `iva` e `items`.
   10 tests nuevos en `tests/anulacion.test.ts`.
-- [ ] **El aviso "receptor obligatorio" no llega al resumen que aprueba el
-  humano.** Nace en `cfeSchema.ts:636` (`validarComprobante`) y va solo a
-  `structuredContent.warnings` (el modelo), no al resumen de WhatsApp
-  (`render.ts` / `formatearTotales`). La regla de DGI "que más caro sale" viaja
-  por el canal que el proyecto declaró no confiable. Pasar los warnings
-  bloqueantes fiscales a `advertenciasDelPreview` (`calcularTotales.ts:576`),
-  arriba de todo.
+- [x] **El aviso "receptor obligatorio" no llega al resumen que aprueba el
+  humano.** Hecho (sep-2026): las advertencias críticas de receptor se muestran
+  arriba de los importes del preview y viajan al cuerpo real de WhatsApp.
 
 ### P0/P1 conversacional — falta (repro confirmado; fixes con archivo:línea)
 
-- [ ] **Línea a $0/negativa al final deja el flujo mudo.** Darle interactivo a
-  la rama `precio` cuando el ítem ya tiene un número ≤0 (`emision.ts:1622`), con
-  botones "dejarlo" / "sacar la línea". Cambia un test pineado a propósito.
+- [x] **Línea a $0/negativa al final deja el flujo mudo.** Hecho (sep-2026): la
+  rama ofrece botones vinculados a posición+monto para conservarla o quitarla;
+  un botón viejo no puede modificar otra línea.
+
+### P0 de emisión endurecida — hecho en sep-2026
+
+- [x] **Dos confirmaciones simultáneas podían atravesar juntas la idempotencia.**
+  La key se reserva como `in_flight` antes del POST; el segundo claim se bloquea.
+- [x] **Un POST aceptado cuya respuesta se pierde quedaba ambiguo.** La key pasa
+  a `ambiguous` y no se reintenta; el mensaje exige verificar primero en Biller.
+- [x] **`crear_recibo` no inspeccionaba `pago.monto`.** Ahora aplica el tope al
+  monto autoritativo, rechaza malformados/no finitos/negativos y cubre el borde.
+- [x] **Fechas ISO imposibles podían pasar.** Los schemas y períodos validan el
+  día real del calendario, incluidos febrero y meses de 30 días.
+- [x] **La consulta previa por `numero_interno` fallaba abierta.** Si el GET no
+  puede probar que el identificador está libre, no se ejecuta el POST.
 - [x] **`precio_copiado` sobrevive a `items` explícitos**: hecho (ago-2026).
   `fusionarItems` borra la marca con **dos** disparadores, no uno: precio
   explícito (el prescripto) y **concepto distinto al previo**. El segundo es el

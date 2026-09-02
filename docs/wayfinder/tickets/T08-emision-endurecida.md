@@ -5,6 +5,14 @@
 - **Asignado:** —
 - **Bloqueado por:** [Las reglas reales para que un 101 y un 111 salgan bien](T01-reglas-de-emision-validas.md)
 
+## Avance implementado (2026-09-02)
+
+Ya están cubiertos `montos_brutos` en el flujo/preview, `numero_interno`
+automático, fechas reales, prechequeo de duplicado fail-closed, reserva atómica
+antes del POST, estado ambiguo ante pérdida de respuesta y tope sobre
+`pago.monto`. Falta el cierre real contra `test.biller.uy` con verificación del
+PDF, la cotización obtenida de Biller y el diagnóstico temprano CAE/DGI.
+
 ## Question
 
 Aplicar al flujo de emisión todo lo que salga del ticket de reglas, y cerrar los
