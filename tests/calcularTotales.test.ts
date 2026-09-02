@@ -396,6 +396,32 @@ describe("el preview de confirmación", () => {
     expect(texto).toContain("Hoy 26/08/2026");
   });
 
+  it("un aviso crítico no puede desplazar el TOTAL ni los supuestos fuera del límite", () => {
+    const muchos = Array.from({ length: 20 }, (_, i) => ({
+      cantidad: 3,
+      concepto: `Producto con un nombre bastante largo número ${i}`,
+      precio: 1234.56,
+      indicador_facturacion: 3,
+    }));
+    const texto = formatearTotales(
+      calcularTotales(parse({ ...BASE, montos_brutos: 1, items: muchos })),
+      {
+        fecha_emision: "26/08/2026",
+        forma_pago: 1,
+        montos_brutos: true,
+        hoy: "26/08/2026",
+        advertencias_criticas: [
+          `⚠️ RECEPTOR OBLIGATORIO: ${"explicación fiscal extensa ".repeat(18)}`,
+        ],
+      },
+    );
+
+    expect(texto.length).toBeLessThanOrEqual(900);
+    expect(texto).toContain("RECEPTOR OBLIGATORIO");
+    expect(texto).toContain("TOTAL");
+    expect(texto).toContain("Hoy 26/08/2026");
+  });
+
   it("un ítem que no aporta al total lo dice en vez de mostrar su importe", () => {
     // Indicador 5 = entrega gratuita. Mostrar su precio sin aclararlo haría
     // parecer que el total está mal sumado.

@@ -797,3 +797,21 @@ describe("precio_copiado no sobrevive a una línea que cambió", () => {
     expect(itemIncompleto(r[0]!)).toBe(false);
   });
 });
+
+describe("la confirmación de precio no positivo se invalida si cambia la línea", () => {
+  it("se borra al cambiar precio o concepto", () => {
+    const porPrecio = fusionarItems(
+      [{ concepto: "Bonificación", precio: 0, precio_no_positivo_confirmado: true }],
+      [{ precio: -200 }],
+    );
+    expect(porPrecio[0]!.precio_no_positivo_confirmado).toBeUndefined();
+    expect(itemIncompleto(porPrecio[0]!)).toBe(true);
+
+    const porConcepto = fusionarItems(
+      [{ concepto: "Bonificación", precio: 0, precio_no_positivo_confirmado: true }],
+      [{ concepto: "Flete" }],
+    );
+    expect(porConcepto[0]!.precio_no_positivo_confirmado).toBeUndefined();
+    expect(itemIncompleto(porConcepto[0]!)).toBe(true);
+  });
+});

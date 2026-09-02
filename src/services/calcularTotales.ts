@@ -549,26 +549,41 @@ export function formatearTotales(t: TotalesEstimados, ctx: ContextoPreview = {})
   const ancho =
     Math.max(...[...lineasItems, ...totales].map((f) => f.etiqueta.length + f.importe.length)) + 3;
 
+  const totalesTexto = totales.map((f) => fila(f.etiqueta, f.importe, ancho)).join("\n");
   const bloques: string[] = [];
   if (lineasItems.length > 0) {
     const cuerpo = lineasItems.map((f) => fila(f.etiqueta, f.importe, ancho));
     if (ocultas > 0) cuerpo.push(`… y ${ocultas} ítem${ocultas === 1 ? "" : "s"} más`);
     bloques.push(cuerpo.join("\n"), "———");
   }
-  bloques.push(totales.map((f) => fila(f.etiqueta, f.importe, ancho)).join("\n"));
+  bloques.push(totalesTexto);
 
   // Los supuestos van separados por una línea en blanco: no son parte de la
   // suma, son la letra chica de lo que el sistema decidió por su cuenta.
   const supuestos = describirSupuestos(ctx);
   if (supuestos !== "") bloques.push("", supuestos);
 
-  const cuerpo = bloques.join("\n");
+  let cuerpo = bloques.join("\n");
   // Un bloqueo fiscal no es letra chica. En particular, el receptor
   // obligatorio tiene que aparecer antes de los números que la persona va a
   // aprobar por WhatsApp; `warnings` estructurado lo ve el agente, no
   // necesariamente quien toca el botón.
   const criticas = (ctx.advertencias_criticas ?? []).filter((a) => a.trim() !== "");
-  const base = criticas.length === 0 ? cuerpo : `${criticas.join("\n")}\n\n${cuerpo}`;
+  let bloqueCritico = criticas.join("\n");
+  let base = bloqueCritico === "" ? cuerpo : `${bloqueCritico}\n\n${cuerpo}`;
+
+  if (base.length > MAX_CHARS_PREVIEW && bloqueCritico !== "") {
+    // Si lo crítico compite con el detalle, caen primero los ítems. El TOTAL y
+    // los supuestos son la firma humana del documento y nunca se recortan.
+    const esenciales = [totalesTexto, ...(supuestos === "" ? [] : ["", supuestos])].join("\n");
+    const disponibles = Math.max(0, MAX_CHARS_PREVIEW - esenciales.length - 2);
+    if (bloqueCritico.length > disponibles) {
+      bloqueCritico =
+        disponibles <= 1 ? "" : `${bloqueCritico.slice(0, Math.max(0, disponibles - 1))}…`;
+    }
+    cuerpo = esenciales;
+    base = bloqueCritico === "" ? cuerpo : `${bloqueCritico}\n\n${cuerpo}`;
+  }
   const avisos = advertenciasDelPreview(t, ctx, plata);
   return avisos.length === 0 ? base : agregarAvisos(base, avisos);
 }
