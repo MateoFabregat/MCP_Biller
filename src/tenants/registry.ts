@@ -143,6 +143,9 @@ export const VARIABLES_QUE_NO_SE_HEREDAN: readonly string[] = [
   "BILLER_CAPABILITY_MODE",
   "BILLER_WRITE_ENABLED",
   "BILLER_ALLOW_PRODUCTION_WRITES",
+  // La clave firma approvals de UNA empresa; heredarla permitiría que un token
+  // emitido en un tenant se autentique con material compartido por accidente.
+  "BILLER_APPROVAL_SECRET",
   // La identidad fiscal: heredarla mete el RUT o la sucursal de otra empresa
   // adentro de un CFE.
   "BILLER_DEFAULT_EMPRESA_RUT",

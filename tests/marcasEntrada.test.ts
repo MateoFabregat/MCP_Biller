@@ -13,7 +13,7 @@
 
 import { describe, expect, it } from "vitest";
 import { envolverNoConfiable, limpiarMarcas, limpiarMarcasProfundo } from "../src/security/untrusted.js";
-import { computeConfirmationToken } from "../src/write/confirm.js";
+import { ApprovalCycle } from "../src/write/confirm.js";
 import { sanitizeToolResult } from "../src/security/sanitize.js";
 import { makeCtx } from "./helpers.js";
 
@@ -83,12 +83,14 @@ describe("el payload sucio y el limpio emiten LO MISMO", () => {
     const sucio = { items: [{ concepto: envolverNoConfiable("Bolsa de portland"), precio: 480 }] };
     const limpio = { items: [{ concepto: "Bolsa de portland", precio: 480 }] };
 
-    const tSucio = computeConfirmationToken(
-      "/v3/comprobantes/emitir", "test", limpiarMarcasProfundo(sucio).valor, ahora,
-    );
-    const tLimpio = computeConfirmationToken(
-      "/v3/comprobantes/emitir", "test", limpiarMarcasProfundo(limpio).valor, ahora,
-    );
+    const cycle = new ApprovalCycle({
+      secret: "test-approval-secret-with-more-than-32-characters",
+      environment: "test",
+      tenantId: "test",
+    });
+    const base = { endpoint: "/v3/comprobantes/emitir", actorIdentity: null };
+    const tSucio = cycle.issue({ ...base, subject: limpiarMarcasProfundo(sucio).valor }, ahora);
+    const tLimpio = cycle.issue({ ...base, subject: limpiarMarcasProfundo(limpio).valor }, ahora);
     expect(tSucio).toBe(tLimpio);
   });
 });

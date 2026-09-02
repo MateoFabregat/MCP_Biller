@@ -771,8 +771,8 @@ describe("emitir con la sesión de otro", () => {
 // ---------------------------------------------------------------------------
 // EL TOKEN ES DE QUIEN HIZO EL DRY-RUN.
 //
-// El `confirmation_token` se calculaba sobre {endpoint, environment, payload,
-// issuedAt} y no llevaba nada de quién lo pidió. Con dos números autorizados en
+// El `confirmation_token` anterior se calculaba sobre datos públicos y no
+// llevaba nada de quién lo pidió. Con dos números autorizados en
 // la misma empresa —el dueño y el contador, el caso normal— el token que A
 // recibía en su preview lo podía confirmar B. El payload estaba congelado, así
 // que B no podía cambiar QUÉ se emitía, pero sí podía DISPARAR la emisión de A:
@@ -883,8 +883,8 @@ describe("el confirmation_token es de la conversación que lo pidió", () => {
 
       expect(exec.isError).toBe(true);
       const error = errorOf(exec);
-      expect(error.kind).toBe("autorizacion");
-      expect((error as { motivo?: string }).motivo).toBe("sesion_ajena");
+      expect(error.kind).toBe("confirmation");
+      expect(error.message).toContain("empresa o conversación");
       // No se emitió NADA: es el punto entero.
       expect(fx.postMock).not.toHaveBeenCalled();
       expect(fx.auditEntries.some((e) => e.phase === "executed")).toBe(false);
@@ -952,13 +952,12 @@ describe("el confirmation_token es de la conversación que lo pidió", () => {
     expect(sc(exec).mode).toBe("executed");
   });
 
-  it("un token de dos partes (formato viejo) ya no vale, y lo dice", async () => {
+  it("un token SHA-256 del formato v1 ya no vale, y lo dice", async () => {
     // Decisión anotada en confirm.ts: el TTL es de 15 minutos, así que el costo
     // de no aceptarlos es que alguien a mitad de un confirm rehaga el dry-run.
     const fx = conCanal();
     const dry = await handleEmitirComprobante({ comprobante: COMPROBANTE, remitente: DUENO }, fx.ctx);
-    const partes = (sc(dry).confirmation_token as string).split(".");
-    const viejo = `${partes[0]}.${partes[2]}`;
+    const viejo = `1788364800000.actor_hint.${"a".repeat(64)}`;
     const exec = await handleEmitirComprobante(
       { comprobante: COMPROBANTE, remitente: DUENO, confirm: true, confirmation_token: viejo },
       fx.ctx,
@@ -969,9 +968,30 @@ describe("el confirmation_token es de la conversación que lo pidió", () => {
     expect(fx.postMock).not.toHaveBeenCalled();
   });
 
-  it("falsificar la huella no alcanza: la identidad está DENTRO del hash", async () => {
-    // La huella existe para diagnosticar, no para autorizar. Quien la reemplace
-    // por la suya se lleva un rechazo igual, solo que por el otro motivo.
+  it("no acepta variantes textuales del token que esquiven la idempotencia", async () => {
+    const fx = conCanal();
+    const args = { comprobante: COMPROBANTE, remitente: DUENO };
+    const dry = await handleEmitirComprobante(args, fx.ctx);
+    const token = String(sc(dry).confirmation_token);
+
+    const primero = await handleEmitirComprobante(
+      { ...args, confirm: true, confirmation_token: token },
+      fx.ctx,
+    );
+    const variante = await handleEmitirComprobante(
+      { ...args, confirm: true, confirmation_token: ` ${token} ` },
+      fx.ctx,
+    );
+
+    expect(sc(primero).mode).toBe("executed");
+    expect(variante.isError).toBe(true);
+    expect(errorOf(variante).kind).toBe("confirmation");
+    expect(fx.postMock).toHaveBeenCalledOnce();
+  });
+
+  it("mezclar partes de dos tokens no produce una firma válida", async () => {
+    // Timestamp y firma forman una unidad autenticada: no se pueden recortar y
+    // pegar desde previews de dos conversaciones distintas.
     const fx = conCanal();
     const delDueno = await handleEmitirComprobante({ comprobante: COMPROBANTE, remitente: DUENO }, fx.ctx);
     const delContador = await handleEmitirComprobante(

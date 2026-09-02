@@ -55,6 +55,7 @@ const outputShape = {
   detalle_completo: z.boolean(),
   api_base_url: z.string().nullable(),
   has_token: z.boolean(),
+  approval_secret_configurado: z.boolean(),
   default_empresa_rut: z.string().nullable(),
   /** Hay RUT configurado. Es el reemplazo de `default_empresa_rut` sin detalle. */
   tiene_empresa_rut: z.boolean(),
@@ -163,6 +164,7 @@ export function buildHealthStructured(
     detalle_completo: detalle,
     api_base_url: detalle ? c.apiBaseUrl : null,
     has_token: c.hasToken, // boolean — el token NUNCA se incluye
+    approval_secret_configurado: c.approvalSecretConfigurado,
     default_empresa_rut: detalle ? c.defaultEmpresaRut : null,
     tiene_empresa_rut: c.defaultEmpresaRut !== null,
     default_sucursal_id: detalle ? c.defaultSucursalId : null,
@@ -205,6 +207,7 @@ function toMarkdown(s: Record<string, unknown>): string {
     // hacer. Se dice que el valor está oculto y por qué.
     `- **api_base_url**: ${s.api_base_url ?? (detalle ? "(no configurada)" : OCULTO)}`,
     `- **has_token**: ${s.has_token}`,
+    `- **approval_secret_configurado**: ${s.approval_secret_configurado}`,
     `- **default_empresa_rut**: ${
       s.default_empresa_rut ?? (detalle ? "(no configurado)" : `${OCULTO} — hay RUT: ${s.tiene_empresa_rut}`)
     }`,

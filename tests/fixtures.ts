@@ -22,6 +22,7 @@ export function makeConfig(overrides: Partial<BillerConfig> = {}): BillerConfig 
     logLevel: "error",
     writeEnabled: false,
     allowProductionWrites: false,
+    approvalSecret: "test-approval-secret-with-more-than-32-characters",
     capabilityMode: "read_only" as const,
     enableIvaEstimado: false,
     maxMontos: {},

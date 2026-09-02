@@ -50,6 +50,9 @@ function ctxCon(overrides: Partial<BillerConfig> = {}): ToolContext {
     getWriteContext: () => {
       throw new Error("no usado");
     },
+    getApprovalCycle: () => {
+      throw new Error("no usado");
+    },
     metricas: METRICAS_NULAS,
     getBorradorStore: () => new BorradorStoreMemoria(),
     // El contexto de test no viene de un env: se inspecciona uno vacío, que es la
@@ -67,6 +70,9 @@ const ctxSinConfig: ToolContext = {
     throw new Error("no usado");
   },
   getWriteContext: () => {
+    throw new Error("no usado");
+  },
+  getApprovalCycle: () => {
     throw new Error("no usado");
   },
   metricas: METRICAS_NULAS,
@@ -101,8 +107,10 @@ describe("redacción estructural de secretos", () => {
     expect(JSON.stringify(out)).not.toContain(TOKEN);
   });
 
-  it("también tacha la API key de Kapso y el token del transporte HTTP", () => {
+  it("también tacha la clave de approvals, la API key de Kapso y el token HTTP", () => {
+    const approvalSecret = "approval_secret_super_secreto_123456789";
     const ctx = ctxCon({
+      approvalSecret,
       httpAuthToken: "http_token_abcdefgh",
       kapso: {
         apiKey: "kapso_key_zyxwvuts",
@@ -112,14 +120,19 @@ describe("redacción estructural de secretos", () => {
     });
     const out = sanitizeToolResult(
       {
-        content: [{ type: "text", text: "kapso_key_zyxwvuts y http_token_abcdefgh" }],
-        structuredContent: { x: "kapso_key_zyxwvuts" },
+        content: [{ type: "text", text: `${approvalSecret} kapso_key_zyxwvuts y http_token_abcdefgh` }],
+        structuredContent: { x: `kapso_key_zyxwvuts ${approvalSecret}` },
       },
       ctx,
     );
     const serializado = JSON.stringify(out);
+    expect(serializado).not.toContain(approvalSecret);
     expect(serializado).not.toContain("kapso_key_zyxwvuts");
     expect(serializado).not.toContain("http_token_abcdefgh");
+
+    const error = errorToolResult(new Error(`falló con ${approvalSecret}`), ctx);
+    expect(JSON.stringify(error)).not.toContain(approvalSecret);
+    expect(JSON.stringify(error)).toContain("[REDACTED]");
   });
 
   it("no explota cuando la configuración no está disponible", () => {

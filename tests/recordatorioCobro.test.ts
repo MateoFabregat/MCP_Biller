@@ -263,7 +263,7 @@ describe("la tool: dry-run y confirmación", () => {
     expect(sc(res).enviado).toBe(false);
     expect(sc(res).dry_run).toBe(true);
     expect(String(sc(res).mensaje)).toContain("e-Factura A-1001");
-    expect(String(sc(res).confirmation_token)).toMatch(/^\d+\./);
+    expect(String(sc(res).confirmation_token)).toMatch(/^v2\.\d+\.[A-Za-z0-9_-]{43}$/);
     expect(llamadas).toHaveLength(0);
   });
 

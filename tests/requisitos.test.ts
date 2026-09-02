@@ -163,6 +163,9 @@ describe("biller_requisitos_comprobante", () => {
       getWriteContext: () => {
         throw new Error("sin config");
       },
+      getApprovalCycle: () => {
+        throw new Error("sin config");
+      },
       metricas: METRICAS_NULAS,
     getBorradorStore: () => new BorradorStoreMemoria(),
     // El contexto de test no viene de un env: se inspecciona uno vacío, que es la

@@ -413,7 +413,7 @@ async function crear() {
       `  ${authToken}\n\n` +
       "QUEDA PENDIENTE, A MANO Y A CONCIENCIA (ninguna barrera se autocompleta):\n" +
       "  · BILLER_REMITENTES_AUTORIZADOS / KAPSO_* — quién puede preguntar y el canal de WhatsApp\n" +
-      "  · BILLER_CAPABILITY_MODE / BILLER_WRITE_ENABLED — hoy queda en solo lectura\n" +
+      "  · BILLER_CAPABILITY_MODE / BILLER_WRITE_ENABLED / BILLER_APPROVAL_SECRET — hoy queda en solo lectura\n" +
       (Object.keys(topes).length === 0 ? "  · BILLER_MAX_MONTO_UYU / _USD — topes de emisión\n" : "") +
       "  · BILLER_VALOR_UI + _FECHA — el umbral de 5.000 UI\n\n" +
       "Verificando el alta contra la API real…\n",
@@ -523,7 +523,25 @@ async function verificar(env, nombre) {
     );
   }
 
-  // 5. El canal de WhatsApp y —lo importante— quién puede usarlo.
+  // 5. La clave es obligatoria en las superficies que emiten
+  // confirmation_token. No se genera acá: debe ser propia de este tenant y
+  // administrarse como secreto por el operador.
+  const modoCapacidad = (env.BILLER_CAPABILITY_MODE ?? "").trim().toLowerCase();
+  const requiereApproval = modoCapacidad === "write_enabled" || Boolean(env.KAPSO_API_KEY?.trim());
+  if (requiereApproval) {
+    const longitud = (env.BILLER_APPROVAL_SECRET ?? "").trim().length;
+    if (longitud < 32) {
+      falta(
+        "Clave de approvals",
+        "Falta BILLER_APPROVAL_SECRET o tiene menos de 32 caracteres. Generá una exclusiva para " +
+          "esta empresa (por ejemplo con `openssl rand -hex 32`); no reutilices otras credenciales.",
+      );
+    } else {
+      ok("Clave de approvals", "Configurada para firmar confirmation_token v2.");
+    }
+  }
+
+  // 6. El canal de WhatsApp y —lo importante— quién puede usarlo.
   if (env.KAPSO_API_KEY) {
     const remitentes = (env.BILLER_REMITENTES_AUTORIZADOS ?? "").split(",").filter((s) => s.trim());
     const destinatarios = (env.KAPSO_DESTINATARIOS_PERMITIDOS ?? "").split(",").filter((s) => s.trim());
@@ -566,7 +584,7 @@ async function verificar(env, nombre) {
     ok("Canal de WhatsApp", "Sin configurar. El server corre en modo escritorio (stdio).");
   }
 
-  // 6. El valor de la UI se vence. Un umbral viejo hace que un e-Ticket grande
+  // 7. El valor de la UI se vence. Un umbral viejo hace que un e-Ticket grande
   //    salga sin receptor identificado, que es un problema fiscal, no de UX.
   if (env.BILLER_VALOR_UI) {
     const fecha = env.BILLER_VALOR_UI_FECHA;
@@ -586,7 +604,7 @@ async function verificar(env, nombre) {
     );
   }
 
-  // 7. Escritura en producción: que quede dicho en voz alta.
+  // 8. Escritura en producción: que quede dicho en voz alta.
   if (ambiente === "production" && env.BILLER_WRITE_ENABLED === "true") {
     aviso(
       "Escritura en PRODUCCIÓN",

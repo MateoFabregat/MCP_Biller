@@ -234,7 +234,12 @@ puede enviarlo por WhatsApp.
 export KAPSO_API_KEY=<api-key-del-proyecto>
 export KAPSO_PHONE_NUMBER_ID=<id-del-numero-emisor>
 export KAPSO_DESTINATARIOS_PERMITIDOS=59899123456
+export BILLER_APPROVAL_SECRET=<clave-aleatoria-exclusiva-generada-con-openssl-rand-hex-32>
 ```
+
+`BILLER_APPROVAL_SECRET` es obligatoria al activar Kapso porque el recordatorio
+de cobro usa un approval firmado antes de escribirle a un tercero. Debe ser
+distinta de la API key de Kapso y exclusiva de este tenant.
 
 ### 2.1. El envío es opt-in y con allowlist
 

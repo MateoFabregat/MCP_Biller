@@ -16,7 +16,6 @@ import {
   construirConfirmacionAnulacion,
   construirRevisionAnulacion,
 } from "../../kapso/render.js";
-import { checkConfirmationToken, computeConfirmationToken } from "../../write/confirm.js";
 import {
   WRITE_ANNOTATIONS,
   jsonResult,
@@ -149,14 +148,11 @@ export async function handleAnularComprobante(
   // comprobante y de la misma conversación. Así una alteración entre los dos
   // toques no cambia silenciosamente qué documento se anula.
   if (a.confirmacion_revisada) {
-    const config = ctx.getConfig();
-    const check = checkConfirmationToken(
-      a.revision_token,
-      `${ENDPOINT}:revision`,
-      config.environment,
-      { payload, query: null },
-      { identidad: identidadWhatsapp },
-    );
+    const check = ctx.getApprovalCycle().verify(a.revision_token, {
+      endpoint: `${ENDPOINT}:revision`,
+      subject: { payload, query: null },
+      actorIdentity: identidadWhatsapp,
+    });
     if (!check.ok) return simpleErrorResult(check.mensaje, ctx);
   }
 
@@ -232,13 +228,11 @@ async function adjuntarDobleConfirmacion(
       return fallar("No se envió la confirmación por WhatsApp: falta KAPSO_API_KEY.");
     }
     const destino = normalizarTelefono(p.destinatario);
-    const revisionToken = computeConfirmationToken(
-      `${ENDPOINT}:revision`,
-      config.environment,
-      { payload: p.payload, query: null },
-      Date.now(),
-      identidadDeEscritura(p.ctx, p.remitente),
-    );
+    const revisionToken = p.ctx.getApprovalCycle().issue({
+      endpoint: `${ENDPOINT}:revision`,
+      subject: { payload: p.payload, query: null },
+      actorIdentity: identidadDeEscritura(p.ctx, p.remitente),
+    });
     const tokenDelBoton = p.revisada ? token : revisionToken;
     const mensaje = p.revisada
       ? construirConfirmacionAnulacion({

@@ -109,6 +109,7 @@ Tres cosas que el diagrama no puede decir y hay que saber:
 biller_* (lectura)  → BILLER_API_BASE_URL + BILLER_API_TOKEN         (mínimo absoluto)
 escritura           → + BILLER_CAPABILITY_MODE=write_enabled
 ejecución real      → + BILLER_WRITE_ENABLED=true  (+ allow_production en prod)
+approvals/WhatsApp  → + BILLER_APPROVAL_SECRET exclusiva del tenant
 WhatsApp saliente   → + KAPSO_API_KEY + allowlist de destinatarios
 WhatsApp entrante   → + transporte HTTP público + KAPSO_WEBHOOK_SECRET + allowlist de remitentes
 multi-tenant        → + BILLER_TENANTS_JSON (overlay de env por empresa)
@@ -185,11 +186,12 @@ no código**:
 |---|---|---|
 | 1 | Token de API de la empresa (primero el de test) | `BILLER_API_TOKEN` |
 | 2 | Sucursal por defecto (Ajustes → Sucursales en biller.uy) | `BILLER_DEFAULT_SUCURSAL_ID` (+ `BILLER_SUCURSALES_JSON` con los nombres si hay varias) |
-| 3 | Quién puede hablar por WhatsApp (el dueño, el contador) | `BILLER_REMITENTES_AUTORIZADOS` |
-| 4 | A quién se le puede mandar (clientes para PDFs/recordatorios) | `KAPSO_DESTINATARIOS_PERMITIDOS` |
-| 5 | Tope de monto por moneda (la red contra el error de coma) | `BILLER_MAX_MONTO_UYU`, `_USD` |
-| 6 | Valor de la UI del día (para la regla de 5.000 UI) | `BILLER_VALOR_UI` + `_FECHA` |
-| 7 | Verificar la cadena entera | `node scripts/onboard.mjs` |
+| 3 | Clave de approvals exclusiva del tenant | `BILLER_APPROVAL_SECRET` (mínimo 32 caracteres; `openssl rand -hex 32`) |
+| 4 | Quién puede hablar por WhatsApp (el dueño, el contador) | `BILLER_REMITENTES_AUTORIZADOS` |
+| 5 | A quién se le puede mandar (clientes para PDFs/recordatorios) | `KAPSO_DESTINATARIOS_PERMITIDOS` |
+| 6 | Tope de monto por moneda (la red contra el error de coma) | `BILLER_MAX_MONTO_UYU`, `_USD` |
+| 7 | Valor de la UI del día (para la regla de 5.000 UI) | `BILLER_VALOR_UI` + `_FECHA` |
+| 8 | Verificar la cadena entera | `node scripts/onboard.mjs` |
 
 **Varias empresas en un solo server:** `BILLER_TENANTS_JSON` — cada tenant es
 un overlay de variables sobre las del proceso, y el `auth_token` del transporte

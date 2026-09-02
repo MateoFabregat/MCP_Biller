@@ -14,6 +14,7 @@ const inspectWriteEnabled = () =>
     BILLER_API_TOKEN: "TOKENSECRETO",
     BILLER_CAPABILITY_MODE: "write_enabled",
     BILLER_WRITE_ENABLED: "true",
+    BILLER_APPROVAL_SECRET: "test-approval-secret-with-more-than-32-characters",
   });
 
 describe("biller_health_check", () => {
@@ -22,6 +23,7 @@ describe("biller_health_check", () => {
     expect(JSON.stringify(res)).not.toContain("TOKENSECRETO");
     expect(res.structuredContent?.has_token).toBe(true);
     expect(res.structuredContent?.status).toBe("ok");
+    expect(res.structuredContent?.approval_secret_configurado).toBe(false);
   });
 
   it("status=config_incompleta cuando faltan variables", () => {
@@ -53,6 +55,7 @@ describe("biller_health_check", () => {
     expect(res.structuredContent?.capability_mode).toBe("write_enabled");
     expect(res.structuredContent?.write_tools_registered).toBe(true);
     expect(res.structuredContent?.write_execution_enabled).toBe(true);
+    expect(res.structuredContent?.approval_secret_configurado).toBe(true);
   });
 
   it("warnings vacíos en modo read_only con config mínima", () => {

@@ -39,7 +39,6 @@ import { normalizarTelefono } from "../config.js";
 import { KapsoClient } from "../kapso/client.js";
 import { correrCuentaCorriente } from "../services/corridaCuentaCorriente.js";
 import { construirRecordatorio } from "../services/recordatorioCobro.js";
-import { checkConfirmationToken, computeConfirmationToken } from "../write/confirm.js";
 import { identidadDeEscritura } from "./write/shared.js";
 import { remitenteSchema } from "../security/remitentes.js";
 import {
@@ -308,13 +307,11 @@ export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): 
       return jsonResult({
         ...base,
         enviado: false,
-        confirmation_token: computeConfirmationToken(
-          ENDPOINT_TOKEN,
-          config.environment,
-          payload,
-          Date.now(),
-          identidad,
-        ),
+        confirmation_token: ctx.getApprovalCycle().issue({
+          endpoint: ENDPOINT_TOKEN,
+          subject: payload,
+          actorIdentity: identidad,
+        }),
         message_id: null,
         warnings: [
           ...corrida.warnings,
@@ -337,13 +334,11 @@ export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): 
       });
     }
 
-    const check = checkConfirmationToken(
-      a.confirmation_token,
-      ENDPOINT_TOKEN,
-      config.environment,
-      payload,
-      { identidad },
-    );
+    const check = ctx.getApprovalCycle().verify(a.confirmation_token, {
+      endpoint: ENDPOINT_TOKEN,
+      subject: payload,
+      actorIdentity: identidad,
+    });
     if (!check.ok) {
       const extra =
         check.motivo === "no_coincide"

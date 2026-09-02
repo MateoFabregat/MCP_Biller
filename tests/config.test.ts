@@ -56,9 +56,12 @@ describe("config", () => {
     const insp = inspectConfig({
       BILLER_API_BASE_URL: "https://test.biller.uy",
       BILLER_API_TOKEN: "SECRETO-XYZ",
+      BILLER_APPROVAL_SECRET: "approval-secret-que-tampoco-debe-salir-123456",
     });
     expect(JSON.stringify(insp)).not.toContain("SECRETO-XYZ");
+    expect(JSON.stringify(insp)).not.toContain("approval-secret-que-tampoco-debe-salir-123456");
     expect(insp.hasToken).toBe(true);
+    expect(insp.approvalSecretConfigurado).toBe(true);
     expect(insp).not.toHaveProperty("apiToken");
   });
 
@@ -92,8 +95,38 @@ describe("config", () => {
     });
 
     it("acepta write_enabled", () => {
-      const c = loadConfig({ ...base, BILLER_CAPABILITY_MODE: "write_enabled" });
+      const c = loadConfig({
+        ...base,
+        BILLER_CAPABILITY_MODE: "write_enabled",
+        BILLER_APPROVAL_SECRET: "test-approval-secret-with-more-than-32-characters",
+      });
       expect(c.capabilityMode).toBe("write_enabled");
+    });
+
+    it("write_enabled exige una clave server-side para firmar approvals", () => {
+      expect(() => loadConfig({ ...base, BILLER_CAPABILITY_MODE: "write_enabled" })).toThrow(
+        /BILLER_APPROVAL_SECRET/,
+      );
+      expect(() =>
+        loadConfig({
+          ...base,
+          BILLER_CAPABILITY_MODE: "write_enabled",
+          BILLER_APPROVAL_SECRET: "demasiado-corta",
+        }),
+      ).toThrow(/32 caracteres/);
+    });
+
+    it("Kapso también exige la clave porque puede enviar recordatorios", () => {
+      expect(() => loadConfig({ ...base, KAPSO_API_KEY: "kapso-key" })).toThrow(
+        /BILLER_APPROVAL_SECRET/,
+      );
+      expect(
+        loadConfig({
+          ...base,
+          KAPSO_API_KEY: "kapso-key",
+          BILLER_APPROVAL_SECRET: "test-approval-secret-with-more-than-32-characters",
+        }).approvalSecret,
+      ).toHaveLength(49);
     });
 
     it("cualquier valor desconocido cae en read_only", () => {

@@ -165,6 +165,7 @@ describe("lo sensible no se hereda: el overlay lo borra", () => {
     KAPSO_WEBHOOK_SECRET: "secreto_de_otra",
     BILLER_REMITENTES_AUTORIZADOS: "59899000002",
     BILLER_CAPABILITY_MODE: "write_enabled",
+    BILLER_APPROVAL_SECRET: "approval-secret-de-la-empresa-del-proceso-123456",
     BILLER_WRITE_ENABLED: "true",
     BILLER_ALLOW_PRODUCTION_WRITES: "true",
     BILLER_DEFAULT_EMPRESA_RUT: "210000000000",
@@ -200,6 +201,7 @@ describe("lo sensible no se hereda: el overlay lo borra", () => {
             BILLER_API_TOKEN: "token_propio",
             KAPSO_API_KEY: "clave_propia",
             BILLER_CAPABILITY_MODE: "write_enabled",
+            BILLER_APPROVAL_SECRET: "approval-secret-propio-del-tenant-123456789",
           },
         },
       ],
@@ -208,6 +210,7 @@ describe("lo sensible no se hereda: el overlay lo borra", () => {
     const entorno = entornoDe(r.tenants[0]!, PROCESO_CONTAMINADO);
     expect(entorno.KAPSO_API_KEY).toBe("clave_propia");
     expect(entorno.BILLER_CAPABILITY_MODE).toBe("write_enabled");
+    expect(entorno.BILLER_APPROVAL_SECRET).toBe("approval-secret-propio-del-tenant-123456789");
     expect(entorno.KAPSO_DESTINATARIOS_PERMITIDOS).toBeUndefined();
   });
 

@@ -9,6 +9,7 @@ import type { BorradorStore } from "../kapso/borradorStore.js";
 import type { Metricas } from "../observabilidad/metricas.js";
 import { redactSecrets, toSafeError } from "../utils/errors.js";
 import type { WriteExecContext } from "../write/execute.js";
+import type { ApprovalCycle } from "../write/confirm.js";
 
 /** Resultado de tool compatible con CallToolResult del SDK. */
 export interface ToolResult {
@@ -28,6 +29,8 @@ export interface ToolContext {
   getClient: () => BillerClient;
   /** Contexto de escritura (writeClient + auditor + idempotencia). Lanza si la config es inválida. */
   getWriteContext: () => WriteExecContext;
+  /** Ciclo único de emisión/verificación de approvals para esta empresa. */
+  getApprovalCycle: () => ApprovalCycle;
   /**
    * Métricas de uso de ESTA empresa.
    *
@@ -175,7 +178,13 @@ export function dualResult(structured: Record<string, unknown>, markdown: string
 /** Reúne secretos a redactar, tolerando que la config no esté disponible. */
 export function collectSecrets(ctx: ToolContext): Array<string | undefined> {
   try {
-    return [ctx.getConfig().apiToken];
+    const config = ctx.getConfig();
+    return [
+      config.apiToken,
+      config.approvalSecret ?? undefined,
+      config.kapso?.apiKey,
+      config.httpAuthToken,
+    ];
   } catch {
     return [];
   }

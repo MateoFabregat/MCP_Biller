@@ -69,18 +69,13 @@ Y de la revisión de seguridad:
 
 ### Falta, de esas mismas revisiones
 
-- [ ] **El invariante del `confirmation_token` volvió a ser una convención.**
-  Antes era estructural ("si pasás por `runWriteOperation`, quedás atado");
-  ahora `biller_recordatorio_cobro` tiene que **acordarse** de llamar a
-  `identidadDeEscritura`, y en dos lugares (emitir y verificar). La tool número
-  9 que emita su propio token puede olvidarse, y falla hacia el lado inseguro.
-  Dos arreglos posibles, el segundo es más barato: (a) extraer el CICLO —
-  `tokenDeConfirmacion(ctx, {...})` que devuelva `{emitir, verificar}` con la
-  identidad adentro, y que lo usen tanto el runner como esta tool; la costura
-  correcta no es "escribir un CFE" sino "emitir un confirmation_token";
-  (b) una regla estática al estilo `scripts/check-readonly.mjs` que falle el
-  build si un archivo llama a `computeConfirmationToken` sin llamar también a
-  `identidadDeEscritura`.
+- [x] **El ciclo de `confirmation_token` volvió a ser una costura central.**
+  `ApprovalCycle`, provisto por `ToolContext`, emite y verifica los approvals de
+  las siete tools de escritura, `biller_recordatorio_cobro` y la revisión de
+  anulaciones. El token v2 usa HMAC-SHA-256 con una clave server-side exclusiva
+  del tenant y autentica payload, endpoint, ambiente, tenant, empresa,
+  conversación, timestamp y versión de política. El formato SHA-256 anterior se
+  rechaza y obliga a repetir el dry-run.
 - [ ] **`cuerpo_sugerido` sale con las marcas `⟦dato-no-confiable⟧` adentro**
   (preexistente). Es *exactamente* "algo pensado para volver a entrar en un
   payload" y usa dos claves de `CAMPOS_NO_CONFIABLES` (`razon_referencia`,

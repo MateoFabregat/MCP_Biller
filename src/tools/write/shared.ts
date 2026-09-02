@@ -16,11 +16,10 @@ import {
 } from "../../services/calcularTotales.js";
 import { createHash } from "node:crypto";
 import { limpiarMarcasProfundo } from "../../security/untrusted.js";
-import { rechazoSesionAjena, requiereRemitente } from "../../security/remitentes.js";
+import { requiereRemitente } from "../../security/remitentes.js";
 import { normalizarTelefono } from "../../config.js";
 import type { RateLimitClass } from "../../utils/rateLimit.js";
 import { BillerConfirmationError } from "../../utils/errors.js";
-import { checkConfirmationToken, computeConfirmationToken } from "../../write/confirm.js";
 import { executeWrite } from "../../write/execute.js";
 import { evaluateWriteGate } from "../../write/gate.js";
 import { generateIdempotencyKey } from "../../write/idempotency.js";
@@ -298,7 +297,9 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
     // El token (y la idempotencia/audit) ligan tanto el body como la query.
     const subject = { payload, query: p.query ?? null };
     const identidad = identidadDeEscritura(ctx, p.remitente);
-    const token = computeConfirmationToken(endpoint, environment, subject, Date.now(), identidad);
+    const approval = ctx.getApprovalCycle();
+    const approvalRequest = { endpoint, subject, actorIdentity: identidad };
+    const token = approval.issue(approvalRequest);
 
     // --- Fase DRY-RUN ---
     if (!p.confirm) {
@@ -366,15 +367,8 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
     // El chequeo distingue el motivo: "vencido" se arregla repitiendo el
     // dry-run, "no coincide" significa que el payload cambió. Devolver el mismo
     // mensaje para los dos hace que el modelo reintente lo que no debe.
-    const check = checkConfirmationToken(p.confirmationToken, endpoint, environment, subject, {
-      identidad,
-    });
+    const check = approval.verify(p.confirmationToken, approvalRequest);
     if (!check.ok) {
-      // El token de otra conversación no es un problema de confirmación sino de
-      // autorización, y sale con la misma forma que los otros rechazos de sesión
-      // ajena (`motivo: "sesion_ajena"`) para que el modelo lo reconozca como lo
-      // que es: algo que no se reintenta.
-      if (check.motivo === "sesion_ajena") return rechazoSesionAjena(check.mensaje, ctx);
       throw new BillerConfirmationError(check.mensaje);
     }
 

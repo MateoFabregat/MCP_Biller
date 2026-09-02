@@ -26,6 +26,7 @@ import { createDefaultRateLimiters } from "../utils/rateLimit.js";
 import { Auditor } from "../write/audit.js";
 import type { WriteExecContext } from "../write/execute.js";
 import { crearIdempotencyStore, type IdempotencyStore } from "../write/idempotency.js";
+import { ApprovalCycle } from "../write/confirm.js";
 import { BillerWriteClient } from "../write/writeClient.js";
 import { registerAlertas } from "./alertas.js";
 import { registerBuscarClientePorRut } from "./buscarClientePorRut.js";
@@ -176,6 +177,7 @@ export function createToolContext(
   // La persistencia se resuelve perezosamente: la ruta vive en la config, que
   // puede no estar disponible al construir el contexto.
   let cachedIdempotency: IdempotencyStore | undefined;
+  let cachedApprovalCycle: ApprovalCycle | undefined;
   // Igual que el de idempotencia: la ruta vive en la config, que puede no estar
   // disponible al construir el contexto. Si la config no carga, memoria — un
   // flujo de emisión sin store funciona (peor), pero sin store NO funciona.
@@ -200,6 +202,24 @@ export function createToolContext(
       auditor: cachedAuditor,
       idempotency: cachedIdempotency,
     };
+  };
+
+  const getApprovalCycle = (): ApprovalCycle => {
+    if (cachedApprovalCycle === undefined) {
+      const config = getConfig();
+      if (config.approvalSecret === null) {
+        throw new Error(
+          "Falta BILLER_APPROVAL_SECRET: no se emiten confirmation_token sin una clave server-side.",
+        );
+      }
+      cachedApprovalCycle = new ApprovalCycle({
+        secret: config.approvalSecret,
+        environment: config.environment,
+        tenantId: config.tenantId,
+        companyId: config.defaultEmpresaRut ?? null,
+      });
+    }
+    return cachedApprovalCycle;
   };
 
   const getBorradorStore = (): BorradorStore => {
@@ -237,6 +257,7 @@ export function createToolContext(
     getConfig,
     getClient,
     getWriteContext,
+    getApprovalCycle,
     metricas,
     getBorradorStore,
     inspeccionar: () => inspectConfig(env),

@@ -118,6 +118,7 @@ export function secretosDe(ctx: ToolContext): Array<string | undefined> {
   try {
     const config = ctx.getConfig();
     out.push(config.apiToken);
+    if (config.approvalSecret !== null) out.push(config.approvalSecret);
     if (config.kapso?.apiKey !== undefined) out.push(config.kapso.apiKey);
     if (config.httpAuthToken !== undefined) out.push(config.httpAuthToken);
   } catch {

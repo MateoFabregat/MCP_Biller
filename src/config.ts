@@ -106,6 +106,11 @@ export interface BillerConfig {
   writeEnabled: boolean;
   /** Habilita ejecutar POST contra PRODUCCIÓN (además requiere allow_production=true). */
   allowProductionWrites: boolean;
+  /**
+   * Clave server-side para firmar confirmation_token v2. Nunca se expone.
+   * Es obligatoria si se registran tools de escritura o si Kapso está activo.
+   */
+  approvalSecret: string | null;
   /** Ruta opcional de archivo para el audit log (además de stderr). */
   auditLogPath?: string;
   /** Modo operativo: qué tools se registran en el servidor MCP. */
@@ -537,6 +542,8 @@ export interface ConfigInspection {
   environment: BillerEnvironment | null;
   writeEnabled: boolean;
   allowProductionWrites: boolean;
+  /** true si existe la clave de firma de approvals; nunca expone su valor. */
+  approvalSecretConfigurado: boolean;
   auditLogPath: string | null;
   /** Modo operativo: qué tools se registran en el servidor MCP. */
   capabilityMode: BillerCapabilityMode;
@@ -633,6 +640,18 @@ export function loadConfig(env: Env = process.env): BillerConfig {
     missing.push("BILLER_API_TOKEN debe tener al menos 8 caracteres");
   }
 
+  const capabilityMode = parseCapabilityMode(env.BILLER_CAPABILITY_MODE);
+  const approvalSecret = trimOrUndefined(env.BILLER_APPROVAL_SECRET);
+  const approvalRequired =
+    capabilityMode === "write_enabled" || trimOrUndefined(env.KAPSO_API_KEY) !== undefined;
+  if (approvalRequired) {
+    if (!approvalSecret) {
+      missing.push("BILLER_APPROVAL_SECRET");
+    } else if (approvalSecret.length < 32) {
+      missing.push("BILLER_APPROVAL_SECRET debe tener al menos 32 caracteres");
+    }
+  }
+
   if (missing.length > 0) {
     throw new BillerConfigError(
       `Faltan variables de entorno requeridas: ${missing.join(", ")}. ` +
@@ -669,8 +688,9 @@ export function loadConfig(env: Env = process.env): BillerConfig {
     environment: detectEnvironment(apiBaseUrl),
     writeEnabled: parseBool(env.BILLER_WRITE_ENABLED),
     allowProductionWrites: parseBool(env.BILLER_ALLOW_PRODUCTION_WRITES),
+    approvalSecret: approvalSecret ?? null,
     auditLogPath: rutas.auditLogPath,
-    capabilityMode: parseCapabilityMode(env.BILLER_CAPABILITY_MODE),
+    capabilityMode,
     httpAuthToken: trimOrUndefined(env.BILLER_HTTP_AUTH_TOKEN),
     httpPort: parsePort(env.BILLER_HTTP_PORT, DEFAULT_HTTP_PORT),
     httpHost: trimOrUndefined(env.BILLER_HTTP_HOST) ?? "127.0.0.1",
@@ -706,6 +726,7 @@ export function loadConfig(env: Env = process.env): BillerConfig {
 export function inspectConfig(env: Env = process.env): ConfigInspection {
   const baseUrlRaw = trimOrUndefined(env.BILLER_API_BASE_URL);
   const token = trimOrUndefined(env.BILLER_API_TOKEN);
+  const approvalSecret = trimOrUndefined(env.BILLER_APPROVAL_SECRET);
 
   const missing: string[] = [];
   if (!baseUrlRaw) missing.push("BILLER_API_BASE_URL");
@@ -715,6 +736,15 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     // Mismo mínimo que loadConfig: si no, biller_health_check reporta "ok"
     // para un token que haría fallar toda llamada con BillerConfigError.
     missing.push("BILLER_API_TOKEN debe tener al menos 8 caracteres");
+  }
+  const capabilityMode = parseCapabilityMode(env.BILLER_CAPABILITY_MODE);
+  const approvalRequired =
+    capabilityMode === "write_enabled" || trimOrUndefined(env.KAPSO_API_KEY) !== undefined;
+  if (approvalRequired) {
+    if (!approvalSecret) missing.push("BILLER_APPROVAL_SECRET");
+    else if (approvalSecret.length < 32) {
+      missing.push("BILLER_APPROVAL_SECRET debe tener al menos 32 caracteres");
+    }
   }
 
   let timeoutMs = DEFAULT_TIMEOUT_MS;
@@ -745,8 +775,9 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     environment: apiBaseUrl ? detectEnvironment(apiBaseUrl) : null,
     writeEnabled: parseBool(env.BILLER_WRITE_ENABLED),
     allowProductionWrites: parseBool(env.BILLER_ALLOW_PRODUCTION_WRITES),
+    approvalSecretConfigurado: approvalSecret !== undefined && approvalSecret.length >= 32,
     auditLogPath: rutas.auditLogPath ?? null,
-    capabilityMode: parseCapabilityMode(env.BILLER_CAPABILITY_MODE),
+    capabilityMode,
     httpAuthTokenConfigurado: trimOrUndefined(env.BILLER_HTTP_AUTH_TOKEN) !== undefined,
     httpPort: parsePort(env.BILLER_HTTP_PORT, DEFAULT_HTTP_PORT),
     httpHost: trimOrUndefined(env.BILLER_HTTP_HOST) ?? "127.0.0.1",

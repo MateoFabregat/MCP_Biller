@@ -343,8 +343,8 @@ payload exacto, y devuelve un **preview** + un `confirmation_token`.
   "payload_preview": { "tipo_comprobante": 101, "sucursal": 6, "items": [ /* ... */ ] },
   "totales_estimados": { "subtotal": 200, "iva_por_tasa": { "22": 44 }, "total": 244, "exacto": true },
   "resumen": "Total estimado: UYU 244 (neto 200 — IVA 22%: 44)",
-  "confirmation_token": "a1b2…(sha256)",
-  "next_step": "Para EJECUTAR, volvé a llamar … con confirm=true y confirmation_token=\"a1b2…\"",
+  "confirmation_token": "v2.1788364800000.ZXhhbXBsZS1obWFj…",
+  "next_step": "Para EJECUTAR, volvé a llamar … con confirm=true y el mismo confirmation_token",
   "no_network_call": true,
   "warnings": []
 }
@@ -362,8 +362,10 @@ para poder confirmar.
 **2. Ejecución (`confirm: true` + `confirmation_token`)** — recién acá puede hacer el
 `POST`, y solo si pasan **todas** las barreras:
 
-1. **Token**: el `confirmation_token` debe coincidir con el payload+endpoint+ambiente.
-   Si cambiás cualquier campo, el token deja de valer → hay que volver a previsualizar.
+1. **Aprobación autenticada**: el `confirmation_token` v2 está firmado por el servidor y
+   queda atado al payload normalizado, endpoint, ambiente, tenant, empresa y conversación.
+   Si cambia cualquiera de ellos —o se altera el timestamp— deja de valer. Vence a los
+   15 minutos. Los tokens del formato anterior no se aceptan: hay que repetir el dry-run.
 2. **Gate de escritura**: `BILLER_WRITE_ENABLED=true`.
 3. **Gate de producción**: si el ambiente es `production`, además
    `BILLER_ALLOW_PRODUCTION_WRITES=true` **y** el argumento `allow_production=true`.
@@ -412,6 +414,7 @@ Copiá `.env.example` a `.env`. **Empezá siempre por TEST.** El `.env` está en
 | `BILLER_API_BASE_URL` | Sí | — | `https://test.biller.uy` o `https://biller.uy`. |
 | `BILLER_API_TOKEN` | Sí | — | Bearer token de la empresa. Nunca se loguea ni se devuelve. |
 | `BILLER_CAPABILITY_MODE` | No | `read_only` | `read_only` (solo lectura) \| `write_enabled` (+ tools de escritura). |
+| `BILLER_APPROVAL_SECRET` | Si hay escritura o Kapso | — | Clave exclusiva por tenant (mínimo 32 caracteres) para firmar approvals. Generá una con `openssl rand -hex 32`; no reutilices el token de Biller, la clave de Kapso ni secretos de otros tenants. |
 | `BILLER_DEFAULT_EMPRESA_RUT` | No | — | Metadata local; **no** se envía a la API. |
 | `BILLER_DEFAULT_SUCURSAL_ID` | No | — | Default de `sucursal` (lectura y emisión). **ID real** de Biller (Ajustes → Sucursales), no un valor genérico. Opcional: `obtener` no lo exige. |
 | `BILLER_SUCURSALES_JSON` | No | — | Mapa `{"6":"Pocitos","7":"Centro"}` para nombrar sucursales en los reportes. Biller no expone un endpoint de sucursales. |
@@ -457,8 +460,9 @@ npm run check:readonly # falla si hay POST/PUT/PATCH/DELETE FUERA de la capa wri
 defecto, usá el **ID real** de tu sucursal (Ajustes → Sucursales en
 `{ambiente}.biller.uy`), **no** un valor genérico como `1`.
 
-Para **habilitar escritura en test**: agregá `"BILLER_CAPABILITY_MODE": "write_enabled"` y
-`"BILLER_WRITE_ENABLED": "true"`. Aun así, cada emisión/anulación requiere el flujo
+Para **habilitar escritura en test**: agregá `"BILLER_CAPABILITY_MODE": "write_enabled"`,
+`"BILLER_WRITE_ENABLED": "true"` y una `"BILLER_APPROVAL_SECRET"` nueva de al menos
+32 caracteres. Aun así, cada emisión/anulación requiere el flujo
 dry-run → confirm con token.
 
 ## Conectar a Claude Code
@@ -478,7 +482,8 @@ claude mcp add biller \
 npm run inspector   # = npm run build && npx @modelcontextprotocol/inspector node dist/index.js
 ```
 
-Probá `biller_health_check` (mirá `capability_mode`/`write_tools_registered`/`environment`).
+Probá `biller_health_check` (mirá `capability_mode`/`write_tools_registered`/
+`approval_secret_configurado`/`environment`).
 Para probar escritura, pasá `BILLER_CAPABILITY_MODE=write_enabled` al inspector y verificá
 que aparezcan las tools de escritura. Después llamá `biller_emitir_comprobante` en
 **dry-run** y verificá el `confirmation_token`.
@@ -590,8 +595,11 @@ En stdio y en el server HTTP largo la memoria alcanza de sobra.
   aparece escritura en cualquier otro lado: la superficie de lectura es GET-only.
 - **Escritura apagada por defecto** + dry-run + confirmación + doble gate de
   producción + idempotencia + audit log.
-- **Token protegido**: nunca se loguea ni se devuelve; se redacta de los errores
-  (`[REDACTED]`). El audit guarda un **hash** del payload, no el payload.
+- **Credenciales protegidas**: el bearer token de Biller y `BILLER_APPROVAL_SECRET`
+  nunca se loguean ni se devuelven; se redactan de los errores (`[REDACTED]`). El
+  `confirmation_token` sí se entrega al usuario para completar el ciclo, pero es un
+  HMAC de vida corta y no permite reconstruir la clave. El audit guarda un **hash**
+  del payload, no el payload ni el token de aprobación.
 - **Aislamiento entre empresas**: con varias empresas en un proceso, el overlay
   de un tenant **no hereda** lo sensible que no declara (las `KAPSO_*`, la
   allowlist de remitentes, los flags de escritura, la identidad fiscal): se borra

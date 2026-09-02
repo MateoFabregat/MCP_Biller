@@ -17,9 +17,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  ApprovalCycle,
   CONFIRMATION_TTL_MS,
-  checkConfirmationToken,
-  computeConfirmationToken,
 } from "../src/write/confirm.js";
 import {
   BillerMontoExcedidoError,
@@ -40,6 +39,14 @@ import { BillerNetworkError } from "../src/utils/errors.js";
 const ENDPOINT = "/v3/comprobantes/emitir";
 const ENV = "test";
 const PAYLOAD = { comprobante: { total: 1000, moneda: "UYU" } };
+const APPROVAL_SECRET = "test-approval-secret-with-more-than-32-characters";
+const APPROVAL_SCOPE = {
+  secret: APPROVAL_SECRET,
+  environment: ENV,
+  tenantId: "panaderia",
+  companyId: "210475730011",
+};
+const APPROVAL_REQUEST = { endpoint: ENDPOINT, subject: PAYLOAD, actorIdentity: null };
 const RECIBO = {
   tipo_comprobante: 101,
   forma_pago: 1,
@@ -62,14 +69,17 @@ function structured(res: { structuredContent?: Record<string, unknown> }): Recor
 describe("S5 — TTL del confirmation_token", () => {
   it("un token recién emitido es válido", () => {
     const t0 = 1_000_000_000_000;
-    const token = computeConfirmationToken(ENDPOINT, ENV, PAYLOAD, t0);
-    expect(checkConfirmationToken(token, ENDPOINT, ENV, PAYLOAD, { ahora: t0 })).toEqual({ ok: true });
+    const cycle = new ApprovalCycle(APPROVAL_SCOPE);
+    const token = cycle.issue(APPROVAL_REQUEST, t0);
+    expect(cycle.verify(token, APPROVAL_REQUEST, { ahora: t0 })).toEqual({ ok: true });
+    expect(token).toMatch(/^v2\.\d+\.[A-Za-z0-9_-]+$/);
   });
 
   it("sigue siendo válido dentro de la ventana", () => {
     const t0 = 1_000_000_000_000;
-    const token = computeConfirmationToken(ENDPOINT, ENV, PAYLOAD, t0);
-    const check = checkConfirmationToken(token, ENDPOINT, ENV, PAYLOAD, {
+    const cycle = new ApprovalCycle(APPROVAL_SCOPE);
+    const token = cycle.issue(APPROVAL_REQUEST, t0);
+    const check = cycle.verify(token, APPROVAL_REQUEST, {
       ahora: t0 + CONFIRMATION_TTL_MS - 1000,
     });
     expect(check.ok).toBe(true);
@@ -77,8 +87,9 @@ describe("S5 — TTL del confirmation_token", () => {
 
   it("VENCE pasada la ventana", () => {
     const t0 = 1_000_000_000_000;
-    const token = computeConfirmationToken(ENDPOINT, ENV, PAYLOAD, t0);
-    const check = checkConfirmationToken(token, ENDPOINT, ENV, PAYLOAD, {
+    const cycle = new ApprovalCycle(APPROVAL_SCOPE);
+    const token = cycle.issue(APPROVAL_REQUEST, t0);
+    const check = cycle.verify(token, APPROVAL_REQUEST, {
       ahora: t0 + CONFIRMATION_TTL_MS + 1,
     });
     expect(check).toMatchObject({ ok: false, motivo: "vencido" });
@@ -89,9 +100,13 @@ describe("S5 — TTL del confirmation_token", () => {
     // Importa para el modelo: "vencido" se arregla repitiendo el dry-run;
     // "no coincide" significa que el payload cambió y NO hay que reintentar.
     const t0 = 1_000_000_000_000;
-    const token = computeConfirmationToken(ENDPOINT, ENV, PAYLOAD, t0);
-    const otro = { comprobante: { total: 999_999, moneda: "UYU" } };
-    const check = checkConfirmationToken(token, ENDPOINT, ENV, otro, { ahora: t0 });
+    const cycle = new ApprovalCycle(APPROVAL_SCOPE);
+    const token = cycle.issue(APPROVAL_REQUEST, t0);
+    const otro = {
+      ...APPROVAL_REQUEST,
+      subject: { comprobante: { total: 999_999, moneda: "UYU" } },
+    };
+    const check = cycle.verify(token, otro, { ahora: t0 });
     expect(check).toMatchObject({ ok: false, motivo: "no_coincide" });
     if (!check.ok) expect(check.mensaje).toContain("payload cambió");
   });
@@ -99,10 +114,11 @@ describe("S5 — TTL del confirmation_token", () => {
   it("no se puede extender la vida moviendo el timestamp del token", () => {
     // El timestamp está DENTRO del hash: alterarlo invalida el token.
     const t0 = 1_000_000_000_000;
-    const token = computeConfirmationToken(ENDPOINT, ENV, PAYLOAD, t0);
-    const [, huella, hash] = token.split(".");
-    const falsificado = `${t0 + CONFIRMATION_TTL_MS * 10}.${huella}.${hash}`;
-    const check = checkConfirmationToken(falsificado, ENDPOINT, ENV, PAYLOAD, {
+    const cycle = new ApprovalCycle(APPROVAL_SCOPE);
+    const token = cycle.issue(APPROVAL_REQUEST, t0);
+    const [, , mac] = token.split(".");
+    const falsificado = `v2.${t0 + CONFIRMATION_TTL_MS * 10}.${mac}`;
+    const check = cycle.verify(falsificado, APPROVAL_REQUEST, {
       ahora: t0 + CONFIRMATION_TTL_MS * 10,
     });
     expect(check).toMatchObject({ ok: false, motivo: "no_coincide" });
@@ -110,24 +126,90 @@ describe("S5 — TTL del confirmation_token", () => {
 
   it("rechaza ausente, mal formado y fechado en el futuro", () => {
     const t0 = 1_000_000_000_000;
-    expect(checkConfirmationToken(undefined, ENDPOINT, ENV, PAYLOAD)).toMatchObject({
+    const cycle = new ApprovalCycle(APPROVAL_SCOPE);
+    expect(cycle.verify(undefined, APPROVAL_REQUEST)).toMatchObject({
       motivo: "ausente",
     });
-    expect(checkConfirmationToken("deadbeef", ENDPOINT, ENV, PAYLOAD)).toMatchObject({
+    expect(cycle.verify("deadbeef", APPROVAL_REQUEST)).toMatchObject({
       motivo: "formato",
     });
-    const futuro = computeConfirmationToken(ENDPOINT, ENV, PAYLOAD, t0 + 600_000);
-    expect(checkConfirmationToken(futuro, ENDPOINT, ENV, PAYLOAD, { ahora: t0 })).toMatchObject({
+    expect(cycle.verify(`v99.${t0}.deadbeef`, APPROVAL_REQUEST, { ahora: t0 })).toMatchObject({
+      motivo: "formato",
+    });
+    const canonico = cycle.issue(APPROVAL_REQUEST, t0);
+    expect(cycle.verify(` ${canonico}`, APPROVAL_REQUEST, { ahora: t0 })).toMatchObject({
+      motivo: "formato",
+    });
+    const [, , mac] = canonico.split(".");
+    expect(cycle.verify(`v2.0${t0}.${mac}`, APPROVAL_REQUEST, { ahora: t0 })).toMatchObject({
+      motivo: "formato",
+    });
+    const alfabeto = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const prefijo = mac!.slice(0, -1);
+    const bytes = Buffer.from(mac!, "base64url");
+    const macNoCanonico = [...alfabeto]
+      .map((ultimo) => `${prefijo}${ultimo}`)
+      .find(
+        (candidato) =>
+          candidato !== mac && Buffer.from(candidato, "base64url").equals(bytes),
+      );
+    expect(macNoCanonico).toBeDefined();
+    expect(
+      cycle.verify(`v2.${t0}.${macNoCanonico}`, APPROVAL_REQUEST, { ahora: t0 }),
+    ).toMatchObject({ motivo: "formato" });
+    const futuro = cycle.issue(APPROVAL_REQUEST, t0 + 600_000);
+    expect(cycle.verify(futuro, APPROVAL_REQUEST, { ahora: t0 })).toMatchObject({
       motivo: "formato",
     });
   });
 
   it("un token de otro ambiente no sirve", () => {
     const t0 = 1_000_000_000_000;
-    const token = computeConfirmationToken(ENDPOINT, "test", PAYLOAD, t0);
+    const token = new ApprovalCycle(APPROVAL_SCOPE).issue(APPROVAL_REQUEST, t0);
+    const production = new ApprovalCycle({ ...APPROVAL_SCOPE, environment: "production" });
+    expect(production.verify(token, APPROVAL_REQUEST, { ahora: t0 })).toMatchObject({
+      motivo: "no_coincide",
+    });
+  });
+
+  it("no sirve con otra clave, empresa, tenant, actor ni tool", () => {
+    const t0 = 1_000_000_000_000;
+    const cycle = new ApprovalCycle(APPROVAL_SCOPE);
+    const request = { ...APPROVAL_REQUEST, actorIdentity: "actor-opaco-a" };
+    const token = cycle.issue(request, t0);
+
     expect(
-      checkConfirmationToken(token, ENDPOINT, "production", PAYLOAD, { ahora: t0 }),
+      new ApprovalCycle({ ...APPROVAL_SCOPE, secret: `${APPROVAL_SECRET}-otra` }).verify(
+        token,
+        request,
+        { ahora: t0 },
+      ),
     ).toMatchObject({ motivo: "no_coincide" });
+    expect(
+      new ApprovalCycle({ ...APPROVAL_SCOPE, tenantId: "ferreteria" }).verify(token, request, {
+        ahora: t0,
+      }),
+    ).toMatchObject({ motivo: "no_coincide" });
+    expect(
+      new ApprovalCycle({ ...APPROVAL_SCOPE, companyId: "otro-rut" }).verify(token, request, {
+        ahora: t0,
+      }),
+    ).toMatchObject({ motivo: "no_coincide" });
+    expect(cycle.verify(token, { ...request, actorIdentity: "actor-opaco-b" }, { ahora: t0 })).toMatchObject({
+      motivo: "no_coincide",
+    });
+    expect(cycle.verify(token, { ...request, endpoint: "/otra/tool" }, { ahora: t0 })).toMatchObject({
+      motivo: "no_coincide",
+    });
+  });
+
+  it("rechaza el formato legacy aunque conozca el payload", () => {
+    const t0 = 1_000_000_000_000;
+    const legacy = `${t0}.huella.sha256-recalculable`;
+    const cycle = new ApprovalCycle(APPROVAL_SCOPE);
+    expect(cycle.verify(legacy, APPROVAL_REQUEST, { ahora: t0 })).toMatchObject({
+      motivo: "formato",
+    });
   });
 });
 

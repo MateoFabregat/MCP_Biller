@@ -264,6 +264,9 @@ describe("guardarEntrada intercepta registerTool", () => {
       getWriteContext: () => {
         throw new Error("no config");
       },
+      getApprovalCycle: () => {
+        throw new Error("no config");
+      },
       metricas: METRICAS_NULAS,
     getBorradorStore: () => new BorradorStoreMemoria(),
     // El contexto de test no viene de un env: se inspecciona uno vacío, que es la
@@ -341,9 +344,9 @@ describe("el remitente llega al audit log", () => {
     expect(entradas.find((e) => e.phase === "executed")?.remitente).toBeUndefined();
   });
 
-  it("el remitente NO entra en el hash del confirmation_token", async () => {
-    // El dueño arranca la factura y el encargado la confirma: es un caso
-    // legítimo y no puede leerse como "el payload cambió".
+  it("sin canal Kapso el remitente no se usa como identidad de aprobación", async () => {
+    // En uso local por stdio no hay conversación WhatsApp: la identidad queda
+    // en null en ambos pasos y el campo informativo `remitente` no cambia eso.
     const fx = makeCtx({
       config: { writeEnabled: true, capabilityMode: "write_enabled" },
       postResponse: { id: 1 },

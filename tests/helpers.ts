@@ -9,6 +9,7 @@ import { RegistroMetricas, METRICAS_NULAS } from "../src/observabilidad/metricas
 import { InMemoryIdempotencyStore, type IdempotencyStore } from "../src/write/idempotency.js";
 import type { PostOptions, PostResult } from "../src/write/writeClient.js";
 import type { BillerWriteClient } from "../src/write/writeClient.js";
+import { ApprovalCycle } from "../src/write/confirm.js";
 import { makeConfig } from "./fixtures.js";
 
 export interface FakeCtxOptions {
@@ -77,11 +78,18 @@ export function makeCtx(opts: FakeCtxOptions = {}): FakeCtx {
   // por cada invocación. Los contadores igual funcionan y se pueden assertar.
   const metricas = new RegistroMetricas({ emitirLog: false });
   const borradores = new BorradorStoreMemoria();
+  const approvalCycle = new ApprovalCycle({
+    secret: config.approvalSecret!,
+    environment: config.environment,
+    tenantId: config.tenantId,
+    companyId: config.defaultEmpresaRut ?? null,
+  });
 
   const ctx: ToolContext = {
     getConfig: () => config,
     getClient: () => client,
     getWriteContext: () => ({ config, writeClient, auditor, idempotency }),
+    getApprovalCycle: () => approvalCycle,
     metricas,
     getBorradorStore: () => borradores,
     // El contexto de test no viene de un env: se inspecciona uno vacío, que es la
@@ -112,6 +120,7 @@ export function makeUnconfiguredCtx(): ToolContext {
     getConfig: fail,
     getClient: fail,
     getWriteContext: fail,
+    getApprovalCycle: fail,
     // Sin config no hay nada que medir, pero el campo no puede faltar: es lo
     // que garantiza que ningún llamador tenga que chequear si existe.
     metricas: METRICAS_NULAS,
