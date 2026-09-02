@@ -2,6 +2,8 @@
 // Errores normalizados y seguros (nunca exponen el token).
 // =============================================================================
 
+import { envolverNoConfiable } from "../security/untrusted.js";
+
 /**
  * Reemplaza cualquier aparición del/los secreto(s) por `[REDACTED]` dentro de
  * un string. Defensa en profundidad: aunque la API no debería devolver el
@@ -130,7 +132,10 @@ export class BillerApiError extends BillerError {
   constructor(status: number, bodySnippet?: string) {
     const base = BillerApiError.messageForStatus(status);
     const detalle = status === 422 ? parseValidationBody(bodySnippet) : null;
-    super("api", detalle !== null ? `${base} Biller reportó: ${detalle}` : base);
+    super(
+      "api",
+      detalle !== null ? `${base} Biller reportó: ${envolverNoConfiable(detalle)}` : base,
+    );
     this.status = status;
     this.bodySnippet = bodySnippet;
   }
@@ -167,7 +172,8 @@ export class BillerApiError extends BillerError {
       kind: this.kind,
       message: this.message,
       status: this.status,
-      details: this.bodySnippet,
+      details:
+        this.bodySnippet === undefined ? undefined : envolverNoConfiable(this.bodySnippet),
     };
   }
 }
