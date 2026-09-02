@@ -818,6 +818,7 @@ describe("anulación por WhatsApp con doble confirmación", () => {
 
     const primero = await handleAnularComprobante(base, fx.ctx);
     expect(sc(primero).confirmation_token).toBeUndefined();
+    expect(sc(primero).next_step).not.toMatch(/EJECUTAR|confirm=true/i);
     const tokenPreview = sc(primero).revision_token as string;
     const primerBody = JSON.parse(String(llamadas[0]!.init.body)) as Record<string, any>;
     expect(primerBody.interactive.body.text).toContain("1 de 2");

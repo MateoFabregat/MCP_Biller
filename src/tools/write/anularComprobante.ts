@@ -219,10 +219,17 @@ async function adjuntarDobleConfirmacion(
           token: tokenDelBoton,
         });
     const envio = await new KapsoClient(config.kapso).enviarInteractivo(destino, mensaje);
-    const { confirmation_token: _tokenEjecutable, ...sinTokenEjecutable } = structured;
+    const {
+      confirmation_token: _tokenEjecutable,
+      next_step: _pasoEjecutable,
+      ...sinTokenEjecutable
+    } = structured;
     return jsonResult({
       ...(p.revisada ? structured : sinTokenEjecutable),
       ...(!p.revisada ? { revision_token: revisionToken } : {}),
+      ...(!p.revisada
+        ? { next_step: "Esperá el toque del paso 1 y recién entonces generá la confirmación final." }
+        : {}),
       confirmacion_whatsapp: {
         enviado: true,
         fase: p.revisada ? 2 : 1,
