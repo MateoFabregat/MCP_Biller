@@ -193,6 +193,13 @@ describe("emitir_comprobante — validaciones de negocio (A/B)", () => {
     const eFactura = { ...COMPROBANTE, tipo_comprobante: 111, cliente: "-" };
     const dry = await handleEmitirComprobante({ comprobante: eFactura }, fx.ctx);
     expect((sc(dry).warnings as string[]).some((w) => /e-Factura|receptor/i.test(w))).toBe(true);
+
+    // La persona aprueba leyendo `resumen`; `warnings` es información para el
+    // agente y puede no llegar a WhatsApp. El riesgo fiscal debe verse antes de
+    // los números, no escondido al final del mensaje.
+    const resumen = sc(dry).resumen as string;
+    expect(resumen).toMatch(/e-Factura|receptor/i);
+    expect(resumen.search(/e-Factura|receptor/i)).toBeLessThan(resumen.indexOf("Neto"));
   });
 });
 

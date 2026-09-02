@@ -409,6 +409,12 @@ export async function handleEmitirComprobante(
       ...(deSesion.precios_ambiguos.length > 0
         ? { precios_ambiguos: deSesion.precios_ambiguos }
         : {}),
+      // Este aviso tiene que verlo la persona ANTES de los importes. Dejarlo
+      // solo en `warnings` estructurado hacía que el agente lo conociera, pero
+      // el preview de WhatsApp no lo mostrara.
+      advertencias_criticas: warnings.filter((w) =>
+        /RECEPTOR OBLIGATORIO|DGI exige receptor identificado/i.test(w),
+      ),
       hoy: hoyDgiUy(),
     },
   });

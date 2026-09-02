@@ -384,6 +384,8 @@ export interface ContextoPreview {
    * confirmación, es una firma en blanco.
    */
   precios_ambiguos?: Array<{ concepto?: string; precio: number }>;
+  /** Avisos fiscales que deben verse antes de los importes a aprobar. */
+  advertencias_criticas?: string[];
 }
 
 /** Cuántas líneas de ítem entran cómodas en los 1024 chars del cuerpo. */
@@ -560,7 +562,13 @@ export function formatearTotales(t: TotalesEstimados, ctx: ContextoPreview = {})
   const supuestos = describirSupuestos(ctx);
   if (supuestos !== "") bloques.push("", supuestos);
 
-  const base = bloques.join("\n");
+  const cuerpo = bloques.join("\n");
+  // Un bloqueo fiscal no es letra chica. En particular, el receptor
+  // obligatorio tiene que aparecer antes de los números que la persona va a
+  // aprobar por WhatsApp; `warnings` estructurado lo ve el agente, no
+  // necesariamente quien toca el botón.
+  const criticas = (ctx.advertencias_criticas ?? []).filter((a) => a.trim() !== "");
+  const base = criticas.length === 0 ? cuerpo : `${criticas.join("\n")}\n\n${cuerpo}`;
   const avisos = advertenciasDelPreview(t, ctx, plata);
   return avisos.length === 0 ? base : agregarAvisos(base, avisos);
 }
