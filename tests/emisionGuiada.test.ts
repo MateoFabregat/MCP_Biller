@@ -611,6 +611,10 @@ describe("qué preguntar ahora", () => {
       ],
     });
     expect(alFinal.paso).toBe("precio");
+    expect(alFinal.interactivo?.botones.map((b) => b.id)).toEqual([
+      "emision:item:conservar_precio:2:0",
+      "emision:item:descartar_precio:2:0",
+    ]);
   });
 
   it("con items_cerrados el agujero del MEDIO tampoco pasa: la cola se descarta, el medio no", () => {
@@ -1453,6 +1457,51 @@ describe("➕ Otro ítem: del preview al ítem siguiente y de vuelta", () => {
     );
     expect(vuelto.paso).toBe("confirmar");
     expect(vuelto.comprobante_borrador.items).toHaveLength(1);
+  });
+
+  it("un precio final en cero se puede conservar o sacar desde WhatsApp", async () => {
+    const { ctx } = makeCtx();
+    const sesionConservar = "+59899121315";
+    const base = {
+      clase_receptor: "consumidor_final",
+      sin_receptor: true,
+      montos_brutos: true,
+      indicador_facturacion: 3,
+      items: [
+        { concepto: "Servicio", cantidad: 1, precio: 1000 },
+        { concepto: "Bonificación", cantidad: 1, precio: 0 },
+      ],
+    };
+
+    const pendiente = JSON.parse(
+      (await handleEmisionGuiada({ sesion: sesionConservar, ...base }, ctx)).content[0]!.text,
+    );
+    expect(pendiente.paso).toBe("precio");
+
+    const conservado = JSON.parse(
+      (
+        await handleEmisionGuiada(
+          { sesion: sesionConservar, mensaje: "emision:item:conservar_precio:2:0" },
+          ctx,
+        )
+      ).content[0]!.text,
+    );
+    expect(conservado.paso).toBe("confirmar");
+    expect(conservado.comprobante_borrador.items).toHaveLength(2);
+    expect(conservado.comprobante_borrador.items[1].precio).toBe(0);
+
+    const sesionDescartar = "+59899121316";
+    await handleEmisionGuiada({ sesion: sesionDescartar, ...base }, ctx);
+    const descartado = JSON.parse(
+      (
+        await handleEmisionGuiada(
+          { sesion: sesionDescartar, mensaje: "emision:item:descartar_precio:2:0" },
+          ctx,
+        )
+      ).content[0]!.text,
+    );
+    expect(descartado.paso).toBe("confirmar");
+    expect(descartado.comprobante_borrador.items).toHaveLength(1);
   });
 });
 

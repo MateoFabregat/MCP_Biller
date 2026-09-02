@@ -712,6 +712,40 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
           }
           break;
         }
+        case "item_conservar_precio":
+        case "item_descartar_precio": {
+          // El id congela posición y precio: un botón viejo nunca puede
+          // conservar o borrar una línea distinta de la que la persona leyó.
+          const actuales = estado.items ?? [];
+          const vigentes = itemsVigentes(estado);
+          const indice = indiceItemEnCurso(vigentes);
+          const item = indice === -1 ? undefined : vigentes[indice];
+          const coincide =
+            item !== undefined &&
+            indice + 1 === r.posicion &&
+            item.precio === r.precio &&
+            r.precio <= 0;
+
+          if (coincide && r.paso === "item_conservar_precio") {
+            estado.items = actuales.map((actual, i) =>
+              i === indice ? { ...actual, precio_no_positivo_confirmado: true } : actual,
+            );
+            warnings.push(
+              `Se conservará la línea ${indice + 1} con precio ${r.precio}: el usuario lo confirmó ` +
+                "explícitamente.",
+            );
+          } else if (coincide) {
+            estado.items = actuales.filter((_, i) => i !== indice);
+            estado.items_cerrados = true;
+            warnings.push(
+              `Se descartó la línea ${indice + 1} con precio ${r.precio}: el usuario lo pidió ` +
+                "explícitamente.",
+            );
+          } else {
+            descarteVencido = true;
+          }
+          break;
+        }
         case "iva":
           estado.indicador_facturacion = r.indicador_facturacion;
           break;

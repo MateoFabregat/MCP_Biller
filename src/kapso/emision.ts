@@ -140,6 +140,8 @@ export interface ItemEnCurso {
    * factura vieja sino del modelo.
    */
   precio_copiado?: boolean;
+  /** El usuario confirmó explícitamente que un precio cero/negativo se deja así. */
+  precio_no_positivo_confirmado?: boolean;
 }
 
 /**
@@ -645,6 +647,33 @@ export function construirSubmenuLineaSinDescripcion(
   };
 }
 
+/** Salida explícita para una última línea con precio cero o negativo. */
+export function construirSubmenuPrecioNoPositivo(
+  posicion: number,
+  precio: number,
+  moneda: string,
+): InteractivoBotones {
+  const magnitud = `${simboloMoneda(moneda)}${formatearUy(Math.abs(precio))}`;
+  const mostrado = precio < 0 ? `−${magnitud}` : magnitud;
+  return {
+    tipo: "botones",
+    encabezado: "Precio no positivo",
+    cuerpo:
+      `La línea ${posicion} quedó en ${mostrado} por unidad. ` +
+      "¿La dejás así o sacás esa línea del comprobante?",
+    botones: [
+      {
+        id: `${PREFIJO_PASO}item:conservar_precio:${posicion}:${precio}`,
+        titulo: "✅ Dejarlo así",
+      },
+      {
+        id: `${PREFIJO_PASO}item:descartar_precio:${posicion}:${precio}`,
+        titulo: "🗑️ Sacar línea",
+      },
+    ],
+  };
+}
+
 /**
  * Contado o crédito. Define si la factura entra en la cuenta corriente.
  *
@@ -818,6 +847,8 @@ export type RespuestaPaso =
   | { paso: "item_listo" }
   | { paso: "item_cancelar" }
   | { paso: "item_descartar"; posicion?: number; precio?: number }
+  | { paso: "item_conservar_precio"; posicion: number; precio: number }
+  | { paso: "item_descartar_precio"; posicion: number; precio: number }
   | { paso: "iva_otro" }
   | { paso: "iva"; indicador_facturacion: number }
   | { paso: "moneda"; moneda: string }
@@ -991,6 +1022,18 @@ export function interpretarPaso(raw: string): RespuestaPaso {
           ...(Number.isInteger(posicion) && posicion > 0 ? { posicion } : {}),
           ...(Number.isFinite(precio) ? { precio } : {}),
         };
+      }
+      for (const [prefijo, paso] of [
+        ["conservar_precio:", "item_conservar_precio"],
+        ["descartar_precio:", "item_descartar_precio"],
+      ] as const) {
+        if (!valor.startsWith(prefijo)) continue;
+        const partes = valor.slice(prefijo.length).split(":");
+        const posicion = Number(partes[0]);
+        const precio = Number(partes[1]);
+        return Number.isInteger(posicion) && posicion > 0 && Number.isFinite(precio)
+          ? { paso, posicion, precio }
+          : { paso: "ninguna" };
       }
       return { paso: "ninguna" };
     case "iva": {
@@ -1259,7 +1302,11 @@ export function itemIncompleto(item: ItemEnCurso): boolean {
   if (!itemPuedeViajar(item)) return true;
   // Un precio 0 es un hueco… salvo que venga de un comprobante real, donde 0 es
   // una bonificación que alguien ya escribió. Ver `precio_copiado`.
-  return (item.precio ?? 0) <= 0 && item.precio_copiado !== true;
+  return (
+    (item.precio ?? 0) <= 0 &&
+    item.precio_copiado !== true &&
+    item.precio_no_positivo_confirmado !== true
+  );
 }
 
 /**
@@ -1620,6 +1667,17 @@ export function siguientePaso(
   // pero caía igual en esta pregunta, que no tiene botones y que "0" no
   // contesta. El número mudo, por una condición duplicada.
   if (indice !== -1 && (typeof enCurso.precio !== "number" || enCurso.precio <= 0)) {
+    if (typeof enCurso.precio === "number") {
+      return paso({
+        paso: "precio",
+        pregunta: "Ese precio quedó en cero o negativo. Elegí si lo dejamos así o sacamos la línea.",
+        interactivo: construirSubmenuPrecioNoPositivo(
+          indice + 1,
+          enCurso.precio,
+          estado.moneda ?? "UYU",
+        ),
+      });
+    }
     return paso({
       paso: "precio",
       pregunta: `¿A qué precio por unidad${ordinal}? Solo el número.`,
