@@ -223,8 +223,9 @@ export class BillerIdempotencyError extends BillerError {
   constructor(key: string) {
     super(
       "idempotency",
-      `La idempotency_key "${key}" ya fue ejecutada en esta sesión: se evita una segunda ejecución ` +
-        "para no duplicar el comprobante/operación. Usá una key nueva si realmente querés repetir.",
+      `La idempotency_key "${key}" ya está reservada, ejecutada o en estado incierto. ` +
+        "No se repitió la operación para evitar un duplicado. Verificá primero en Biller si el " +
+        "comprobante/operación existe; no uses otra key hasta resolver ese estado.",
     );
   }
 }

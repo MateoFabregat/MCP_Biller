@@ -106,7 +106,7 @@ export async function executeWrite(
   }
 
   // 3. Idempotencia
-  if (c.idempotency.has(input.idempotencyKey)) {
+  if (!c.idempotency.claim(input.idempotencyKey)) {
     c.auditor.record({
       tool: input.tool,
       endpoint: input.endpoint,
@@ -132,6 +132,11 @@ export async function executeWrite(
       rateLimitClass: input.rateLimitClass,
     });
   } catch (err) {
+    // Desde que se invocó `post` no podemos demostrar que el proveedor no
+    // haya confirmado la operación antes de un timeout/corte de red. La key
+    // queda bloqueada como ambigua; reintentar automáticamente podría duplicar
+    // un CFE que sí llegó a Biller.
+    c.idempotency.markAmbiguous(input.idempotencyKey);
     c.auditor.record({
       tool: input.tool,
       endpoint: input.endpoint,
@@ -146,8 +151,8 @@ export async function executeWrite(
     throw err;
   }
 
-  // POST exitoso — markUsed y audit no pueden hacer fallar la operación
-  c.idempotency.markUsed(input.idempotencyKey);
+  // POST exitoso — la reserva pasa de `in_flight` a `executed` antes del audit.
+  c.idempotency.markExecuted(input.idempotencyKey);
 
   let audit: AuditEntry;
   try {

@@ -388,7 +388,7 @@ export async function runWriteOperation(p: RunWriteParams): Promise<ToolResult> 
     // El token ya identifica unívocamente esta operación —hashea endpoint,
     // ambiente, payload y el instante del dry-run—, así que derivar la clave de
     // él hace que dos confirmaciones del MISMO preview compartan clave y la
-    // segunda choque con `idempotency.has()`. Dos dry-runs distintos dan tokens
+    // segunda choque con el claim atómico de idempotencia. Dos dry-runs distintos dan tokens
     // distintos y siguen pudiendo emitir dos veces: eso es el usuario haciendo
     // la operación dos veces a propósito, que es otra cosa.
     //

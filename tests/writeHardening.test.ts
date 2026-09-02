@@ -5,7 +5,14 @@
 //   S7 — tope de monto por operación
 // =============================================================================
 
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -16,6 +23,7 @@ import {
 } from "../src/write/confirm.js";
 import {
   BillerMontoExcedidoError,
+  BillerMontoInvalidoError,
   extraerMonto,
   parseLimitesMonto,
   verificarLimiteMonto,
@@ -25,10 +33,31 @@ import {
   InMemoryIdempotencyStore,
   crearIdempotencyStore,
 } from "../src/write/idempotency.js";
+import { handleCrearRecibo } from "../src/tools/write/crearRecibo.js";
+import { errorOf, makeCtx } from "./helpers.js";
+import { BillerNetworkError } from "../src/utils/errors.js";
 
 const ENDPOINT = "/v3/comprobantes/emitir";
 const ENV = "test";
 const PAYLOAD = { comprobante: { total: 1000, moneda: "UYU" } };
+const RECIBO = {
+  tipo_comprobante: 101,
+  forma_pago: 1,
+  sucursal: 6,
+  moneda: "UYU",
+  cliente: {
+    tipo_documento: 3,
+    documento: "52165030",
+    nombre_fantasia: "Juan Pérez",
+    sucursal: { pais: "UY", ciudad: "Montevideo", direccion: "Sarandí 420" },
+  },
+  referencias: [{ padre: 150448, total: 1830 }],
+  pago: { fecha: "2021-05-27", monto: 1830, referencia: "Transferencia Itaú 2185" },
+};
+
+function structured(res: { structuredContent?: Record<string, unknown> }): Record<string, unknown> {
+  return res.structuredContent!;
+}
 
 describe("S5 — TTL del confirmation_token", () => {
   it("un token recién emitido es válido", () => {
@@ -205,6 +234,28 @@ describe("S7 — tope de monto por operación", () => {
     expect(() =>
       verificarLimiteMonto({ total: 10 }, { UYU: 100_000 }, { monto: NaN, moneda: "UYU" }),
     ).not.toThrow();
+    expect(() =>
+      verificarLimiteMonto({ total: 200_000 }, { UYU: 100_000 }, { monto: 0, moneda: "UYU" }),
+    ).toThrow(BillerMontoExcedidoError);
+  });
+
+  it("con tope configurado falla cerrado si una operación monetaria no tiene monto legible", () => {
+    expect(() =>
+      verificarLimiteMonto({ moneda: "UYU", pago: { monto: "mucho" } }, { UYU: 1000 }),
+    ).toThrow(BillerMontoInvalidoError);
+
+    // Crear/cancelar entidades sin valor monetario conserva el comportamiento
+    // anterior aunque exista un tope para otras operaciones.
+    expect(() =>
+      verificarLimiteMonto({ nombre: "Cliente sin importe" }, { UYU: 1000 }),
+    ).not.toThrow();
+    expect(() =>
+      verificarLimiteMonto(
+        { tipo_comprobante: 101, items: [] },
+        { UYU: 1000 },
+        { monto: Number.NaN, moneda: "UYU" },
+      ),
+    ).toThrow(BillerMontoInvalidoError);
   });
 });
 
@@ -225,6 +276,46 @@ describe("S6 — idempotencia persistente", () => {
     expect(crearIdempotencyStore(undefined)).toBeInstanceOf(InMemoryIdempotencyStore);
     expect(crearIdempotencyStore("  ")).toBeInstanceOf(InMemoryIdempotencyStore);
     expect(crearIdempotencyStore(path)).toBeInstanceOf(FileIdempotencyStore);
+  });
+
+  it("un claim in_flight se persiste y bloquea después de reiniciar", () => {
+    const primero = new FileIdempotencyStore(path);
+    expect(primero.claim("key-en-vuelo")).toBe(true);
+
+    const reiniciado = new FileIdempotencyStore(path);
+    expect(reiniciado.claim("key-en-vuelo")).toBe(false);
+  });
+
+  it("los estados ambiguous y executed nunca se reemiten al reiniciar", () => {
+    const primero = new FileIdempotencyStore(path);
+    expect(primero.claim("key-ambigua")).toBe(true);
+    primero.markAmbiguous("key-ambigua");
+    expect(primero.claim("key-ejecutada")).toBe(true);
+    primero.markExecuted("key-ejecutada");
+
+    const reiniciado = new FileIdempotencyStore(path);
+    expect(reiniciado.claim("key-ambigua")).toBe(false);
+    expect(reiniciado.claim("key-ejecutada")).toBe(false);
+  });
+
+  it("solo un claim aún no despachado puede liberarse y volver a intentarse", () => {
+    const primero = new FileIdempotencyStore(path);
+    expect(primero.claim("key-pre-dispatch")).toBe(true);
+    primero.release("key-pre-dispatch");
+
+    const reiniciado = new FileIdempotencyStore(path);
+    expect(reiniciado.claim("key-pre-dispatch")).toBe(true);
+    reiniciado.markAmbiguous("key-pre-dispatch");
+    reiniciado.release("key-pre-dispatch");
+    expect(reiniciado.claim("key-pre-dispatch")).toBe(false);
+  });
+
+  it("interpreta las líneas históricas {key,ts} como executed", () => {
+    writeFileSync(path, `${JSON.stringify({ key: "key-vieja", ts: "2026-01-01T00:00:00.000Z" })}\n`);
+
+    const reiniciado = new FileIdempotencyStore(path);
+    expect(reiniciado.has("key-vieja")).toBe(true);
+    expect(reiniciado.claim("key-vieja")).toBe(false);
   });
 
   it("una key marcada SOBREVIVE al reinicio del proceso", () => {
@@ -258,22 +349,28 @@ describe("S6 — idempotencia persistente", () => {
     const store = new FileIdempotencyStore(path);
     store.markUsed("buena-1");
     // Escritura interrumpida a mitad de línea.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { appendFileSync } = require("node:fs") as typeof import("node:fs");
     appendFileSync(path, '{"key":"rota\n', "utf8");
     const recargado = new FileIdempotencyStore(path);
     expect(recargado.has("buena-1")).toBe(true);
   });
 
-  it("no guarda el payload, solo la key y el timestamp", () => {
+  it("no guarda el payload, solo la key, el estado y el timestamp", () => {
     // El archivo no es secreto: los datos de facturación no van ahí.
     const store = new FileIdempotencyStore(path);
     store.markUsed("key-xyz");
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { readFileSync } = require("node:fs") as typeof import("node:fs");
     const contenido = readFileSync(path, "utf8");
     const entrada = JSON.parse(contenido.trim()) as Record<string, unknown>;
-    expect(Object.keys(entrada).sort()).toEqual(["key", "ts"]);
+    expect(Object.keys(entrada).sort()).toEqual(["key", "state", "ts"]);
+    expect(entrada).toMatchObject({ key: "key-xyz", state: "executed" });
+  });
+
+  it("crea el directorio 0700 y el archivo 0600", () => {
+    const rutaPrivada = join(dir, "privado", "idempotency.log");
+    const store = new FileIdempotencyStore(rutaPrivada);
+    expect(store.claim("key-permisos")).toBe(true);
+
+    expect(statSync(join(dir, "privado")).mode & 0o777).toBe(0o700);
+    expect(statSync(rutaPrivada).mode & 0o777).toBe(0o600);
   });
 
   it("degrada a memoria si el archivo no se puede escribir, sin lanzar", () => {
@@ -282,5 +379,187 @@ describe("S6 — idempotencia persistente", () => {
     const store = new FileIdempotencyStore("/proc/imposible/idempotency.log");
     expect(() => store.markUsed("k")).not.toThrow();
     expect(store.has("k")).toBe(true);
+  });
+
+  it("no concede un claim si no puede persistir in_flight", () => {
+    const store = new FileIdempotencyStore("/proc/imposible/idempotency.log");
+    expect(() => store.claim("key-sin-disco")).toThrow(/POST NO se ejecutó/);
+    expect(store.has("key-sin-disco")).toBe(false);
+  });
+});
+
+describe("P0 — claim atómico antes del POST", () => {
+  it("dos confirmaciones concurrentes del mismo preview hacen como máximo un POST", async () => {
+    let liberarPost!: () => void;
+    const postPendiente = new Promise<void>((resolve) => {
+      liberarPost = resolve;
+    });
+    const fx = makeCtx({
+      config: { writeEnabled: true },
+      postImpl: async () => {
+        await postPendiente;
+        return { status: 201, data: { id: 99 } };
+      },
+    });
+    const dry = await handleCrearRecibo({ recibo: RECIBO }, fx.ctx);
+    const token = structured(dry).confirmation_token as string;
+    const confirmacion = {
+      recibo: RECIBO,
+      confirm: true,
+      confirmation_token: token,
+    };
+
+    const primera = handleCrearRecibo(confirmacion, fx.ctx);
+    const segunda = handleCrearRecibo(confirmacion, fx.ctx);
+    liberarPost();
+    const resultados = await Promise.all([primera, segunda]);
+
+    expect(fx.postMock).toHaveBeenCalledOnce();
+    expect(
+      resultados.filter((r) => r.isError !== true && structured(r).mode === "executed"),
+    ).toHaveLength(1);
+    const bloqueada = resultados.find((r) => r.isError === true);
+    expect(bloqueada).toBeDefined();
+    expect(errorOf(bloqueada!)).toMatchObject({ kind: "idempotency" });
+    expect(errorOf(bloqueada!).message).toMatch(/verific[aá].*Biller/i);
+    expect(errorOf(bloqueada!).message).not.toMatch(/key nueva/i);
+  });
+
+  it("un corte de red después de invocar POST queda ambiguous y no se reintenta", async () => {
+    const fx = makeCtx({
+      config: { writeEnabled: true },
+      postImpl: async () => {
+        throw new BillerNetworkError("conexión interrumpida");
+      },
+    });
+    const dry = await handleCrearRecibo({ recibo: RECIBO }, fx.ctx);
+    const token = structured(dry).confirmation_token as string;
+    const confirmacion = {
+      recibo: RECIBO,
+      confirm: true,
+      confirmation_token: token,
+    };
+
+    const incierta = await handleCrearRecibo(confirmacion, fx.ctx);
+    const reintento = await handleCrearRecibo(confirmacion, fx.ctx);
+
+    expect(errorOf(incierta)).toMatchObject({ kind: "network" });
+    expect(errorOf(reintento)).toMatchObject({ kind: "idempotency" });
+    expect(errorOf(reintento).message).toMatch(/incierto|en curso|ejecutad/i);
+    expect(fx.postMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe("P0 — BILLER_MAX_MONTO_* cubre crear_recibo", () => {
+  it("rechaza pago.monto malformado en la interfaz pública", async () => {
+    const fx = makeCtx({ config: { writeEnabled: true, maxMontos: { UYU: 1000 } } });
+    const res = await handleCrearRecibo(
+      { recibo: { ...RECIBO, pago: { ...RECIBO.pago, monto: "mucho" } } },
+      fx.ctx,
+    );
+
+    expect(res.isError).toBe(true);
+    expect(errorOf(res)).toMatchObject({ kind: "validation" });
+    expect(fx.postMock).not.toHaveBeenCalled();
+  });
+
+  it("rechaza pago.monto no finito en la interfaz pública", async () => {
+    const fx = makeCtx({ config: { writeEnabled: true, maxMontos: { UYU: 1000 } } });
+    const res = await handleCrearRecibo(
+      { recibo: { ...RECIBO, pago: { ...RECIBO.pago, monto: Number.POSITIVE_INFINITY } } },
+      fx.ctx,
+    );
+
+    expect(res.isError).toBe(true);
+    expect(errorOf(res)).toMatchObject({ kind: "validation" });
+    expect(fx.postMock).not.toHaveBeenCalled();
+  });
+
+  it("permite pago.monto exactamente igual al tope", async () => {
+    const recibo = {
+      ...RECIBO,
+      referencias: [{ padre: 150448, total: 1000 }],
+      pago: { ...RECIBO.pago, monto: 1000 },
+    };
+    const fx = makeCtx({
+      config: { writeEnabled: true, maxMontos: { UYU: 1000 } },
+      postResponse: { id: 99 },
+    });
+    const dry = await handleCrearRecibo({ recibo }, fx.ctx);
+    const token = structured(dry).confirmation_token as string;
+    const ejecutada = await handleCrearRecibo(
+      { recibo, confirm: true, confirmation_token: token },
+      fx.ctx,
+    );
+
+    expect(structured(ejecutada)).toMatchObject({ mode: "executed", http_status: 201 });
+    expect(fx.postMock).toHaveBeenCalledOnce();
+  });
+
+  it("bloquea pago.monto por encima del tope antes de llegar a Biller", async () => {
+    const recibo = {
+      ...RECIBO,
+      referencias: [{ padre: 150448, total: 1000.01 }],
+      pago: { ...RECIBO.pago, monto: 1000.01 },
+    };
+    const fx = makeCtx({
+      config: { writeEnabled: true, maxMontos: { UYU: 1000 } },
+      postResponse: { id: 99 },
+    });
+    const dry = await handleCrearRecibo({ recibo }, fx.ctx);
+    const token = structured(dry).confirmation_token as string;
+    const ejecutada = await handleCrearRecibo(
+      { recibo, confirm: true, confirmation_token: token },
+      fx.ctx,
+    );
+
+    expect(ejecutada.isError).toBe(true);
+    expect(errorOf(ejecutada)).toMatchObject({ kind: "validation" });
+    expect(fx.postMock).not.toHaveBeenCalled();
+  });
+
+  it("pago.monto es autoritativo aunque el payload traiga un total decorativo", async () => {
+    const recibo = {
+      ...RECIBO,
+      total: 1,
+      referencias: [{ padre: 150448, total: 1000.01 }],
+      pago: { ...RECIBO.pago, monto: 1000.01 },
+    };
+    const fx = makeCtx({
+      config: { writeEnabled: true, maxMontos: { UYU: 1000 } },
+      postResponse: { id: 99 },
+    });
+    const dry = await handleCrearRecibo({ recibo }, fx.ctx);
+    const token = structured(dry).confirmation_token as string;
+    const ejecutada = await handleCrearRecibo(
+      { recibo, confirm: true, confirmation_token: token },
+      fx.ctx,
+    );
+
+    expect(ejecutada.isError).toBe(true);
+    expect(errorOf(ejecutada)).toMatchObject({ kind: "validation" });
+    expect(fx.postMock).not.toHaveBeenCalled();
+  });
+
+  it("rechaza un monto negativo en el recibo en vez de convertirlo a valor absoluto", async () => {
+    const recibo = {
+      ...RECIBO,
+      referencias: [{ padre: 150448, total: -1 }],
+      pago: { ...RECIBO.pago, monto: -1 },
+    };
+    const fx = makeCtx({
+      config: { writeEnabled: true, maxMontos: { UYU: 1000 } },
+      postResponse: { id: 99 },
+    });
+    const dry = await handleCrearRecibo({ recibo }, fx.ctx);
+    const token = structured(dry).confirmation_token as string;
+    const ejecutada = await handleCrearRecibo(
+      { recibo, confirm: true, confirmation_token: token },
+      fx.ctx,
+    );
+
+    expect(ejecutada.isError).toBe(true);
+    expect(errorOf(ejecutada)).toMatchObject({ kind: "validation" });
+    expect(fx.postMock).not.toHaveBeenCalled();
   });
 });

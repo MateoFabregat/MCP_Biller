@@ -29,8 +29,37 @@ export class BillerMontoExcedidoError extends BillerError {
   }
 }
 
+export class BillerMontoInvalidoError extends BillerError {
+  constructor(detalle: string) {
+    super(
+      "validation",
+      `El monto de la operación es inválido: ${detalle}. NO se ejecutó. ` +
+        "Revisá el importe antes de volver a confirmar.",
+    );
+  }
+}
+
 /** Mapa moneda -> tope. Vacío = sin tope (comportamiento previo). */
 export type LimitesMonto = Record<string, number>;
+
+function monedaDelPayload(payload: unknown): string {
+  if (payload === null || typeof payload !== "object") return "UYU";
+  const moneda = (payload as Record<string, unknown>).moneda;
+  return typeof moneda === "string" && moneda.trim() !== ""
+    ? moneda.trim().toUpperCase()
+    : "UYU";
+}
+
+function tieneIndicioMonto(payload: unknown): boolean {
+  if (payload === null || typeof payload !== "object") return false;
+  const p = payload as Record<string, unknown>;
+  return (
+    Object.prototype.hasOwnProperty.call(p, "total") ||
+    Object.prototype.hasOwnProperty.call(p, "monto") ||
+    Object.prototype.hasOwnProperty.call(p, "importe") ||
+    Object.prototype.hasOwnProperty.call(p, "pago")
+  );
+}
 
 /**
  * Parsea los topes desde el entorno: `BILLER_MAX_MONTO_UYU=500000`,
@@ -62,13 +91,34 @@ export function extraerMonto(payload: unknown): { monto: number; moneda: string 
   if (payload === null || typeof payload !== "object") return null;
   const p = payload as Record<string, unknown>;
 
-  // `total` en la raíz cubre comprobantes, recibos y pagos.
-  const candidatos = [p.total, p.monto, p.importe];
-  const moneda = typeof p.moneda === "string" && p.moneda.trim() !== "" ? p.moneda.trim() : "UYU";
+  // Los pagos genéricos llevan el monto en la raíz. Crear un recibo, en cambio,
+  // lo lleva en `pago.monto`; es una ruta documentada y explícita (no una
+  // recursión que podría confundir subtotales o referencias con el total real).
+  const tienePago = Object.prototype.hasOwnProperty.call(p, "pago");
+  const pago =
+    p.pago !== null && typeof p.pago === "object"
+      ? (p.pago as Record<string, unknown>)
+      : undefined;
+  const candidatos = tienePago
+    ? [
+        // En un recibo este es el monto autoritativo. No se deja que un campo
+        // raíz extra (el schema admite passthrough) lo tape con un valor menor.
+        { valor: pago?.monto, permiteNegativo: false },
+      ]
+    : [
+        { valor: p.total, permiteNegativo: true },
+        { valor: p.monto, permiteNegativo: true },
+        { valor: p.importe, permiteNegativo: true },
+      ];
+  const moneda = monedaDelPayload(payload);
 
-  for (const c of candidatos) {
+  for (const candidato of candidatos) {
+    const c = candidato.valor;
     const n = typeof c === "number" ? c : typeof c === "string" ? Number(c) : NaN;
-    if (Number.isFinite(n) && n !== 0) return { monto: Math.abs(n), moneda };
+    if (Number.isFinite(n) && n < 0 && !candidato.permiteNegativo) {
+      throw new BillerMontoInvalidoError("pago.monto no puede ser negativo en un recibo");
+    }
+    if (Number.isFinite(n)) return { monto: Math.abs(n), moneda };
   }
   return null;
 }
@@ -102,15 +152,44 @@ export function verificarLimiteMonto(
   // Tolera `undefined`: una config vieja sin este campo debe seguir escribiendo,
   // no romper toda la capa de escritura con un TypeError.
   if (limites === undefined || Object.keys(limites).length === 0) return;
-  const extraido =
-    explicito !== undefined && Number.isFinite(explicito.monto) && explicito.monto !== 0
-      ? { monto: Math.abs(explicito.monto), moneda: explicito.moneda }
-      : extraerMonto(payload);
-  if (extraido === null) return;
+  if (
+    explicito !== undefined &&
+    Number.isFinite(explicito.monto) &&
+    explicito.monto !== 0
+  ) {
+    const moneda = explicito.moneda.trim().toUpperCase();
+    const limite = limites[moneda];
+    if (limite !== undefined && Math.abs(explicito.monto) > limite) {
+      throw new BillerMontoExcedidoError(Math.abs(explicito.monto), limite, moneda);
+    }
+    return;
+  }
 
-  const limite = limites[extraido.moneda];
-  if (limite === undefined) return;
-  if (extraido.monto > limite) {
-    throw new BillerMontoExcedidoError(extraido.monto, limite, extraido.moneda);
+  const monedaPayload = monedaDelPayload(payload);
+  const limitePayload = limites[monedaPayload];
+  if (limitePayload !== undefined) {
+    const extraido = extraerMonto(payload);
+    if (extraido !== null) {
+      if (extraido.monto > limitePayload) {
+        throw new BillerMontoExcedidoError(extraido.monto, limitePayload, monedaPayload);
+      }
+      return;
+    }
+    if (tieneIndicioMonto(payload)) {
+      throw new BillerMontoInvalidoError(
+        "hay campos monetarios, pero no contienen un número finito identificable",
+      );
+    }
+  }
+
+  if (explicito !== undefined) {
+    // Cero es un total válido (p.ej. entrega gratuita). Conserva además la
+    // compatibilidad anterior: si el payload sí trae un monto raíz, ese monto
+    // ya se evaluó arriba antes de aceptar el cero explícito.
+    if (Number.isFinite(explicito.monto) && explicito.monto === 0) return;
+    const moneda = explicito.moneda.trim().toUpperCase();
+    if (limites[moneda] !== undefined) {
+      throw new BillerMontoInvalidoError("el total calculado no es un número finito");
+    }
   }
 }
