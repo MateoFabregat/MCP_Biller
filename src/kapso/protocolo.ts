@@ -21,6 +21,9 @@ export const PREFIJO_MENU = "menu:";
 /** Prefijo de los ids de la confirmación de emisión. */
 export const PREFIJO_EMISION = "emitir:";
 
+/** Prefijo de los dos pasos explícitos de una anulación. */
+export const PREFIJO_ANULACION = "anular:";
+
 /**
  * Prefijo de los botones de desambiguación de `biller_resolver_nombre`.
  *
@@ -64,6 +67,29 @@ export function interpretarRespuestaEmision(raw: string): RespuestaEmision {
   if (resto.startsWith("si:")) {
     const token = resto.slice(3);
     return token === "" ? { accion: "ninguna" } : { accion: "emitir", token };
+  }
+  return { accion: "ninguna" };
+}
+
+export type RespuestaAnulacion =
+  | { accion: "revisar"; token: string }
+  | { accion: "anular"; token: string }
+  | { accion: "cancelar" }
+  | { accion: "ninguna" };
+
+/** Lee exclusivamente ids emitidos por nuestros botones de anulación. */
+export function interpretarRespuestaAnulacion(raw: string): RespuestaAnulacion {
+  const texto = raw.trim();
+  if (!texto.startsWith(PREFIJO_ANULACION)) return { accion: "ninguna" };
+  const resto = texto.slice(PREFIJO_ANULACION.length);
+  if (resto === "no") return { accion: "cancelar" };
+  for (const [prefijo, accion] of [
+    ["revisar:", "revisar"],
+    ["si:", "anular"],
+  ] as const) {
+    if (!resto.startsWith(prefijo)) continue;
+    const token = resto.slice(prefijo.length);
+    return token === "" ? { accion: "ninguna" } : { accion, token };
   }
   return { accion: "ninguna" };
 }

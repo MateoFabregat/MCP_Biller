@@ -234,6 +234,21 @@ function siguienteAccion(r: ReturnType<typeof interpretarMensaje>): string {
         `El usuario tocó ✖️ Cancelar: NO emitas nada. Contestá corto, tipo "${r.respuesta_sugerida}". ` +
         "No mandes el menú ni vuelvas a arrancar la emisión: cancelar significa que no quiere seguir."
       );
+    case "anulacion_revisada":
+      return (
+        "El usuario completó el paso 1 de 2. Volvé a llamar biller_anular_comprobante con el " +
+        "MISMO identificador, fecha_emision_hoy y confirmar_por_whatsapp, todavía SIN confirm=true, " +
+        "con confirmacion_revisada=true y revision_token = el campo 'confirmation_token' de esta " +
+        "respuesta. Eso manda el botón final; no anules todavía."
+      );
+    case "anulacion_confirmada":
+      return (
+        "El usuario completó el paso 2 de 2. Llamá a biller_anular_comprobante con confirm=true, " +
+        "el MISMO identificador y fecha_emision_hoy del preview, y confirmation_token = el campo " +
+        "'confirmation_token' de esta respuesta. No cambies el comprobante."
+      );
+    case "anulacion_cancelada":
+      return "El usuario eligió no anular. No ejecutes ningún POST y confirmale que no se cambió nada.";
     case "afirmacion":
       return (
         `El usuario dijo que sí. ${r.respuesta_sugerida} ` +

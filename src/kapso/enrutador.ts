@@ -36,6 +36,7 @@ import {
 } from "./intenciones.js";
 import {
   PREFIJO_MENU,
+  interpretarRespuestaAnulacion,
   interpretarRespuestaEmision,
   interpretarRespuestaResolucion,
 } from "./protocolo.js";
@@ -156,6 +157,9 @@ export interface Interpretacion {
     | "no_disponible"
     | "emision_confirmada"
     | "emision_cancelada"
+    | "anulacion_revisada"
+    | "anulacion_confirmada"
+    | "anulacion_cancelada"
     | "flujo_emision"
     | "pedido_emision"
     | "resolucion_elegida"
@@ -480,6 +484,33 @@ export function interpretarMensaje(raw: string, opciones: MenuOpciones = {}): In
       mostrar_menu: false,
       respuesta_sugerida:
         "Listo, no emití nada. El comprobante quedó sin emitir. Cuando quieras lo retomamos.",
+    };
+  }
+  const respuestaAnulacion = interpretarRespuestaAnulacion(texto);
+  if (respuestaAnulacion.accion === "revisar") {
+    return {
+      opcion: null,
+      via: "anulacion_revisada",
+      mostrar_menu: false,
+      confirmation_token: respuestaAnulacion.token,
+      respuesta_sugerida: "Revisado. Falta la confirmación final para anular.",
+    };
+  }
+  if (respuestaAnulacion.accion === "anular") {
+    return {
+      opcion: null,
+      via: "anulacion_confirmada",
+      mostrar_menu: false,
+      confirmation_token: respuestaAnulacion.token,
+      respuesta_sugerida: "Confirmado. Anulo ese comprobante.",
+    };
+  }
+  if (respuestaAnulacion.accion === "cancelar") {
+    return {
+      opcion: null,
+      via: "anulacion_cancelada",
+      mostrar_menu: false,
+      respuesta_sugerida: "Listo, no anulé nada.",
     };
   }
   const resolucion = interpretarRespuestaResolucion(texto);

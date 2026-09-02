@@ -27,13 +27,17 @@ import {
 import { ALL_TOOL_NAMES } from "../src/tools/register.js";
 import {
   OPCIONES_MENU,
+  PREFIJO_ANULACION,
   PREFIJO_EMISION,
+  construirConfirmacionAnulacion,
+  construirRevisionAnulacion,
   construirConfirmacionEmision,
   construirDesambiguacion,
   construirMenuInteractivo,
   construirMenuTexto,
   interpretarMensaje,
   interpretarRespuestaEmision,
+  interpretarRespuestaAnulacion,
   opcionesDisponibles,
 } from "../src/kapso/menu.js";
 import { handleMenuWhatsapp } from "../src/tools/menuWhatsapp.js";
@@ -43,6 +47,7 @@ import {
   nombreArchivo,
 } from "../src/tools/enviarComprobanteWhatsapp.js";
 import { handleEmitirComprobante } from "../src/tools/write/emitirComprobante.js";
+import { handleAnularComprobante } from "../src/tools/write/anularComprobante.js";
 import { normalizeComprobantesEmitidos } from "../src/biller/normalize.js";
 import { sanitizeToolResult } from "../src/security/sanitize.js";
 import type { KapsoConfig } from "../src/config.js";
@@ -773,6 +778,95 @@ describe("confirmación de emisión con botones", () => {
     expect(interpretarRespuestaEmision("menu:cobranzas")).toEqual({ accion: "ninguna" });
     expect(interpretarRespuestaEmision("emitir:si:")).toEqual({ accion: "ninguna" });
     expect(interpretarRespuestaEmision("sí dale")).toEqual({ accion: "ninguna" });
+  });
+});
+
+describe("anulación por WhatsApp con doble confirmación", () => {
+  const token = `${Date.now()}.${"b".repeat(64)}`;
+
+  it("usa dos mensajes visualmente distintos y conserva el token exacto", () => {
+    const revision = construirRevisionAnulacion({ comprobante: "ID 43574", ambiente: "test", token });
+    expect(revision.cuerpo).toContain("1 de 2");
+    expect(revision.botones[0]!.id).toBe(`${PREFIJO_ANULACION}revisar:${token}`);
+    expect(interpretarRespuestaAnulacion(revision.botones[0]!.id)).toEqual({
+      accion: "revisar",
+      token,
+    });
+
+    const final = construirConfirmacionAnulacion({ comprobante: "ID 43574", ambiente: "test", token });
+    expect(final.cuerpo).toContain("2 de 2");
+    expect(final.cuerpo).not.toBe(revision.cuerpo);
+    expect(interpretarRespuestaAnulacion(final.botones[0]!.id)).toEqual({
+      accion: "anular",
+      token,
+    });
+    expect(() => construirPayloadInteractivo(revision)).not.toThrow();
+    expect(() => construirPayloadInteractivo(final)).not.toThrow();
+  });
+
+  it("el enrutador distingue revisar, confirmar y cancelar sin heurísticas", () => {
+    expect(interpretarMensaje(`${PREFIJO_ANULACION}revisar:${token}`).via).toBe("anulacion_revisada");
+    expect(interpretarMensaje(`${PREFIJO_ANULACION}si:${token}`).via).toBe("anulacion_confirmada");
+    expect(interpretarMensaje(`${PREFIJO_ANULACION}no`).via).toBe("anulacion_cancelada");
+  });
+
+  it("la tool manda primero revisión y recién después confirmación final", async () => {
+    const { fn, llamadas } = fakeFetch();
+    vi.stubGlobal("fetch", fn);
+    const fx = makeCtx({ config: { kapso: kapsoConfig(), writeEnabled: true } });
+    const base = { id: 43574, fecha_emision_hoy: true, confirmar_por_whatsapp: PERMITIDO };
+
+    const primero = await handleAnularComprobante(base, fx.ctx);
+    expect(sc(primero).confirmation_token).toBeUndefined();
+    const tokenPreview = sc(primero).revision_token as string;
+    const primerBody = JSON.parse(String(llamadas[0]!.init.body)) as Record<string, any>;
+    expect(primerBody.interactive.body.text).toContain("1 de 2");
+    expect(primerBody.interactive.action.buttons[0].reply.id).toBe(
+      `${PREFIJO_ANULACION}revisar:${tokenPreview}`,
+    );
+    expect(fx.postMock).not.toHaveBeenCalled();
+
+    const intentoPrematuro = await handleAnularComprobante(
+      { id: 43574, fecha_emision_hoy: true, confirm: true, confirmation_token: tokenPreview },
+      fx.ctx,
+    );
+    expect(intentoPrematuro.isError).toBe(true);
+    expect(fx.postMock).not.toHaveBeenCalled();
+
+    const manipulado = await handleAnularComprobante(
+      {
+        ...base,
+        id: 99999,
+        confirmacion_revisada: true,
+        revision_token: tokenPreview,
+      },
+      fx.ctx,
+    );
+    expect(manipulado.isError).toBe(true);
+    expect(llamadas).toHaveLength(1);
+
+    const segundo = await handleAnularComprobante(
+      { ...base, confirmacion_revisada: true, revision_token: tokenPreview },
+      fx.ctx,
+    );
+    const segundoBody = JSON.parse(String(llamadas[1]!.init.body)) as Record<string, any>;
+    expect(segundoBody.interactive.body.text).toContain("2 de 2");
+    expect(segundoBody.interactive.action.buttons[0].reply.id).toBe(
+      `${PREFIJO_ANULACION}si:${sc(segundo).confirmation_token as string}`,
+    );
+    expect(fx.postMock).not.toHaveBeenCalled();
+
+    const ejecutado = await handleAnularComprobante(
+      {
+        id: 43574,
+        fecha_emision_hoy: true,
+        confirm: true,
+        confirmation_token: sc(segundo).confirmation_token as string,
+      },
+      fx.ctx,
+    );
+    expect(sc(ejecutado).mode).toBe("executed");
+    expect(fx.postMock).toHaveBeenCalledOnce();
   });
 });
 

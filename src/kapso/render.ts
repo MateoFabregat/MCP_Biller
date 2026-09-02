@@ -13,7 +13,7 @@
 import type { InteractivoBotones, InteractivoLista } from "./client.js";
 import { PREFIJO_PASO } from "./emision.js";
 import { opcionesDisponibles, type MenuOpcion, type MenuOpciones } from "./intenciones.js";
-import { PREFIJO_EMISION } from "./protocolo.js";
+import { PREFIJO_ANULACION, PREFIJO_EMISION } from "./protocolo.js";
 
 /** Menú como lista interactiva de WhatsApp. */
 export function construirMenuInteractivo(opciones: MenuOpciones = {}): InteractivoLista {
@@ -150,6 +150,50 @@ export function construirConfirmacionEmision(datos: {
       { id: `${PREFIJO_EMISION}si:${datos.token}`, titulo: "✅ Emitir" },
       { id: `${PREFIJO_PASO}item:otro`, titulo: "➕ Otro ítem" },
       { id: `${PREFIJO_EMISION}no`, titulo: "✖️ Cancelar" },
+    ],
+  };
+}
+
+interface DatosAnulacion {
+  comprobante: string;
+  ambiente: "test" | "production";
+  token: string;
+}
+
+/** Primer toque: obliga a revisar el documento y explica la consecuencia. */
+export function construirRevisionAnulacion(datos: DatosAnulacion): InteractivoBotones {
+  return {
+    tipo: "botones",
+    encabezado: "Anulación · 1 de 2",
+    cuerpo:
+      `PASO 1 de 2 · Revisar\n\nRevisá antes de seguir: ${datos.comprobante}.\n\n` +
+      "La anulación es TOTAL y crea una Nota de Crédito ante DGI. Este botón todavía no anula.",
+    pie:
+      datos.ambiente === "production"
+        ? "⚠️ PRODUCCIÓN: el paso final afecta DGI real."
+        : "Ambiente de prueba (no va a DGI real).",
+    botones: [
+      { id: `${PREFIJO_ANULACION}revisar:${datos.token}`, titulo: "Revisar anulación" },
+      { id: `${PREFIJO_ANULACION}no`, titulo: "✖️ Cancelar" },
+    ],
+  };
+}
+
+/** Segundo toque, deliberadamente distinto: es el que autoriza el POST. */
+export function construirConfirmacionAnulacion(datos: DatosAnulacion): InteractivoBotones {
+  return {
+    tipo: "botones",
+    encabezado: "Confirmación final · 2 de 2",
+    cuerpo:
+      `PASO 2 de 2 · Confirmación final\n\nANULAR ${datos.comprobante}\n\n` +
+      "Esto emitirá ahora una Nota de Crédito TOTAL. Confirmá solo si el comprobante es el correcto.",
+    pie:
+      datos.ambiente === "production"
+        ? "⚠️ PRODUCCIÓN: afecta DGI de verdad."
+        : "Ambiente de prueba (no va a DGI real).",
+    botones: [
+      { id: `${PREFIJO_ANULACION}si:${datos.token}`, titulo: "⛔ Anular ahora" },
+      { id: `${PREFIJO_ANULACION}no`, titulo: "↩️ No anular" },
     ],
   };
 }

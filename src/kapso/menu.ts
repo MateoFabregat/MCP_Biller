@@ -49,11 +49,14 @@
 
 export {
   PREFIJO_EMISION,
+  PREFIJO_ANULACION,
   PREFIJO_MENU,
   PREFIJO_RESOLVER,
   interpretarRespuestaEmision,
+  interpretarRespuestaAnulacion,
   interpretarRespuestaResolucion,
   type RespuestaEmision,
+  type RespuestaAnulacion,
 } from "./protocolo.js";
 
 export {
@@ -72,6 +75,8 @@ export {
 
 export {
   construirConfirmacionEmision,
+  construirConfirmacionAnulacion,
+  construirRevisionAnulacion,
   construirDesambiguacion,
   construirMenuInteractivo,
   construirMenuTexto,

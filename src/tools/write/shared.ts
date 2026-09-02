@@ -139,6 +139,8 @@ export const writeOutputShape = {
   payload_preview: z.unknown().optional(),
   query_preview: z.unknown().optional(),
   confirmation_token: z.string().optional(),
+  /** Token no ejecutable usado por el primer paso de anulación por WhatsApp. */
+  revision_token: z.string().optional(),
   idempotency_key: z.string().nullable().optional(),
   next_step: z.string().optional(),
   no_network_call: z.boolean().optional(),
