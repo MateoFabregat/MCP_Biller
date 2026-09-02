@@ -78,7 +78,7 @@ const fullSchema = z.object(inputShape).superRefine((d, ctx) => {
       path: ["id"],
     });
   }
-  if (d.confirmacion_revisada && d.confirmar_por_whatsapp === undefined) {
+  if (d.confirmacion_revisada && !d.confirm && d.confirmar_por_whatsapp === undefined) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: "confirmacion_revisada requiere confirmar_por_whatsapp.",
@@ -112,6 +112,39 @@ export async function handleAnularComprobante(
   }
   if (a.sucursal !== undefined) payload.sucursal = a.sucursal;
 
+  if (a.confirmar_por_whatsapp !== undefined) {
+    const remitente = normalizarTelefono(a.remitente ?? "");
+    const destinatario = normalizarTelefono(a.confirmar_por_whatsapp);
+    if (remitente === "") {
+      return simpleErrorResult(
+        "Para confirmar una anulación por WhatsApp falta el remitente verificado. No se envió nada.",
+        ctx,
+      );
+    }
+    if (destinatario !== remitente) {
+      return simpleErrorResult(
+        "La confirmación de anulación debe volver al mismo número que inició la operación. " +
+          "No se envió nada.",
+        ctx,
+      );
+    }
+  }
+
+  const identidadWhatsapp = identidadDeEscritura(ctx, a.remitente);
+  if (identidadWhatsapp !== null && !a.confirm && a.confirmar_por_whatsapp === undefined) {
+    return simpleErrorResult(
+      "Las anulaciones iniciadas desde WhatsApp requieren la doble confirmación. Enviá primero " +
+        "confirmar_por_whatsapp al número autorizado; no se generó un token ejecutable.",
+      ctx,
+    );
+  }
+  if (identidadWhatsapp !== null && a.confirm && !a.confirmacion_revisada) {
+    return simpleErrorResult(
+      "Falta completar la doble confirmación de WhatsApp. No se anuló nada.",
+      ctx,
+    );
+  }
+
   // El segundo mensaje solo puede derivar del PRIMER preview del mismo
   // comprobante y de la misma conversación. Así una alteración entre los dos
   // toques no cambia silenciosamente qué documento se anula.
@@ -122,7 +155,7 @@ export async function handleAnularComprobante(
       `${ENDPOINT}:revision`,
       config.environment,
       { payload, query: null },
-      { identidad: identidadDeEscritura(ctx, a.remitente) },
+      { identidad: identidadWhatsapp },
     );
     if (!check.ok) return simpleErrorResult(check.mensaje, ctx);
   }

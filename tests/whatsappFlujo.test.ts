@@ -810,11 +810,33 @@ describe("anulación por WhatsApp con doble confirmación", () => {
     expect(interpretarMensaje(`${PREFIJO_ANULACION}no`).via).toBe("anulacion_cancelada");
   });
 
+  it("el enrutador pide el revision_token real después del primer toque", async () => {
+    const fx = makeCtx({ config: { kapso: kapsoConfig() } });
+    const res = await handleMenuWhatsapp(
+      { mensaje: `${PREFIJO_ANULACION}revisar:${token}`, remitente: PERMITIDO },
+      fx.ctx,
+    );
+    const interpretacion = sc(res).interpretacion as Record<string, unknown>;
+    expect(interpretacion.siguiente_accion).toContain("campo 'revision_token'");
+    expect(interpretacion.siguiente_accion).not.toContain("campo 'confirmation_token'");
+  });
+
   it("la tool manda primero revisión y recién después confirmación final", async () => {
     const { fn, llamadas } = fakeFetch();
     vi.stubGlobal("fetch", fn);
     const fx = makeCtx({ config: { kapso: kapsoConfig(), writeEnabled: true } });
-    const base = { id: 43574, fecha_emision_hoy: true, confirmar_por_whatsapp: PERMITIDO };
+    const directo = await handleAnularComprobante(
+      { id: 43574, fecha_emision_hoy: true, remitente: PERMITIDO },
+      fx.ctx,
+    );
+    expect(directo.isError).toBe(true);
+
+    const base = {
+      id: 43574,
+      fecha_emision_hoy: true,
+      confirmar_por_whatsapp: PERMITIDO,
+      remitente: PERMITIDO,
+    };
 
     const primero = await handleAnularComprobante(base, fx.ctx);
     expect(sc(primero).confirmation_token).toBeUndefined();
@@ -863,11 +885,45 @@ describe("anulación por WhatsApp con doble confirmación", () => {
         fecha_emision_hoy: true,
         confirm: true,
         confirmation_token: sc(segundo).confirmation_token as string,
+        confirmacion_revisada: true,
+        revision_token: tokenPreview,
+        remitente: PERMITIDO,
       },
       fx.ctx,
     );
     expect(sc(ejecutado).mode).toBe("executed");
     expect(fx.postMock).toHaveBeenCalledOnce();
+  });
+
+  it("no inicia la aprobación en WhatsApp sin remitente ni para otro número", async () => {
+    const { fn, llamadas } = fakeFetch();
+    vi.stubGlobal("fetch", fn);
+    const otroPermitido = "59899111222";
+    const fx = makeCtx({
+      config: {
+        kapso: kapsoConfig({ destinatariosPermitidos: [PERMITIDO, otroPermitido] }),
+        writeEnabled: true,
+      },
+    });
+
+    const sinIdentidad = await handleAnularComprobante(
+      { id: 43574, fecha_emision_hoy: true, confirmar_por_whatsapp: PERMITIDO },
+      fx.ctx,
+    );
+    expect(sinIdentidad.isError).toBe(true);
+
+    const destinoAjeno = await handleAnularComprobante(
+      {
+        id: 43574,
+        fecha_emision_hoy: true,
+        confirmar_por_whatsapp: otroPermitido,
+        remitente: PERMITIDO,
+      },
+      fx.ctx,
+    );
+    expect(destinoAjeno.isError).toBe(true);
+    expect(llamadas).toHaveLength(0);
+    expect(fx.postMock).not.toHaveBeenCalled();
   });
 });
 

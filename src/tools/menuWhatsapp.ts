@@ -238,14 +238,15 @@ function siguienteAccion(r: ReturnType<typeof interpretarMensaje>): string {
       return (
         "El usuario completó el paso 1 de 2. Volvé a llamar biller_anular_comprobante con el " +
         "MISMO identificador, fecha_emision_hoy y confirmar_por_whatsapp, todavía SIN confirm=true, " +
-        "con confirmacion_revisada=true y revision_token = el campo 'confirmation_token' de esta " +
-        "respuesta. Eso manda el botón final; no anules todavía."
+        "con confirmacion_revisada=true y revision_token = el campo 'revision_token' de esta " +
+        "respuesta. Conservá también el mismo remitente. Eso manda el botón final; no anules todavía."
       );
     case "anulacion_confirmada":
       return (
         "El usuario completó el paso 2 de 2. Llamá a biller_anular_comprobante con confirm=true, " +
         "el MISMO identificador y fecha_emision_hoy del preview, y confirmation_token = el campo " +
-        "'confirmation_token' de esta respuesta. No cambies el comprobante."
+        "'confirmation_token' de esta respuesta. Conservá también confirmacion_revisada=true, el " +
+        "revision_token del paso anterior y el mismo remitente. No cambies el comprobante."
       );
     case "anulacion_cancelada":
       return "El usuario eligió no anular. No ejecutes ningún POST y confirmale que no se cambió nada.";
