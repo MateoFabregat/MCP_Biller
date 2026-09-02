@@ -20,7 +20,7 @@ import {
   TIPOS_DOCUMENTO,
   parseFechaDgi,
 } from "./cfeSchema.js";
-import { booleano, codigo, entero, fechaIso, numero, plata, round2, texto } from "./coerce.js";
+import { booleano, codigo, entero, esFechaIsoReal, fechaIso, numero, plata, round2, texto } from "./coerce.js";
 
 // ---------------------------------------------------------------------------
 // Recibos — POST /v2/recibos/crear
@@ -183,7 +183,7 @@ export function validarRecibo(body: ReciboBody): string[] {
 const fechaPago = z.string().superRefine((value, ctx) => {
   const t = value.trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(t)) {
-    if (Number.isNaN(Date.parse(t))) {
+    if (!esFechaIsoReal(t)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "fecha debe ser una fecha real." });
     }
     return;

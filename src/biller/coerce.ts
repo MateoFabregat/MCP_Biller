@@ -130,6 +130,12 @@ export function texto(max: number, campo: string) {
  * la API usa AMBOS formatos según el campo, y confundirlos es el error más
  * fácil de cometer.
  */
+export function esFechaIsoReal(v: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const fecha = new Date(`${v}T00:00:00.000Z`);
+  return !Number.isNaN(fecha.getTime()) && fecha.toISOString().slice(0, 10) === v;
+}
+
 export function fechaIso(campo: string) {
   return z
     .string()
@@ -138,7 +144,7 @@ export function fechaIso(campo: string) {
       `${campo} usa formato ISO aaaa-mm-dd (ej: "2026-05-28"). ` +
         "Ojo: las fechas de EMISIÓN de un CFE usan dd/mm/aaaa; ésta no.",
     )
-    .refine((v) => !Number.isNaN(Date.parse(v)), `${campo} debe ser una fecha real.`);
+    .refine(esFechaIsoReal, `${campo} debe ser una fecha real.`);
 }
 
 /** Redondeo monetario a 2 decimales, estable ante el error de coma flotante. */

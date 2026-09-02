@@ -30,6 +30,12 @@ describe("resolverPeriodo", () => {
     expect(resolverPeriodo("2026-06-15", HOY)).toEqual({ desde: "2026-06-15", hasta: "2026-06-15" });
   });
 
+  it("no convierte una fecha imposible en un rango consultable", () => {
+    expect(resolverPeriodo("2026-02-31", HOY)).toBeNull();
+    expect(resolverPeriodo("2025-02-29", HOY)).toBeNull();
+    expect(resolverPeriodo("2024-02-29", HOY)).toEqual({ desde: "2024-02-29", hasta: "2024-02-29" });
+  });
+
   it("resuelve alias relativos respecto de 'hoy'", () => {
     expect(resolverPeriodo("hoy", HOY)).toEqual({ desde: "2026-07-27", hasta: "2026-07-27" });
     expect(resolverPeriodo("ayer", HOY)).toEqual({ desde: "2026-07-26", hasta: "2026-07-26" });

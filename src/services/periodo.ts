@@ -17,6 +17,7 @@
 
 import { CacheVentanas } from "../biller/cacheVentanas.js";
 import type { BillerClient } from "../biller/client.js";
+import { esFechaIsoReal } from "../biller/coerce.js";
 import { fetchEmitidos } from "../biller/queries.js";
 import { CONCURRENCIA, conReintento, mapConLimite } from "../biller/traerVentanas.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
@@ -181,7 +182,7 @@ export function resolverPeriodo(expresion: string, hoy: Date = new Date()): Rang
     return { desde: `${mAnio[1]}-01-01`, hasta: `${mAnio[1]}-12-31` };
   }
 
-  if (/^\d{4}-\d{2}-\d{2}$/.test(e)) {
+  if (esFechaIsoReal(e)) {
     return { desde: e, hasta: e };
   }
 

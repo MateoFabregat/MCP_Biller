@@ -63,6 +63,21 @@ describe("ReciboBodySchema", () => {
     expect(e).toMatch(/aaaa-mm-dd/);
   });
 
+  it("rechaza días imposibles aunque Date.parse los normalice", () => {
+    expect(
+      errores(ReciboBodySchema, {
+        ...RECIBO_OK,
+        pago: { ...RECIBO_OK.pago, fecha: "2026-02-31" },
+      }),
+    ).toMatch(/fecha real/);
+    expect(
+      errores(ReciboBodySchema, {
+        ...RECIBO_OK,
+        fecha_emision: "2025-02-29",
+      }),
+    ).toMatch(/fecha real/);
+  });
+
   it("rechaza un pago menor al total de las referencias", () => {
     const e = errores(ReciboBodySchema, {
       ...RECIBO_OK,
@@ -117,6 +132,10 @@ describe("PagoBodySchema", () => {
     expect(PagoBodySchema.safeParse({ ...PAGO_OK, fecha: "2026-05-28" }).success).toBe(true);
     expect(PagoBodySchema.safeParse({ ...PAGO_OK, fecha: "28/05/2026" }).success).toBe(true);
     expect(errores(PagoBodySchema, { ...PAGO_OK, fecha: "28-05-2026" })).toMatch(/aaaa-mm-dd o dd\/mm\/aaaa/);
+  });
+
+  it("rechaza una fecha ISO imposible", () => {
+    expect(errores(PagoBodySchema, { ...PAGO_OK, fecha: "2026-04-31" })).toMatch(/fecha real/);
   });
 
   it("permite montos negativos para revertir un pago", () => {
