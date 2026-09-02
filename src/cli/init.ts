@@ -20,7 +20,17 @@
 //     en pantalla lo muestra recortado.
 // =============================================================================
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
@@ -28,16 +38,23 @@ import { createInterface, type Interface } from "node:readline";
 const TEST_URL = "https://test.biller.uy";
 const PROD_URL = "https://biller.uy";
 
+interface EntornoRutaClaudeDesktop {
+  plataforma?: NodeJS.Platform;
+  home?: string;
+  env?: Record<string, string | undefined>;
+}
+
 /** Ruta del claude_desktop_config.json según el sistema operativo. */
-export function rutaConfigClaudeDesktop(): string {
-  const home = homedir();
-  switch (platform()) {
+export function rutaConfigClaudeDesktop(opciones: EntornoRutaClaudeDesktop = {}): string {
+  const home = opciones.home ?? homedir();
+  const env = opciones.env ?? process.env;
+  switch (opciones.plataforma ?? platform()) {
     case "darwin":
       return join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
     case "win32":
-      return join(process.env.APPDATA ?? join(home, "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
+      return join(env.APPDATA ?? join(home, "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
     default:
-      return join(process.env.XDG_CONFIG_HOME ?? join(home, ".config"), "Claude", "claude_desktop_config.json");
+      return join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "Claude", "claude_desktop_config.json");
   }
 }
 
@@ -61,30 +78,63 @@ export function bloqueServidor(token: string, baseUrl: string): Record<string, u
  */
 export function escribirConfigDesktop(ruta: string, token: string, baseUrl: string): { backup: boolean } {
   let config: Record<string, unknown> = {};
-  let backup = false;
-  if (existsSync(ruta)) {
+  const yaExistia = existsSync(ruta);
+  if (yaExistia) {
     const crudo = readFileSync(ruta, "utf8").trim();
     if (crudo !== "") {
       // Si el JSON existente está roto, mejor frenar que pisarlo: el archivo
       // puede tener otros servers que el usuario no quiere perder.
       config = JSON.parse(crudo) as Record<string, unknown>;
     }
+  } else {
+    mkdirSync(dirname(ruta), { recursive: true, mode: 0o700 });
+  }
+  const servidoresActuales = config.mcpServers;
+  if (
+    servidoresActuales !== undefined &&
+    (typeof servidoresActuales !== "object" || servidoresActuales === null || Array.isArray(servidoresActuales))
+  ) {
+    throw new Error('La clave "mcpServers" existe pero no es un objeto JSON.');
+  }
+  const siguiente: Record<string, unknown> = {
+    ...config,
+    mcpServers: {
+      ...((servidoresActuales ?? {}) as Record<string, unknown>),
+      biller: bloqueServidor(token, baseUrl),
+    },
+  };
+  const serializado = `${JSON.stringify(siguiente, null, 2)}\n`;
+
+  // Repetir el alta exacta no toca el archivo ni crea un backup inútil con el
+  // mismo secreto. La comparación es semántica: tolera otro indentado.
+  if (yaExistia && JSON.stringify(config) === JSON.stringify(siguiente)) {
+    chmodSync(ruta, 0o600);
+    return { backup: false };
+  }
+
+  let backup = false;
+  if (yaExistia) {
     // El .bak lleva el token adentro (el viejo o el mismo): 0600 para que no lo
     // lea otro usuario del sistema, igual que el archivo real.
     copyFileSync(ruta, `${ruta}.bak`);
     chmodSync(`${ruta}.bak`, 0o600);
     backup = true;
-  } else {
-    mkdirSync(dirname(ruta), { recursive: true });
   }
-  const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
-  servers.biller = bloqueServidor(token, baseUrl);
-  config.mcpServers = servers;
+
   // 0600: el archivo tiene el BILLER_API_TOKEN en claro. Sin esto queda 0644 y
   // cualquier proceso de otro usuario lo lee — el escenario del host compartido
   // que el README de multi-empresa describe.
-  writeFileSync(ruta, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  chmodSync(ruta, 0o600); // writeFileSync no baja los permisos de un archivo que YA existía
+  const temporal = `${ruta}.tmp-${randomUUID()}`;
+  try {
+    writeFileSync(temporal, serializado, { encoding: "utf8", mode: 0o600 });
+    chmodSync(temporal, 0o600);
+    renameSync(temporal, ruta);
+  } finally {
+    // Si write/rename falla, el config anterior sigue intacto. El temporal no
+    // puede quedar abandonado con un token en claro.
+    if (existsSync(temporal)) rmSync(temporal, { force: true });
+  }
+  chmodSync(ruta, 0o600);
   return { backup };
 }
 

@@ -398,6 +398,8 @@ usar `https://test.biller.uy` y dejar `BILLER_CAPABILITY_MODE=read_only`.
 
 Hay un ejemplo de configuración para Claude Desktop en
 [`claude_desktop_config.example.json`](./claude_desktop_config.example.json).
+El ejemplo usa el paquete publicado (`npx -y biller-mcp-server`), por lo que no
+depende de clonar este repositorio ni de mantener una ruta local a `dist/`.
 
 ## Configuración (`.env`)
 

@@ -1,9 +1,10 @@
 {
   "mcpServers": {
     "biller": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "/ABSOLUTE/PATH/TO/MCP_Biller/dist/index.js"
+        "-y",
+        "biller-mcp-server"
       ],
       "env": {
         "BILLER_API_BASE_URL": "https://test.biller.uy",

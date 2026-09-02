@@ -1,7 +1,7 @@
 {
   "name": "biller-mcp-server",
   "version": "0.1.1",
-  "description": "MCP server local, read-only, para la API REST de Biller (facturaci\u00f3n electr\u00f3nica de Uruguay). Solo llamadas HTTP GET.",
+  "description": "MCP server para Biller (facturaci\u00f3n electr\u00f3nica de Uruguay): consultas y escrituras opcionales con preview, confirmaci\u00f3n y auditor\u00eda.",
   "license": "MIT",
   "type": "module",
   "bin": {
