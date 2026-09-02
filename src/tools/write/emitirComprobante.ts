@@ -319,10 +319,15 @@ export async function handleEmitirComprobante(
           ctx,
         );
       }
-    } catch (err) {
-      warnings.push(
-        "No se pudo verificar si el numero_interno ya existe (falló la consulta previa): " +
-          `${err instanceof Error ? err.message : String(err)}. Se continúa sin esa verificación.`,
+    } catch {
+      // Si no podemos demostrar que el identificador está libre, no emitimos.
+      // Continuar convertía una caída transitoria del GET en un posible CFE
+      // duplicado. Tampoco devolvemos el texto crudo del upstream: es contenido
+      // externo y no hace falta para que el usuario sepa cómo recuperarse.
+      return simpleErrorResult(
+        `No se pudo verificar si el numero_interno "${payload.numero_interno}" ya existe. ` +
+          "No se emitió nada: reintentá cuando la consulta de Biller vuelva a estar disponible.",
+        ctx,
       );
     }
   }

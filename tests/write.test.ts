@@ -91,6 +91,30 @@ describe("emitir_comprobante — dry-run / confirm", () => {
     expect(fx.postMock).not.toHaveBeenCalled();
   });
 
+  it("no emite si falla el prechequeo de numero_interno", async () => {
+    const fx = makeCtx({
+      config: { writeEnabled: true },
+      impl: async () => {
+        throw new Error("consulta no disponible");
+      },
+      postResponse: EMIT_RESPONSE,
+    });
+    const comprobante = { ...COMPROBANTE, numero_interno: "venta-irrepetible-1" };
+    const dry = await handleEmitirComprobante({ comprobante }, fx.ctx);
+    const exec = await handleEmitirComprobante(
+      {
+        comprobante,
+        confirm: true,
+        confirmation_token: sc(dry).confirmation_token as string,
+      },
+      fx.ctx,
+    );
+
+    expect(exec.isError).toBe(true);
+    expect(errorOf(exec).message).toMatch(/no se pudo verificar|no se emiti[oó]/i);
+    expect(fx.postMock).not.toHaveBeenCalled();
+  });
+
   it("idempotencia: la misma key no se ejecuta dos veces", async () => {
     const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: { writeEnabled: true } });
     const { token } = await dryRunThenExecute(fx, { comprobante: COMPROBANTE }, {
