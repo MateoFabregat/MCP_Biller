@@ -824,7 +824,13 @@ describe("anulación por WhatsApp con doble confirmación", () => {
   it("la tool manda primero revisión y recién después confirmación final", async () => {
     const { fn, llamadas } = fakeFetch();
     vi.stubGlobal("fetch", fn);
-    const fx = makeCtx({ config: { kapso: kapsoConfig(), writeEnabled: true } });
+    const contador = "59899111222";
+    const fx = makeCtx({
+      config: {
+        kapso: kapsoConfig({ destinatariosPermitidos: [PERMITIDO, contador] }),
+        writeEnabled: true,
+      },
+    });
     const directo = await handleAnularComprobante(
       { id: 43574, fecha_emision_hoy: true, remitente: PERMITIDO },
       fx.ctx,
@@ -866,6 +872,19 @@ describe("anulación por WhatsApp con doble confirmación", () => {
       fx.ctx,
     );
     expect(manipulado.isError).toBe(true);
+    expect(llamadas).toHaveLength(1);
+
+    const sesionAjena = await handleAnularComprobante(
+      {
+        ...base,
+        confirmar_por_whatsapp: contador,
+        remitente: contador,
+        confirmacion_revisada: true,
+        revision_token: tokenPreview,
+      },
+      fx.ctx,
+    );
+    expect(sesionAjena.isError).toBe(true);
     expect(llamadas).toHaveLength(1);
 
     const segundo = await handleAnularComprobante(

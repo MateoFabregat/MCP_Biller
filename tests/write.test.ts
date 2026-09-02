@@ -802,14 +802,9 @@ describe("el confirmation_token es de la conversación que lo pidió", () => {
       },
     });
 
-  /** Las siete puertas de escritura, con un cuerpo mínimo válido cada una. */
+  /** Puertas con confirmación simple; la anulación WhatsApp tiene suite propia de dos pasos. */
   const TOOLS: { nombre: string; correr: typeof handleEmitirComprobante; args: Record<string, unknown> }[] = [
     { nombre: "biller_emitir_comprobante", correr: handleEmitirComprobante, args: { comprobante: COMPROBANTE } },
-    {
-      nombre: "biller_anular_comprobante",
-      correr: handleAnularComprobante,
-      args: { id: 43574, fecha_emision_hoy: true },
-    },
     {
       nombre: "biller_crear_recibo",
       correr: handleCrearRecibo,
@@ -925,6 +920,19 @@ describe("el confirmation_token es de la conversación que lo pidió", () => {
       expect(sc(exec).mode).toBe("executed");
     });
   }
+
+  it("biller_anular_comprobante: sin Kapso (Claude Desktop) conserva el ciclo simple", async () => {
+    const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: { writeEnabled: true } });
+    const args = { id: 43574, fecha_emision_hoy: true };
+    const dry = await handleAnularComprobante(args, fx.ctx);
+    const exec = await handleAnularComprobante(
+      { ...args, confirm: true, confirmation_token: sc(dry).confirmation_token },
+      fx.ctx,
+    );
+    expect(exec.isError).toBeUndefined();
+    expect(sc(exec).mode).toBe("executed");
+    expect(fx.postMock).toHaveBeenCalledOnce();
+  });
 
   it("el mismo remitente escrito en otro formato sigue siendo él", async () => {
     // La comparación es en el espacio de claves del store, no de strings: el
