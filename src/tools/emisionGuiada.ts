@@ -301,6 +301,9 @@ const inputShape = {
 
 const inputSchema = z.object(inputShape);
 
+/** Los argumentos ya parseados. Es lo que ven las funciones de abajo. */
+type ArgsEmision = z.infer<typeof inputSchema>;
+
 const outputShape = {
   paso: z.string(),
   pregunta: z.string(),
@@ -382,6 +385,326 @@ function identidadDeSesion(
   return identidadDeConversacion(sesion, remitente, () => ctx.getConfig(), (b) => store.clave(b));
 }
 
+/**
+ * Las intenciones que NO son un campo del comprobante: las decide
+ * `aplicarRespuestaDelUsuario` y las contesta el llamador.
+ */
+interface RespuestaDelUsuario {
+  pidioDesempate: boolean;
+  pidioOtroCliente: boolean;
+  pidioOtraFecha: boolean;
+  pidioOtraTasa: boolean;
+  /** El toque tardío de "🗑️ Sacar $X" sobre un borrador que ya cambió. */
+  descarteVencido: boolean;
+}
+
+/**
+ * Aplica al estado lo último que hizo el usuario: el id de un botón nuestro o,
+ * si no era un botón, el texto leído contra la pregunta que estaba abierta.
+ *
+ * Vive en su propia función porque es la única parte de `handleEmisionGuiada`
+ * que MUTA el estado a partir de texto libre; mezclarla con el armado del
+ * estado y con la respuesta hacía que las tres se leyeran como una sola cosa de
+ * 550 líneas.
+ */
+function aplicarRespuestaDelUsuario(
+  mensaje: string | undefined,
+  estado: EstadoEmision,
+  warnings: string[],
+): RespuestaDelUsuario {
+  // Un id de botón de este flujo pisa lo que haya: es lo último que hizo el
+  // usuario, y es un dato explícito, no una inferencia.
+  let pidioDesempate = false;
+  let pidioOtroCliente = false;
+  let pidioOtraFecha = false;
+  let pidioOtraTasa = false;
+  // El toque tardío de "🗑️ Sacar $X" sobre un borrador que ya cambió. No
+  // descarta nada, y por eso mismo tiene que CONTESTAR algo.
+  let descarteVencido = false;
+  if (mensaje === undefined) {
+    return { pidioDesempate, pidioOtroCliente, pidioOtraFecha, pidioOtraTasa, descarteVencido };
+  }
+  // Primero el id del botón; si no era un botón, se lee como texto CONTRA
+  // LA PREGUNTA QUE ESTABA ABIERTA.
+  //
+  // El paso se calcula acá, ANTES de aplicar el mensaje: es el paso que el
+  // usuario estaba contestando. Calcularlo después daría el paso siguiente,
+  // y "sin identificar" se leería contra la pregunta que todavía no vio.
+  let r = interpretarPaso(mensaje);
+  if (r.paso === "ninguna") {
+    r = interpretarRespuestaLibre(mensaje, siguientePaso(estado).paso);
+  }
+  switch (r.paso) {
+    case "receptor":
+      estado.clase_receptor = r.clase;
+      break;
+    case "receptor_no_se":
+      pidioDesempate = true;
+      break;
+    case "cliente":
+      estado.documento = r.documento;
+      break;
+    case "cliente_otro":
+      pidioOtroCliente = true;
+      break;
+    case "cliente_sin_identificar":
+      estado.sin_receptor = true;
+      break;
+    case "fecha_hoy":
+      estado.fecha_emision = hoyDgi();
+      break;
+    case "tasa_cambio":
+      estado.tasa_cambio = r.tasa;
+      break;
+    case "fecha_otra":
+      // Tocó "otra fecha": no hay dato todavía, solo la intención. El paso
+      // sigue siendo "fecha", pero preguntado como texto libre.
+      pidioOtraFecha = true;
+      break;
+    case "cantidad":
+      aplicarAlItemEnCurso(estado, (item) => (item.cantidad = r.cantidad));
+      break;
+    case "item_otro":
+      // Abrir un ítem vacío ES la forma de decir "seguí preguntando por
+      // otro": `siguientePaso` mira siempre el último del array. Llega
+      // tanto del flujo como del botón ➕ del preview de confirmación.
+      estado.items = [...(estado.items ?? []), {}];
+      estado.items_cerrados = false;
+      break;
+    case "item_listo":
+      estado.items_cerrados = true;
+      break;
+    case "item_cancelar": {
+      // "↩️ Volver así": se descartan los ítems que se abrieron por error y
+      // el flujo vuelve al preview. Se sacan los que no tienen NADA cargado
+      // —ni descripción ni precio—, estén al final o en el medio: un ítem
+      // con plata adentro es trabajo del usuario y se le pregunta, no se
+      // tira (ver `itemSinNada`).
+      //
+      // El del MEDIO importa desde que el flujo dejó de esconderlo: si no se
+      // pudiera descartar, la pregunta por su descripción no tendría salida
+      // tocable. Y sacarlo del ESTADO —y no de una vista— es lo que mantiene
+      // la alineación por posición, porque el borrador se arma después, de
+      // este mismo estado ya compactado.
+      const actuales = estado.items ?? [];
+      if (actuales.length > 1) {
+        const quedan = actuales.filter((i) => !itemSinNada(i));
+        // Si no quedó ninguno, el flujo arranca de nuevo por el primer
+        // concepto: es lo mismo que pasaba antes con el array vacío.
+        estado.items = quedan;
+      }
+      estado.items_cerrados = true;
+      break;
+    }
+    case "item_descartar": {
+      // "🗑️ Sacar $250": el usuario decidió, LEYENDO EL MONTO, que esa
+      // línea no va. Es lo único que puede sacar un ítem con plata cargada,
+      // y por eso es un botón propio: `item_cancelar` tiene prohibido
+      // hacerlo, justamente para que no se pierda sin querer.
+      //
+      // Se saca EL QUE SE ESTÁ PREGUNTANDO —el primero sin descripción—, no
+      // el último: es el que nombra la pregunta que el usuario acaba de
+      // leer. Se saca del ESTADO, así que el borrador se arma después ya sin
+      // él y la alineación por posición con los ítems guardados se mantiene.
+      const actuales = estado.items ?? [];
+      // Se resuelve con las MISMAS dos funciones con las que el flujo eligió
+      // qué preguntar, sobre la misma lista: si acá se buscara "el primero
+      // sin concepto" a mano, un estado donde el ítem en curso es otro
+      // haría que este botón sacara una línea que nadie nombró.
+      const vigentes = itemsVigentes(estado);
+      const enCurso = indiceItemEnCurso(vigentes);
+      const candidato =
+        enCurso !== -1 && (vigentes[enCurso]!.concepto ?? "") === "" ? enCurso : -1;
+      // EL BOTÓN TIENE QUE SACAR LA LÍNEA QUE EL USUARIO LEYÓ, O NINGUNA.
+      //
+      // El id trae la posición y el precio que decía el mensaje. Si el
+      // borrador cambió entre la pregunta y el toque —otro mensaje, la
+      // línea ya completada, un ➕ en el medio—, lo que hay ahí ya no es lo
+      // que él vio, así que no se toca nada. Y NO SE CALLA: un botón que no
+      // hace nada ni contesta es el modo de falla que este repo ya arregló
+      // dos veces (el número mudo).
+      const coincide =
+        candidato !== -1 &&
+        (r.posicion === undefined || r.posicion === candidato + 1) &&
+        (r.precio === undefined || r.precio === vigentes[candidato]!.precio);
+      if (coincide) {
+        estado.items = actuales.filter((_, i) => i !== candidato);
+        warnings.push(
+          `Se descartó la línea ${candidato + 1}, la que no tenía descripción: el usuario lo ` +
+            "pidió con el botón que decía cuánto sacaba. Las demás siguen en su orden.",
+        );
+      } else {
+        descarteVencido = true;
+      }
+      break;
+    }
+    case "item_conservar_precio":
+    case "item_descartar_precio": {
+      // El id congela posición y precio: un botón viejo nunca puede
+      // conservar o borrar una línea distinta de la que la persona leyó.
+      const actuales = estado.items ?? [];
+      const vigentes = itemsVigentes(estado);
+      const indice = indiceItemEnCurso(vigentes);
+      const item = indice === -1 ? undefined : vigentes[indice];
+      const coincide =
+        item !== undefined &&
+        indice + 1 === r.posicion &&
+        item.precio === r.precio &&
+        r.precio <= 0;
+      if (coincide && r.paso === "item_conservar_precio") {
+        estado.items = actuales.map((actual, i) =>
+          i === indice ? { ...actual, precio_no_positivo_confirmado: true } : actual,
+        );
+        warnings.push(
+          `Se conservará la línea ${indice + 1} con precio ${r.precio}: el usuario lo confirmó ` +
+            "explícitamente.",
+        );
+      } else if (coincide) {
+        estado.items = actuales.filter((_, i) => i !== indice);
+        estado.items_cerrados = true;
+        warnings.push(
+          `Se descartó la línea ${indice + 1} con precio ${r.precio}: el usuario lo pidió ` +
+            "explícitamente.",
+        );
+      } else {
+        descarteVencido = true;
+      }
+      break;
+    }
+    case "iva":
+      estado.indicador_facturacion = r.indicador_facturacion;
+      break;
+    case "iva_otro":
+      // "🔢 Otro IVA" no contesta nada: abre la pregunta de la tasa. El
+      // criterio de precio (montos_brutos) queda pendiente y se pregunta
+      // después, ya con dos botones.
+      pidioOtraTasa = true;
+      break;
+    case "moneda":
+      estado.moneda = r.moneda;
+      // Elegida la moneda, la duda dejó de existir. Sin esto la marca queda
+      // guardada en el borrador y reaparece si alguien limpia `moneda`.
+      delete estado.moneda_dudosa;
+      break;
+    case "forma_pago":
+      estado.forma_pago = r.forma_pago;
+      break;
+    case "montos_brutos":
+      estado.montos_brutos = r.incluye_iva;
+      // LOS DOS BOTONES GRANDES CONTESTAN LAS DOS COSAS.
+      //
+      // El paso fusionado dice, en el mismo mensaje, "tomo tasa básica
+      // salvo que me digas otra cosa". Si el indicador no se fijara acá, el
+      // usuario tocaría "✅ Ya incluye IVA" y le volveríamos a preguntar la
+      // tasa — o sea, la fusión no ahorraría nada. Solo COMPLETA: un
+      // indicador que ya venía (de `repetir_ultima_de`, o del botón "Otro
+      // IVA") no se pisa.
+      estado.indicador_facturacion ??= 3;
+      break;
+    case "ninguna":
+      break;
+  }
+  return { pidioDesempate, pidioOtroCliente, pidioOtraFecha, pidioOtraTasa, descarteVencido };
+}
+
+/**
+ * El estado que se deduce de los ARGUMENTOS de la llamada, antes de mirar el
+ * store y antes del mensaje del usuario.
+ *
+ * Es la parte que convierte lo que escribió una persona en tipos: los importes
+ * y la tasa de cambio los lee TypeScript (`services/importe.ts`) y no el
+ * modelo, la dirección y la ciudad se separan con reglas escritas, y la moneda
+ * queda "dudosa" si el texto habla de dólares. Todo lo que no se pudo leer sin
+ * ambigüedad sale como warning para confirmarlo ANTES de emitir.
+ */
+function estadoDesdeArgumentos(a: ArgsEmision): {
+  estadoArgs: EstadoEmision;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+
+  // --- Los números, leídos por TypeScript y no por el modelo ---------------
+  //
+  // `precio` y `cantidad` pueden venir como texto ("6.500"). Se convierten
+  // acá, con las reglas de `services/importe.ts`, y lo que quede ambiguo se
+  // devuelve como warning para que se confirme ANTES de emitir. Es la
+  // diferencia entre facturar seis mil quinientos y facturar seis con
+  // cincuenta.
+  const { items: itemsNormalizados, warnings: warningsImportes } = normalizarItems(a.items);
+  warnings.push(...warningsImportes);
+
+  // La tasa de cambio también la escribe una persona ("40", "40,5"): mismo
+  // parser que los precios, por el mismo motivo.
+  let tasaCambio: number | undefined;
+  if (typeof a.tasa_cambio === "number") {
+    tasaCambio = a.tasa_cambio;
+  } else if (typeof a.tasa_cambio === "string") {
+    const leida = parsearImporte(a.tasa_cambio);
+    if (leida.valor === null) warnings.push(`No se pudo leer la tasa de cambio "${a.tasa_cambio}".`);
+    else tasaCambio = leida.valor;
+  }
+
+  // --- Estado: lo que vino explícito + lo que se deduce del mensaje --------
+  // Los campos que se copian TAL CUAL del input al estado. Es una lista y no
+  // dieciséis spreads condicionales porque agregar un campo a EstadoEmision
+  // ya exige tocar varios lugares (el schema, `resumirEstado`,
+  // `borradorComprobante`) — y cada enumeración manual de más es otra chance
+  // de que el campo nuevo se copie en cuatro lados y falte en el quinto sin
+  // que falle nada. Los tres que NO están acá se transforman antes de entrar:
+  // `items` (parseo de importes), `moneda` (mayúsculas), `tasa_cambio` (parseo).
+  const CAMPOS_DIRECTOS = [
+    "clase_receptor",
+    "fecha_emision",
+    "documento",
+    "nombre_cliente",
+    "sin_receptor",
+    "cliente_ya_facturado",
+    "direccion_cliente",
+    "ciudad_cliente",
+    "items_cerrados",
+    "indicador_facturacion",
+    "montos_brutos",
+    "fecha_vencimiento",
+    "forma_pago",
+    "adenda",
+    "sin_adenda",
+  ] as const satisfies ReadonlyArray<keyof EstadoEmision>;
+
+  const estadoArgs: EstadoEmision = {};
+  for (const campo of CAMPOS_DIRECTOS) {
+    const valor = a[campo];
+    if (valor !== undefined) (estadoArgs as Record<string, unknown>)[campo] = valor;
+  }
+  if (a.items !== undefined) estadoArgs.items = itemsNormalizados;
+  if (a.moneda !== undefined) estadoArgs.moneda = a.moneda.toUpperCase();
+  if (tasaCambio !== undefined) estadoArgs.tasa_cambio = tasaCambio;
+
+  // "Rivera 1234, Melo" son DOS campos en un mensaje. Se parten acá, con las
+  // reglas escritas de `separarDireccionCiudad`, y no en el prompt del
+  // modelo: partir por la coma equivocada le pone "apto 302" de ciudad a un
+  // cliente que queda dado de alta así para siempre.
+  if (estadoArgs.direccion_cliente !== undefined && estadoArgs.ciudad_cliente === undefined) {
+    const partido = separarDireccionCiudad(estadoArgs.direccion_cliente);
+    estadoArgs.direccion_cliente = partido.direccion;
+    if (partido.ciudad !== undefined) estadoArgs.ciudad_cliente = partido.ciudad;
+  }
+
+  // ¿EL TEXTO HABLÓ DE DÓLARES?
+  //
+  // La moneda tiene default UYU, y el default solo es defendible si algo mira
+  // el mensaje. Lo mira acá —la tool, que es la que ve texto libre— y no
+  // `siguientePaso`, que es pura y no lee castellano. Ver `moneda_dudosa`.
+  if (
+    a.mensaje !== undefined &&
+    !a.mensaje.trim().startsWith(PREFIJO_PASO) &&
+    a.moneda === undefined &&
+    sugiereDolares(a.mensaje)
+  ) {
+    estadoArgs.moneda_dudosa = true;
+  }
+  return { estadoArgs, warnings };
+}
+
 export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   const parsed = inputSchema.safeParse(args);
   if (!parsed.success) {
@@ -407,87 +730,9 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
   if (!identidad.ok) return rechazoSesionAjena(identidad.mensaje, ctx);
 
   try {
-    const warnings: string[] = [];
-
-    // --- Los números, leídos por TypeScript y no por el modelo ---------------
-    //
-    // `precio` y `cantidad` pueden venir como texto ("6.500"). Se convierten
-    // acá, con las reglas de `services/importe.ts`, y lo que quede ambiguo se
-    // devuelve como warning para que se confirme ANTES de emitir. Es la
-    // diferencia entre facturar seis mil quinientos y facturar seis con
-    // cincuenta.
-    const { items: itemsNormalizados, warnings: warningsImportes } = normalizarItems(a.items);
-    warnings.push(...warningsImportes);
-
-    // La tasa de cambio también la escribe una persona ("40", "40,5"): mismo
-    // parser que los precios, por el mismo motivo.
-    let tasaCambio: number | undefined;
-    if (typeof a.tasa_cambio === "number") {
-      tasaCambio = a.tasa_cambio;
-    } else if (typeof a.tasa_cambio === "string") {
-      const leida = parsearImporte(a.tasa_cambio);
-      if (leida.valor === null) warnings.push(`No se pudo leer la tasa de cambio "${a.tasa_cambio}".`);
-      else tasaCambio = leida.valor;
-    }
-
-    // --- Estado: lo que vino explícito + lo que se deduce del mensaje --------
-    // Los campos que se copian TAL CUAL del input al estado. Es una lista y no
-    // dieciséis spreads condicionales porque agregar un campo a EstadoEmision
-    // ya exige tocar varios lugares (el schema, `resumirEstado`,
-    // `borradorComprobante`) — y cada enumeración manual de más es otra chance
-    // de que el campo nuevo se copie en cuatro lados y falte en el quinto sin
-    // que falle nada. Los tres que NO están acá se transforman antes de entrar:
-    // `items` (parseo de importes), `moneda` (mayúsculas), `tasa_cambio` (parseo).
-    const CAMPOS_DIRECTOS = [
-      "clase_receptor",
-      "fecha_emision",
-      "documento",
-      "nombre_cliente",
-      "sin_receptor",
-      "cliente_ya_facturado",
-      "direccion_cliente",
-      "ciudad_cliente",
-      "items_cerrados",
-      "indicador_facturacion",
-      "montos_brutos",
-      "fecha_vencimiento",
-      "forma_pago",
-      "adenda",
-      "sin_adenda",
-    ] as const satisfies ReadonlyArray<keyof EstadoEmision>;
-
-    const estadoArgs: EstadoEmision = {};
-    for (const campo of CAMPOS_DIRECTOS) {
-      const valor = a[campo];
-      if (valor !== undefined) (estadoArgs as Record<string, unknown>)[campo] = valor;
-    }
-    if (a.items !== undefined) estadoArgs.items = itemsNormalizados;
-    if (a.moneda !== undefined) estadoArgs.moneda = a.moneda.toUpperCase();
-    if (tasaCambio !== undefined) estadoArgs.tasa_cambio = tasaCambio;
-
-    // "Rivera 1234, Melo" son DOS campos en un mensaje. Se parten acá, con las
-    // reglas escritas de `separarDireccionCiudad`, y no en el prompt del
-    // modelo: partir por la coma equivocada le pone "apto 302" de ciudad a un
-    // cliente que queda dado de alta así para siempre.
-    if (estadoArgs.direccion_cliente !== undefined && estadoArgs.ciudad_cliente === undefined) {
-      const partido = separarDireccionCiudad(estadoArgs.direccion_cliente);
-      estadoArgs.direccion_cliente = partido.direccion;
-      if (partido.ciudad !== undefined) estadoArgs.ciudad_cliente = partido.ciudad;
-    }
-
-    // ¿EL TEXTO HABLÓ DE DÓLARES?
-    //
-    // La moneda tiene default UYU, y el default solo es defendible si algo mira
-    // el mensaje. Lo mira acá —la tool, que es la que ve texto libre— y no
-    // `siguientePaso`, que es pura y no lee castellano. Ver `moneda_dudosa`.
-    if (
-      a.mensaje !== undefined &&
-      !a.mensaje.trim().startsWith(PREFIJO_PASO) &&
-      a.moneda === undefined &&
-      sugiereDolares(a.mensaje)
-    ) {
-      estadoArgs.moneda_dudosa = true;
-    }
+    // Lo que se deduce de los argumentos: importes, tasa, dirección, moneda
+    // dudosa. Ver `estadoDesdeArgumentos`.
+    const { estadoArgs, warnings } = estadoDesdeArgumentos(a);
 
     // --- El pedido, leído por TypeScript ------------------------------------
     //
@@ -592,200 +837,10 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       estado.numero_interno = `wa-${clave.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
     }
 
-    // Un id de botón de este flujo pisa lo que haya: es lo último que hizo el
-    // usuario, y es un dato explícito, no una inferencia.
-    let pidioDesempate = false;
-    let pidioOtroCliente = false;
-    let pidioOtraFecha = false;
-    let pidioOtraTasa = false;
-    // El toque tardío de "🗑️ Sacar $X" sobre un borrador que ya cambió. No
-    // descarta nada, y por eso mismo tiene que CONTESTAR algo.
-    let descarteVencido = false;
-    if (a.mensaje !== undefined) {
-      // Primero el id del botón; si no era un botón, se lee como texto CONTRA
-      // LA PREGUNTA QUE ESTABA ABIERTA.
-      //
-      // El paso se calcula acá, ANTES de aplicar el mensaje: es el paso que el
-      // usuario estaba contestando. Calcularlo después daría el paso siguiente,
-      // y "sin identificar" se leería contra la pregunta que todavía no vio.
-      let r = interpretarPaso(a.mensaje);
-      if (r.paso === "ninguna") {
-        r = interpretarRespuestaLibre(a.mensaje, siguientePaso(estado).paso);
-      }
-      switch (r.paso) {
-        case "receptor":
-          estado.clase_receptor = r.clase;
-          break;
-        case "receptor_no_se":
-          pidioDesempate = true;
-          break;
-        case "cliente":
-          estado.documento = r.documento;
-          break;
-        case "cliente_otro":
-          pidioOtroCliente = true;
-          break;
-        case "cliente_sin_identificar":
-          estado.sin_receptor = true;
-          break;
-        case "fecha_hoy":
-          estado.fecha_emision = hoyDgi();
-          break;
-        case "tasa_cambio":
-          estado.tasa_cambio = r.tasa;
-          break;
-        case "fecha_otra":
-          // Tocó "otra fecha": no hay dato todavía, solo la intención. El paso
-          // sigue siendo "fecha", pero preguntado como texto libre.
-          pidioOtraFecha = true;
-          break;
-        case "cantidad":
-          aplicarAlItemEnCurso(estado, (item) => (item.cantidad = r.cantidad));
-          break;
-        case "item_otro":
-          // Abrir un ítem vacío ES la forma de decir "seguí preguntando por
-          // otro": `siguientePaso` mira siempre el último del array. Llega
-          // tanto del flujo como del botón ➕ del preview de confirmación.
-          estado.items = [...(estado.items ?? []), {}];
-          estado.items_cerrados = false;
-          break;
-        case "item_listo":
-          estado.items_cerrados = true;
-          break;
-        case "item_cancelar": {
-          // "↩️ Volver así": se descartan los ítems que se abrieron por error y
-          // el flujo vuelve al preview. Se sacan los que no tienen NADA cargado
-          // —ni descripción ni precio—, estén al final o en el medio: un ítem
-          // con plata adentro es trabajo del usuario y se le pregunta, no se
-          // tira (ver `itemSinNada`).
-          //
-          // El del MEDIO importa desde que el flujo dejó de esconderlo: si no se
-          // pudiera descartar, la pregunta por su descripción no tendría salida
-          // tocable. Y sacarlo del ESTADO —y no de una vista— es lo que mantiene
-          // la alineación por posición, porque el borrador se arma después, de
-          // este mismo estado ya compactado.
-          const actuales = estado.items ?? [];
-          if (actuales.length > 1) {
-            const quedan = actuales.filter((i) => !itemSinNada(i));
-            // Si no quedó ninguno, el flujo arranca de nuevo por el primer
-            // concepto: es lo mismo que pasaba antes con el array vacío.
-            estado.items = quedan;
-          }
-          estado.items_cerrados = true;
-          break;
-        }
-        case "item_descartar": {
-          // "🗑️ Sacar $250": el usuario decidió, LEYENDO EL MONTO, que esa
-          // línea no va. Es lo único que puede sacar un ítem con plata cargada,
-          // y por eso es un botón propio: `item_cancelar` tiene prohibido
-          // hacerlo, justamente para que no se pierda sin querer.
-          //
-          // Se saca EL QUE SE ESTÁ PREGUNTANDO —el primero sin descripción—, no
-          // el último: es el que nombra la pregunta que el usuario acaba de
-          // leer. Se saca del ESTADO, así que el borrador se arma después ya sin
-          // él y la alineación por posición con los ítems guardados se mantiene.
-          const actuales = estado.items ?? [];
-          // Se resuelve con las MISMAS dos funciones con las que el flujo eligió
-          // qué preguntar, sobre la misma lista: si acá se buscara "el primero
-          // sin concepto" a mano, un estado donde el ítem en curso es otro
-          // haría que este botón sacara una línea que nadie nombró.
-          const vigentes = itemsVigentes(estado);
-          const enCurso = indiceItemEnCurso(vigentes);
-          const candidato =
-            enCurso !== -1 && (vigentes[enCurso]!.concepto ?? "") === "" ? enCurso : -1;
-
-          // EL BOTÓN TIENE QUE SACAR LA LÍNEA QUE EL USUARIO LEYÓ, O NINGUNA.
-          //
-          // El id trae la posición y el precio que decía el mensaje. Si el
-          // borrador cambió entre la pregunta y el toque —otro mensaje, la
-          // línea ya completada, un ➕ en el medio—, lo que hay ahí ya no es lo
-          // que él vio, así que no se toca nada. Y NO SE CALLA: un botón que no
-          // hace nada ni contesta es el modo de falla que este repo ya arregló
-          // dos veces (el número mudo).
-          const coincide =
-            candidato !== -1 &&
-            (r.posicion === undefined || r.posicion === candidato + 1) &&
-            (r.precio === undefined || r.precio === vigentes[candidato]!.precio);
-
-          if (coincide) {
-            estado.items = actuales.filter((_, i) => i !== candidato);
-            warnings.push(
-              `Se descartó la línea ${candidato + 1}, la que no tenía descripción: el usuario lo ` +
-                "pidió con el botón que decía cuánto sacaba. Las demás siguen en su orden.",
-            );
-          } else {
-            descarteVencido = true;
-          }
-          break;
-        }
-        case "item_conservar_precio":
-        case "item_descartar_precio": {
-          // El id congela posición y precio: un botón viejo nunca puede
-          // conservar o borrar una línea distinta de la que la persona leyó.
-          const actuales = estado.items ?? [];
-          const vigentes = itemsVigentes(estado);
-          const indice = indiceItemEnCurso(vigentes);
-          const item = indice === -1 ? undefined : vigentes[indice];
-          const coincide =
-            item !== undefined &&
-            indice + 1 === r.posicion &&
-            item.precio === r.precio &&
-            r.precio <= 0;
-
-          if (coincide && r.paso === "item_conservar_precio") {
-            estado.items = actuales.map((actual, i) =>
-              i === indice ? { ...actual, precio_no_positivo_confirmado: true } : actual,
-            );
-            warnings.push(
-              `Se conservará la línea ${indice + 1} con precio ${r.precio}: el usuario lo confirmó ` +
-                "explícitamente.",
-            );
-          } else if (coincide) {
-            estado.items = actuales.filter((_, i) => i !== indice);
-            estado.items_cerrados = true;
-            warnings.push(
-              `Se descartó la línea ${indice + 1} con precio ${r.precio}: el usuario lo pidió ` +
-                "explícitamente.",
-            );
-          } else {
-            descarteVencido = true;
-          }
-          break;
-        }
-        case "iva":
-          estado.indicador_facturacion = r.indicador_facturacion;
-          break;
-        case "iva_otro":
-          // "🔢 Otro IVA" no contesta nada: abre la pregunta de la tasa. El
-          // criterio de precio (montos_brutos) queda pendiente y se pregunta
-          // después, ya con dos botones.
-          pidioOtraTasa = true;
-          break;
-        case "moneda":
-          estado.moneda = r.moneda;
-          // Elegida la moneda, la duda dejó de existir. Sin esto la marca queda
-          // guardada en el borrador y reaparece si alguien limpia `moneda`.
-          delete estado.moneda_dudosa;
-          break;
-        case "forma_pago":
-          estado.forma_pago = r.forma_pago;
-          break;
-        case "montos_brutos":
-          estado.montos_brutos = r.incluye_iva;
-          // LOS DOS BOTONES GRANDES CONTESTAN LAS DOS COSAS.
-          //
-          // El paso fusionado dice, en el mismo mensaje, "tomo tasa básica
-          // salvo que me digas otra cosa". Si el indicador no se fijara acá, el
-          // usuario tocaría "✅ Ya incluye IVA" y le volveríamos a preguntar la
-          // tasa — o sea, la fusión no ahorraría nada. Solo COMPLETA: un
-          // indicador que ya venía (de `repetir_ultima_de`, o del botón "Otro
-          // IVA") no se pisa.
-          estado.indicador_facturacion ??= 3;
-          break;
-        case "ninguna":
-          break;
-      }
-    }
+    // Lo último que hizo el usuario pisa lo que haya: es un dato explícito, no
+    // una inferencia. Ver `aplicarRespuestaDelUsuario`.
+    const { pidioDesempate, pidioOtroCliente, pidioOtraFecha, pidioOtraTasa, descarteVencido } =
+      aplicarRespuestaDelUsuario(a.mensaje, estado, warnings);
 
     // Qué sobrevivió gracias al store y no vino en esta llamada. Se calcula
     // DESPUÉS del botón: un campo que el botón acaba de fijar es "lo que el
