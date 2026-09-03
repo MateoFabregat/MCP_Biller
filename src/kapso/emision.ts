@@ -30,15 +30,36 @@
 // que el flujo sea reanudable desde cualquier punto —el usuario contesta tres
 // cosas juntas, o se va y vuelve mañana— sin una máquina de estados que se
 // desincronice con lo que el usuario cree que pasó.
+//
+// Tampoco escribe los mensajes. Acá se decide QUÉ preguntar; los submenús que
+// el usuario ve los arma `render.ts`, que es el único lugar del proyecto donde
+// se redacta lo que sale por WhatsApp. La dependencia va en un solo sentido.
 // =============================================================================
 
 import { FORMAS_PAGO, INDICADORES_FACTURACION, TIPOS_COMPROBANTE } from "../biller/cfeSchema.js";
 import { hoyDgiUy } from "../services/fechaUy.js";
-import { formatearUy } from "../services/importe.js";
+import { formatearUy, montoConSigno } from "../services/importe.js";
 import type { InteractivoBotones, InteractivoLista } from "./client.js";
+import { PREFIJO_PASO } from "./protocolo.js";
+import {
+  construirDesempateReceptor,
+  construirListaClientes,
+  construirSubmenuConceptoExtra,
+  construirSubmenuFecha,
+  construirSubmenuFormaPago,
+  construirSubmenuIva,
+  construirSubmenuIvaFusionado,
+  construirSubmenuLineaSinDescripcion,
+  construirSubmenuMoneda,
+  construirSubmenuMontosBrutos,
+  construirSubmenuPrecioNoPositivo,
+  construirSubmenuReceptor,
+  construirSubmenuReceptorOpcional,
+} from "./render.js";
 
-/** Prefijo de los ids de la emisión guiada. Distinto del de confirmación. */
-export const PREFIJO_PASO = "emision:";
+// `PREFIJO_PASO` se re-exporta desde acá para no romper a quien ya lo importaba
+// por este módulo; su definición vive en `protocolo.ts`, con sus tres hermanos.
+export { PREFIJO_PASO } from "./protocolo.js";
 
 /** A quién se le factura. Es la única pregunta de fondo que hay que hacer. */
 export type ClaseReceptor = "empresa" | "consumidor_final";
@@ -455,343 +476,6 @@ export function tipoComprobanteSugerido(clase: ClaseReceptor): TipoSugerido {
   };
 }
 
-// --- Los mensajes de cada paso ----------------------------------------------
-
-/**
- * El primer mensaje del flujo de emisión: la pregunta que reemplaza a
- * "¿e-Ticket o e-Factura?".
- *
- * Tres botones y no dos: "no sé" es una respuesta legítima y frecuente, y sin
- * ella el usuario que duda no tiene ningún camino salvo abandonar. Con ella el
- * sistema puede hacer la pregunta de atrás ("¿te pidió factura a nombre de una
- * empresa?"), que sí sabe contestar.
- */
-export function construirSubmenuReceptor(): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "Emitir un comprobante",
-    cuerpo:
-      "Dale, vamos. Primero lo más importante:\n\n¿A quién le estás facturando?\n\n" +
-      "Con eso ya sé qué tipo de comprobante corresponde y no te lo pregunto.",
-    pie: "Podés escribirme el RUT o el nombre directamente.",
-    botones: [
-      { id: `${PREFIJO_PASO}receptor:empresa`, titulo: "🏢 A una empresa" },
-      { id: `${PREFIJO_PASO}receptor:final`, titulo: "👤 Consumidor final" },
-      { id: `${PREFIJO_PASO}receptor:no_se`, titulo: "🤔 No sé" },
-    ],
-  };
-}
-
-/** La pregunta de atrás, para el que tocó "no sé". */
-export function construirDesempateReceptor(): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "Una sola pregunta más",
-    cuerpo:
-      "¿Te pidieron la factura a nombre de una empresa, con RUT?\n\n" +
-      "Si te dieron un RUT o te dijeron “ponelo a nombre de tal SRL”, es empresa. " +
-      "Si es alguien que se lleva algo y no te pidió nada a nombre de nadie, es consumidor final.",
-    botones: [
-      { id: `${PREFIJO_PASO}receptor:empresa`, titulo: "🏢 Sí, con RUT" },
-      { id: `${PREFIJO_PASO}receptor:final`, titulo: "👤 No, es persona" },
-    ],
-  };
-}
-
-/**
- * El indicador de facturación como tres botones en castellano.
- *
- * `INDICADORES_FACTURACION` tiene diez valores y ninguno se llama "22%". Los
- * tres que cubren casi todo se ofrecen con el nombre que el usuario usa; el
- * resto queda accesible escribiendo, no escondido. Ofrecer los diez en una
- * lista sería trasladarle a alguien que está atendiendo el mostrador una
- * decisión de tratamiento de IVA que casi nunca es dudosa.
- */
-export function construirSubmenuIva(): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "¿Qué IVA lleva?",
-    cuerpo:
-      "Lo normal es la tasa básica (22%). La mínima (10%) es para algunos alimentos, " +
-      "medicamentos y hotelería.",
-    pie: "Si es otro caso, escribime cuál.",
-    botones: [
-      { id: `${PREFIJO_PASO}iva:3`, titulo: "IVA 22% (básica)" },
-      { id: `${PREFIJO_PASO}iva:2`, titulo: "IVA 10% (mínima)" },
-      { id: `${PREFIJO_PASO}iva:1`, titulo: "Exento" },
-    ],
-  };
-}
-
-/**
- * La fecha, con el caso normal a un toque.
- *
- * YA NO ES UN PASO DEL FLUJO: el 99% de las veces la respuesta es "hoy", así
- * que ahora "hoy" es el default y la fecha aparece en el preview en vez de en
- * una pregunta. Un botón cuyo 99% es una sola opción no es una pregunta, es una
- * confirmación disfrazada — y confirmar es justo lo que hace el preview.
- *
- * Se conserva para el camino explícito: el usuario que dice "quiero cambiar la
- * fecha" sin decir cuál. Ahí sí hay una pregunta genuina que hacer.
- */
-export function construirSubmenuFecha(hoy: string = hoyDgi()): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "¿De qué fecha?",
-    cuerpo: `Si es de hoy (${hoy}), tocá el botón. Si es de otro día, escribime la fecha.`,
-    pie: "Formato dd/mm/aaaa.",
-    botones: [
-      { id: `${PREFIJO_PASO}fecha:hoy`, titulo: "📅 Hoy" },
-      { id: `${PREFIJO_PASO}fecha:otra`, titulo: "✏️ Otra fecha" },
-    ],
-  };
-}
-
-/**
- * Para consumidor final: identificarlo o no.
- *
- * El e-Ticket no exige receptor por debajo del umbral de UI, así que obligar a
- * cargar una cédula para vender un café es pedir un dato que DGI no pide. Pero
- * la opción tiene que ser EXPLÍCITA: si "no identificar" fuera simplemente no
- * contestar, el flujo no sabría distinguirlo de una pregunta pendiente.
- */
-export function construirSubmenuReceptorOpcional(): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "¿Lo identificamos?",
-    cuerpo:
-      "Si el cliente te dio cédula o RUT, mandámelo y lo pongo en el comprobante.\n\n" +
-      "Si es una venta de mostrador sin datos, seguimos sin identificarlo.",
-    pie: "Arriba de 5.000 UI hay que identificarlo igual: si el total lo pasa, te aviso.",
-    botones: [
-      { id: `${PREFIJO_PASO}cliente:sin_identificar`, titulo: "👤 Sin identificar" },
-    ],
-  };
-}
-
-/**
- * La salida del ítem que se abrió por error.
- *
- * `➕ Otro ítem` en el preview mete un ítem vacío y el flujo pasa a pedir su
- * concepto, que es texto libre. Sin este botón, tocar ➕ sin querer deja al
- * usuario en una pregunta abierta sin ninguna salida tocable — el mismo modo de
- * falla que el paso `otro_item` vino a arreglar en su momento, reintroducido
- * por la puerta de al lado. El invariante del módulo es que el flujo no se
- * puede trancar, y un botón vale más que un comentario que lo declare.
- */
-export function construirSubmenuConceptoExtra(): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "¿Qué le agregás?",
-    cuerpo:
-      "Decime qué es lo otro que le vendiste.\n\nSi tocaste ➕ sin querer, volvemos al comprobante " +
-      "como estaba.",
-    botones: [{ id: `${PREFIJO_PASO}item:cancelar`, titulo: "↩️ Volver así" }],
-  };
-}
-
-/**
- * La salida de una línea que tiene plata cargada y no tiene descripción.
- *
- * Es OTRO botón que "↩️ Volver así", y la diferencia es la que importa: aquel
- * descarta un ítem donde no se cargó nada, así que no puede perder nada; este
- * saca una línea que el usuario mencionó. Por eso el botón NOMBRA lo que saca
- * —"🗑️ Sacar $250"— en vez de decir "volver": un descarte de plata tiene que
- * ser una decisión leída, no el efecto lateral de un botón genérico.
- *
- * Sin este botón la pregunta no tiene salida tocable: "↩️ Volver así" no puede
- * sacar un ítem con precio (y hace bien), así que el usuario que no se acuerda
- * qué era esa línea se queda en la misma pregunta para siempre.
- */
-export function construirSubmenuLineaSinDescripcion(
-  plata: string | null,
-  ubicacion?: { posicion: number; precio?: number },
-): InteractivoBotones {
-  // EL MONTO NO SE RECORTA NUNCA. NI UN DÍGITO.
-  //
-  // El título de un botón de WhatsApp son 20 caracteres, y esto decía
-  // `\`🗑️ Sacar ${plata}\`.slice(0, 20)`. Con "$12.500.000" eso deja
-  // "🗑️ Sacar $12.500.00", que en Uruguay —donde el punto es de miles— se lee
-  // $12.500,00: el usuario toca un botón que dice doce mil quinientos y saca
-  // una línea de doce millones y medio. Es exactamente el error de lectura que
-  // `services/importe.ts` existe para prevenir, reintroducido en el eco.
-  //
-  // Por eso lo que se achica es el TEXTO, en dos escalones, y si ni así entra
-  // se cae al genérico: el monto sigue escrito entero en el cuerpo, que no
-  // tiene tope de 20.
-  const titulo = ((): string => {
-    if (plata === null) return "🗑️ Sacar esa línea";
-    for (const candidato of [`🗑️ Sacar ${plata}`, `🗑️ ${plata}`]) {
-      if (candidato.length <= 20) return candidato;
-    }
-    return "🗑️ Sacar esa línea";
-  })();
-
-  // El id ata el botón a la línea que el usuario está leyendo. Ver `interpretarPaso`.
-  const id =
-    ubicacion === undefined
-      ? `${PREFIJO_PASO}item:descartar`
-      : `${PREFIJO_PASO}item:descartar:${ubicacion.posicion}:` +
-        `${ubicacion.precio === undefined ? "" : ubicacion.precio}`;
-
-  return {
-    tipo: "botones",
-    encabezado: "¿Qué era esa línea?",
-    cuerpo:
-      plata === null
-        ? "Me quedó una línea sin descripción. Decime qué era y la pongo en el comprobante.\n\n" +
-          "Si no va, la saco."
-        : `Me quedó una línea de ${plata} sin descripción. Decime qué era y la pongo en el ` +
-          `comprobante.\n\nSi esa línea no va, la saco y seguimos.`,
-    botones: [{ id, titulo }],
-  };
-}
-
-/** Salida explícita para una última línea con precio cero o negativo. */
-export function construirSubmenuPrecioNoPositivo(
-  posicion: number,
-  precio: number,
-  moneda: string,
-): InteractivoBotones {
-  const mostrado = montoConSigno(moneda, precio);
-  return {
-    tipo: "botones",
-    encabezado: "Precio no positivo",
-    cuerpo:
-      `La línea ${posicion} quedó en ${mostrado} por unidad. ` +
-      "¿La dejás así o sacás esa línea del comprobante?",
-    botones: [
-      {
-        id: `${PREFIJO_PASO}item:conservar_precio:${posicion}:${precio}`,
-        titulo: "✅ Dejarlo así",
-      },
-      {
-        id: `${PREFIJO_PASO}item:descartar_precio:${posicion}:${precio}`,
-        titulo: "🗑️ Sacar línea",
-      },
-    ],
-  };
-}
-
-/**
- * Contado o crédito. Define si la factura entra en la cuenta corriente.
- *
- * YA NO ES UN PASO: el default es contado y sale escrito en el preview. Se
- * conserva para el pedido explícito ("quiero cambiar la forma de pago") y
- * porque el crédito sigue derivando el paso de vencimiento.
- */
-export function construirSubmenuFormaPago(): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "¿Cómo te paga?",
-    cuerpo:
-      "Contado: ya te pagó.\nCrédito: te paga después — la factura te queda como deuda del cliente " +
-      "y aparece en “¿Quién me debe?”.",
-    botones: [
-      { id: `${PREFIJO_PASO}pago:1`, titulo: "💵 Contado" },
-      { id: `${PREFIJO_PASO}pago:2`, titulo: "📅 Crédito" },
-    ],
-  };
-}
-
-/**
- * ¿El precio que me dijiste ya tiene el IVA adentro?
- *
- * Es la pregunta que evita facturar 22% de más. Va DESPUÉS del primer precio y
- * no antes: preguntada en frío ("¿vas a cotizar con IVA incluido?") es jerga
- * contable; preguntada con el número del usuario adelante ("los $200, ¿ya
- * incluyen IVA?") la contesta cualquiera sin pensar.
- *
- * Se pregunta UNA sola vez por comprobante: nadie mezcla criterios entre ítems
- * de la misma factura.
- */
-export function construirSubmenuMontosBrutos(precio: number, moneda: string): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "Una cosa sobre el precio",
-    cuerpo:
-      `Los ${montoConSigno(moneda, precio)} que me pasaste, ¿ya tienen el IVA adentro?\n\n` +
-      "Si es el precio que le cobrás al cliente en el mostrador, sí. Si es el precio sin impuestos " +
-      "y el IVA se suma aparte, no.",
-    pie: "Si me equivoco acá, la factura sale 22% distinta.",
-    botones: [
-      { id: `${PREFIJO_PASO}iva_incluido:si`, titulo: "✅ Ya incluye IVA" },
-      { id: `${PREFIJO_PASO}iva_incluido:no`, titulo: "➕ Se suma aparte" },
-    ],
-  };
-}
-
-/**
- * LAS DOS PREGUNTAS DE IVA, EN UN SOLO MENSAJE.
- *
- * Eran dos pasos seguidos —"¿ya incluye IVA?" y después "¿qué tasa?"— y eran
- * dos formas de preguntar lo mismo: cómo tratar el impuesto de esta venta. La
- * segunda además tenía la respuesta cantada: la tasa básica es el 22% de las
- * ventas y bastante más del 90% de las líneas de una PyME.
- *
- * Fusionadas, los dos botones grandes contestan LAS DOS COSAS de una (criterio
- * de precio + tasa básica) y el tercero abre el caso raro. El que vende
- * alimentos al 10% paga un toque de más; el resto ahorra un mensaje entero, que
- * es la proporción correcta.
- *
- * Nótese que los dos primeros botones son EXACTAMENTE los de `montos_brutos`:
- * la pregunta que se conserva es la que mueve plata (equivocarse cambia la
- * factura un 22%), y la que se defaultea es la que casi nunca cambia.
- */
-export function construirSubmenuIvaFusionado(precio: number, moneda: string): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "Una cosa sobre el precio",
-    cuerpo:
-      `Los ${montoConSigno(moneda, precio)} que me pasaste, ¿ya tienen el IVA adentro?\n\n` +
-      "Si es el precio que le cobrás al cliente en el mostrador, sí. Si es el precio sin impuestos " +
-      "y el IVA se suma aparte, no.\n\n" +
-      "En los dos casos tomo la tasa básica (22%). Si esto lleva otro IVA —10%, exento—, tocá el " +
-      "tercer botón.",
-    pie: "Si me equivoco acá, la factura sale 22% distinta.",
-    botones: [
-      { id: `${PREFIJO_PASO}iva_incluido:si`, titulo: "✅ Ya incluye IVA" },
-      { id: `${PREFIJO_PASO}iva_incluido:no`, titulo: "➕ Se suma aparte" },
-      { id: `${PREFIJO_PASO}iva_incluido:otro`, titulo: "🔢 Otro IVA" },
-    ],
-  };
-}
-
-/** "$" o "U$S". Se usa en toda pregunta que le muestre plata al usuario. */
-export function simboloMoneda(moneda: string | undefined): string {
-  const m = (moneda ?? "UYU").toUpperCase();
-  if (m === "USD") return "U$S";
-  return m === "UYU" ? "$" : `${m} `;
-}
-
-/**
- * La plata, escrita como se escribe en Uruguay, con el signo ANTES del símbolo.
- *
- * "$-200" no es como se escribe un importe negativo en ningún lado, y este eco
- * lo lee alguien que está por tocar un botón que TIRA esa línea. La convención
- * ya estaba fijada y testeada en `calcularTotales` (`not.toContain("$-")`);
- * esto es el mismo criterio en un solo lugar, para que no vuelva a divergir.
- * Se usa el menos tipográfico (−) por lo mismo que el resto del flujo: el
- * guión ASCII pegado al símbolo se lee como parte del número.
- */
-export function montoConSigno(moneda: string | undefined, valor: number): string {
-  const magnitud = `${simboloMoneda(moneda)}${formatearUy(Math.abs(valor))}`;
-  return valor < 0 ? `−${magnitud}` : magnitud;
-}
-
-/** Moneda. Solo se pregunta si algo en el mensaje sugiere que no es UYU. */
-export function construirSubmenuMoneda(): InteractivoBotones {
-  return {
-    tipo: "botones",
-    encabezado: "¿En qué moneda?",
-    cuerpo: "¿La facturo en pesos o en dólares?",
-    botones: [
-      { id: `${PREFIJO_PASO}moneda:UYU`, titulo: "🇺🇾 Pesos" },
-      { id: `${PREFIJO_PASO}moneda:USD`, titulo: "💵 Dólares" },
-    ],
-  };
-}
-
 /**
  * ¿El texto del usuario habla de dólares?
  *
@@ -815,35 +499,6 @@ export function sugiereDolares(texto: string): boolean {
   // así que van por inclusión directa.
   if (limpio.includes("u$s") || limpio.includes("us$") || limpio.includes("usd")) return true;
   return /\bdolar(es)?\b/.test(limpio);
-}
-
-/**
- * Lista de clientes recientes para elegir sin escribir.
- *
- * Los nombres los pasa el llamador desde `biller_ranking_clientes`, que los saca
- * de comprobantes ya emitidos: son clientes REALES de esta empresa, no una
- * lista inventada. La última fila es siempre "otro cliente" — una lista cerrada
- * de clientes frecuentes sería un callejón sin salida para el cliente nuevo,
- * que es justo el que más se factura una sola vez.
- */
-export function construirListaClientes(
-  clientes: ReadonlyArray<{ id?: string; nombre: string; documento?: string }>,
-): InteractivoLista {
-  const filas = clientes.slice(0, 9).map((c, i) => ({
-    id: `${PREFIJO_PASO}cliente:${c.documento ?? c.id ?? String(i)}`,
-    titulo: c.nombre.slice(0, 24),
-    ...(c.documento !== undefined ? { descripcion: `RUT/CI ${c.documento}` } : {}),
-  }));
-
-  filas.push({ id: `${PREFIJO_PASO}cliente:otro`, titulo: "➕ Otro cliente" });
-
-  return {
-    tipo: "lista",
-    encabezado: "¿A quién le facturás?",
-    cuerpo: "Estos son los que más facturaste últimamente. Si no está, elegí “Otro cliente”.",
-    boton: "Elegir cliente",
-    secciones: [{ titulo: "Tus clientes", filas }],
-  };
 }
 
 // --- Leer lo que contestó el usuario ----------------------------------------

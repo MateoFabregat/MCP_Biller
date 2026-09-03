@@ -25,6 +25,16 @@ export const PREFIJO_EMISION = "emitir:";
 export const PREFIJO_ANULACION = "anular:";
 
 /**
+ * Prefijo de los ids de un paso de la emisión guiada.
+ *
+ * Vive acá y no en `emision.ts` por la misma razón que los otros tres: lo
+ * escriben los constructores de mensajes (`render.ts`) y lo leen el enrutador y
+ * el intérprete de pasos. Tenerlo del lado de la decisión obligaba a que
+ * `render.ts` importara `emision.ts`, y con los submenús acá eso era un ciclo.
+ */
+export const PREFIJO_PASO = "emision:";
+
+/**
  * Prefijo de los botones de desambiguación de `biller_resolver_nombre`.
  *
  * Cuarto prefijo propio, y va con los otros tres por el mismo motivo: llega como

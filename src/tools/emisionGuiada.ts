@@ -57,9 +57,6 @@ import { KapsoClient } from "../kapso/client.js";
 import {
   aplicarDefaults,
   clasificarDocumento,
-  construirDesempateReceptor,
-  construirListaClientes,
-  construirSubmenuIva,
   hoyDgi,
   interpretarPaso,
   indiceItemEnCurso,
@@ -75,6 +72,11 @@ import {
   type EstadoEmision,
   type PerfilCasa,
 } from "../kapso/emision.js";
+import {
+  construirDesempateReceptor,
+  construirListaClientes,
+  construirSubmenuIva,
+} from "../kapso/render.js";
 import { extraerPedidoEmision, type PedidoEmision } from "../kapso/extraerPedido.js";
 import { extractClienteRut } from "../biller/normalize.js";
 import { fetchEmitidos } from "../biller/queries.js";

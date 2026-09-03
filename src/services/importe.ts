@@ -246,6 +246,28 @@ export function formatearUy(valor: number): string {
   return valor < 0 ? `-${cuerpo}` : cuerpo;
 }
 
+/** "$" o "U$S". Se usa en toda pregunta que le muestre plata al usuario. */
+export function simboloMoneda(moneda: string | undefined): string {
+  const m = (moneda ?? "UYU").toUpperCase();
+  if (m === "USD") return "U$S";
+  return m === "UYU" ? "$" : `${m} `;
+}
+
+/**
+ * La plata, escrita como se escribe en Uruguay, con el signo ANTES del símbolo.
+ *
+ * "$-200" no es como se escribe un importe negativo en ningún lado, y este eco
+ * lo lee alguien que está por tocar un botón que TIRA esa línea. La convención
+ * ya estaba fijada y testeada en `calcularTotales` (`not.toContain("$-")`);
+ * esto es el mismo criterio en un solo lugar, para que no vuelva a divergir.
+ * Se usa el menos tipográfico (−) por lo mismo que el resto del flujo: el
+ * guión ASCII pegado al símbolo se lee como parte del número.
+ */
+export function montoConSigno(moneda: string | undefined, valor: number): string {
+  const magnitud = `${simboloMoneda(moneda)}${formatearUy(Math.abs(valor))}`;
+  return valor < 0 ? `−${magnitud}` : magnitud;
+}
+
 /** Lo mismo para cantidades. Separado porque las reglas NO son las mismas. */
 export interface CantidadLeida {
   valor: number | null;

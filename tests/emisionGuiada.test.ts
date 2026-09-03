@@ -12,14 +12,6 @@ import { describe, expect, it } from "vitest";
 import {
   aplicarDefaults,
   clasificarDocumento,
-  construirDesempateReceptor,
-  construirListaClientes,
-  construirSubmenuConceptoExtra,
-  construirSubmenuFormaPago,
-  construirSubmenuIva,
-  construirSubmenuIvaFusionado,
-  construirSubmenuMoneda,
-  construirSubmenuReceptor,
   interpretarPaso,
   interpretarRespuestaLibre,
   separarDireccionCiudad,
@@ -28,6 +20,16 @@ import {
   tipoComprobanteSugerido,
   type EstadoEmision,
 } from "../src/kapso/emision.js";
+import {
+  construirDesempateReceptor,
+  construirListaClientes,
+  construirSubmenuConceptoExtra,
+  construirSubmenuFormaPago,
+  construirSubmenuIva,
+  construirSubmenuIvaFusionado,
+  construirSubmenuMoneda,
+  construirSubmenuReceptor,
+} from "../src/kapso/render.js";
 import { construirPayloadInteractivo } from "../src/kapso/client.js";
 import { handleEmisionGuiada } from "../src/tools/emisionGuiada.js";
 import { handleEmitirComprobante } from "../src/tools/write/emitirComprobante.js";

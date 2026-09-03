@@ -41,12 +41,11 @@ import {
   siguientePaso,
   itemPuedeViajar,
   itemsVigentes,
-  montoConSigno,
   type EstadoEmision,
   type ItemEnCurso,
 } from "./emision.js";
 import { esPedidoDeEmision, type PedidoEmision } from "./extraerPedido.js";
-import { formatearUy, parsearCantidad, parsearImporte } from "../services/importe.js";
+import { formatearUy, montoConSigno, parsearCantidad, parsearImporte } from "../services/importe.js";
 
 /**
  * Muestra un precio que quedó sin línea en el mismo formato que el resto del
