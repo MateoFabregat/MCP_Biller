@@ -123,3 +123,80 @@ describe("Kapso persistente", () => {
     expect(contenido).not.toContain("Juan");
   });
 });
+
+// =============================================================================
+// La reserva es una VENTANA, no una condena perpetua
+// =============================================================================
+//
+// La primera versión hasheaba tenant+actor+destinatario+operación+payload sin
+// ninguna noción de tiempo, sobre un journal que no expira. O sea: el segundo
+// mensaje byte a byte idéntico quedaba bloqueado PARA SIEMPRE. El usuario que
+// pide el menú dos veces —o que arranca una segunda factura, cuyo primer paso
+// tiene exactamente el mismo texto que la primera— no recibía nada. Un flujo
+// mudo es el peor modo de falla de este proyecto, y era el default.
+
+describe("una salida idéntica no queda bloqueada para siempre", () => {
+  const clienteCon = (fetchImpl: unknown, ahora: () => number) =>
+    new KapsoClient(config(), { fetchImpl: fetchImpl as typeof fetch, ahora });
+
+  it("el menú se puede pedir dos veces: lo conversacional no se reserva", async () => {
+    const fetchImpl = vi.fn(async () => ok());
+    const t = 1_800_000_000_000;
+    const c = clienteCon(fetchImpl, () => t);
+    const opts: KapsoSendOptions = { actorIdentity: actor, operation: "menu" };
+    await c.enviar(destino, "1. Facturar\n2. Cuánto facturé", opts);
+    await c.enviar(destino, "1. Facturar\n2. Cuánto facturé", opts);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("el primer paso de dos facturas seguidas se pregunta las dos veces", async () => {
+    const fetchImpl = vi.fn(async () => ok());
+    const t = 1_800_000_000_000;
+    const c = clienteCon(fetchImpl, () => t);
+    const opts: KapsoSendOptions = { actorIdentity: actor, operation: "paso_emision" };
+    await c.enviarInteractivo(destino, { tipo: "botones", encabezado: "¿A quién?", cuerpo: "…", botones: [{ id: "emision:receptor:empresa", titulo: "🏢 Empresa" }] }, opts);
+    await c.enviarInteractivo(destino, { tipo: "botones", encabezado: "¿A quién?", cuerpo: "…", botones: [{ id: "emision:receptor:empresa", titulo: "🏢 Empresa" }] }, opts);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("un reintento inmediato de un documento NO se manda dos veces", async () => {
+    const fetchImpl = vi.fn(async () => ok());
+    const t = 1_800_000_000_000;
+    const c = clienteCon(fetchImpl, () => t);
+    const opts: KapsoSendOptions = { actorIdentity: actor, operation: "reporte_diario" };
+    await c.enviar(destino, "Hoy facturaste $12.500", opts);
+    await expect(c.enviar(destino, "Hoy facturaste $12.500", opts)).rejects.toBeInstanceOf(
+      KapsoIdempotencyError,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("el mismo reporte, pasada la ventana, vuelve a salir", async () => {
+    const fetchImpl = vi.fn(async () => ok());
+    let t = 1_800_000_000_000;
+    const c = clienteCon(fetchImpl, () => t);
+    const opts: KapsoSendOptions = { actorIdentity: actor, operation: "reporte_diario" };
+    await c.enviar(destino, "Hoy facturaste $12.500", opts);
+    t += 2 * 60 * 60 * 1000; // dos horas después ya no es un reintento
+    await c.enviar(destino, "Hoy facturaste $12.500", opts);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("un recordatorio de cobro sigue siendo UNO por día, como antes", async () => {
+    // Esto lo garantizaba `claveRecordatorio` con el día uruguayo adentro. La
+    // ventana de reintento sola dejaría mandar dos cobranzas el mismo día, que
+    // es lo que aquel candado existía para evitar.
+    const fetchImpl = vi.fn(async () => ok());
+    let t = Date.parse("2026-09-03T14:00:00Z");
+    const c = clienteCon(fetchImpl, () => t);
+    const opts: KapsoSendOptions = { actorIdentity: actor, operation: "recordatorio" };
+    await c.enviar(destino, "Tenés $3.000 vencidos", opts);
+    t += 6 * 60 * 60 * 1000; // seis horas después, el MISMO día uruguayo
+    await expect(c.enviar(destino, "Tenés $3.000 vencidos", opts)).rejects.toBeInstanceOf(
+      KapsoIdempotencyError,
+    );
+    t += 24 * 60 * 60 * 1000; // al día siguiente sí
+    await c.enviar(destino, "Tenés $3.000 vencidos", opts);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+});

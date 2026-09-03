@@ -35,12 +35,12 @@
 // propia barrera, no una fuga en la superficie de lectura.
 // =============================================================================
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { KapsoConfig } from "../config.js";
 import { logger } from "../logger.js";
 import { BillerError, redactSecrets } from "../utils/errors.js";
 import {
-  claveSalidaKapso,
+  clavesSalidaKapso,
   crearKapsoIdempotencyStore,
   KapsoIdempotencyError,
   KapsoPersistenciaRequeridaError,
@@ -286,6 +286,8 @@ export interface KapsoClientOptions {
   idempotencyStore?: KapsoIdempotencyStore;
   /** Identidad opaca del actor que pidió la salida. Nunca se loguea en claro. */
   actorIdentity?: string;
+  /** Reloj inyectable: la ventana de reserva y el día de la cobranza dependen de él. */
+  ahora?: () => number;
 }
 
 export interface KapsoSendOptions {
@@ -300,6 +302,23 @@ interface ReservaKapso {
   store: IdempotencyStore;
 }
 
+/**
+ * El store de las salidas que no se reservan.
+ *
+ * No es un `if` repartido por los cuatro caminos de envío: los call sites
+ * marcan `executed`/`ambiguous` igual que siempre y acá no pasa nada. Un
+ * camino con menos ramas es un camino donde no se olvida marcar.
+ */
+const STORE_SIN_RESERVA: IdempotencyStore = {
+  claim: () => true,
+  markExecuted: () => {},
+  markAmbiguous: () => {},
+  release: () => {},
+  has: () => false,
+  markUsed: () => {},
+  clear: () => {},
+};
+
 // Los handlers construyen un cliente por invocación, pero comparten el mismo
 // objeto de configuración del tenant. Esta tabla conserva el store de memoria
 // entre esos clientes sin convertirlo en singleton global entre tenants.
@@ -312,6 +331,7 @@ export class KapsoClient {
   private readonly fetchImpl: typeof fetch;
   private readonly idempotency: KapsoIdempotencyStore;
   private readonly actorIdentity: string;
+  private readonly ahora: () => number;
 
   constructor(config: KapsoConfig, options: KapsoClientOptions = {}) {
     this.config = config;
@@ -320,6 +340,7 @@ export class KapsoClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.idempotency = options.idempotencyStore ?? this.storeParaConfig(config);
     this.actorIdentity = options.actorIdentity ?? "";
+    this.ahora = options.ahora ?? (() => Date.now());
   }
 
   private storeParaConfig(config: KapsoConfig): KapsoIdempotencyStore {
@@ -344,15 +365,32 @@ export class KapsoClient {
     options: KapsoSendOptions = {},
   ): ReservaKapso {
     this.exigirPersistenciaCompatible();
-    const key = claveSalidaKapso({
-      tenantId: this.config.tenantId ?? "_proceso",
-      actorIdentity: options.actorIdentity ?? this.actorIdentity,
-      destinatario,
-      operation,
-      payload,
-    });
-    if (!this.idempotency.claim(key)) throw new KapsoIdempotencyError();
-    return { key, store: this.idempotency };
+    const claves = clavesSalidaKapso(
+      {
+        tenantId: this.config.tenantId ?? "_proceso",
+        actorIdentity: options.actorIdentity ?? this.actorIdentity,
+        destinatario,
+        operation,
+        payload,
+      },
+      this.ahora(),
+    );
+
+    // Operación conversacional: no se reserva nada. Igual viaja una
+    // `idempotency-key` ÚNICA —no una derivada del contenido— para que un
+    // reintento nuestro de red no se duplique del lado de Kapso, y para que dos
+    // menús legítimamente iguales no se coman entre ellos allá.
+    if (claves === null) {
+      return { key: `kapso:libre:${randomUUID()}`, store: STORE_SIN_RESERVA };
+    }
+
+    // El tramo anterior solo se consulta: un reintento que cruzó el borde de la
+    // ventana no puede estrenar reserva y salir de nuevo.
+    if (claves.previa !== undefined && this.idempotency.has(claves.previa)) {
+      throw new KapsoIdempotencyError();
+    }
+    if (!this.idempotency.claim(claves.actual)) throw new KapsoIdempotencyError();
+    return { key: claves.actual, store: this.idempotency };
   }
 
   /** true si `destinatario` (solo dígitos) está habilitado. */
