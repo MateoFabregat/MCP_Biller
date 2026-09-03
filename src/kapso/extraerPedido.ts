@@ -148,6 +148,10 @@ const CORTES_CLIENTE: ReadonlySet<string> = new Set([
  */
 const PALABRAS_FUNCION: ReadonlySet<string> = new Set([
   "me", "te", "se", "lo", "le", "les", "nos", "yo", "vos", "che",
+  // Las muletillas con las que arranca una orden de mostrador. "ponele 2 kilos
+  // de queso a 490" es un pedido entero, y sin esto la muletilla quedaba como
+  // razón social: el agente recibía la orden de ponerle "ponele" al CFE.
+  "ponele", "poneme", "ponemelo", "dale", "meté", "mete", "metele", "tirame", "hacele", "haceme",
   "cuanto", "cuantos", "cuanta", "cuantas", "quien", "quienes", "como", "cuando",
   "donde", "porque", "cual", "cuales",
   "es", "era", "eran", "son", "fue", "fueron", "esta", "estan", "hay", "habia",

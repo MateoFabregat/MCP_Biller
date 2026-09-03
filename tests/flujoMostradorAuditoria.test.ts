@@ -204,3 +204,27 @@ describe("una fila de la lista de clientes siempre se puede tocar", () => {
     expect(filas.map((f) => f.titulo)).toEqual(["Pérez SRL", "➕ Otro cliente"]);
   });
 });
+
+describe('"ponele" no es el nombre de un cliente', () => {
+  it("un pedido que arranca con una muletilla no inventa un receptor", async () => {
+    // "ponele 2 kilos de queso a 490 y cerrá" es una frase de mostrador entera:
+    // la muletilla quedaba como razón social y el agente recibía la orden de
+    // ponerle "ponele" al comprobante.
+    const { extraerPedidoEmision } = await import("../src/kapso/extraerPedido.js");
+    for (const t of [
+      "ponele 2 kilos de queso a 490 y cerrá",
+      "poneme 3 bolsas a 200",
+      "dale 2 cajas a 100",
+    ]) {
+      const p = extraerPedidoEmision(t);
+      expect(p?.cliente, t).toBeUndefined();
+      // Y lo que sí es un pedido se sigue leyendo igual.
+      expect(p?.items?.[0]?.precio, t).toBeGreaterThan(0);
+    }
+  });
+
+  it("un cliente de verdad se sigue leyendo", async () => {
+    const { extraerPedidoEmision } = await import("../src/kapso/extraerPedido.js");
+    expect(extraerPedidoEmision("facturale a perez 2 bolsas a 6500")?.cliente).toBe("perez");
+  });
+});
