@@ -83,10 +83,20 @@ export async function ejecutarProbePost({
     headers: { Authorization: `Bearer ${token}`, accept: "application/json" },
   };
   const preflight = await fetchImpl(consulta.toString(), getOptions);
-  if (!preflight.ok) throw new Error(`El preflight GET falló con HTTP ${preflight.status}.`);
-  const previos = extraerLista(await jsonSeguro(preflight)).filter(
-    (comprobante) => comprobante?.numero_interno === executionId,
-  ).length;
+  const datosPreflight = await jsonSeguro(preflight);
+  const mensajePreflight = JSON.stringify(datosPreflight);
+  const inexistente =
+    preflight.status === 422 &&
+    /no existe/i.test(mensajePreflight) &&
+    /numero_interno/i.test(mensajePreflight);
+  if (!preflight.ok && !inexistente) {
+    throw new Error(`El preflight GET falló con HTTP ${preflight.status}.`);
+  }
+  const previos = inexistente
+    ? 0
+    : extraerLista(datosPreflight).filter(
+        (comprobante) => comprobante?.numero_interno === executionId,
+      ).length;
   if (previos !== 0) {
     throw new Error("El numero_interno del probe ya existe; elegí un identificador nuevo.");
   }

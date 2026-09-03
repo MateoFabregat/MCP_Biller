@@ -41,7 +41,10 @@ describe("probe contractual de POST e idempotencia", () => {
   it("repite exactamente body e idempotency key y confirma una sola coincidencia", async () => {
     const fetchImpl = vi
       .fn()
-      .mockResolvedValueOnce(new Response("[]", { status: 200 }))
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({ message: "El numero_interno no existe" }),
+        { status: 422, headers: { "content-type": "application/json" } },
+      ))
       .mockResolvedValueOnce(new Response("{}", { status: 201 }))
       .mockResolvedValueOnce(new Response("{}", { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify([
@@ -74,12 +77,27 @@ describe("probe contractual de POST e idempotencia", () => {
     expect(yaExistia).toHaveBeenCalledTimes(1);
 
     const segundoFalla = vi.fn()
-      .mockResolvedValueOnce(new Response("[]", { status: 200 }))
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({ message: "El numero_interno no existe" }),
+        { status: 422, headers: { "content-type": "application/json" } },
+      ))
       .mockResolvedValueOnce(new Response("{}", { status: 201 }))
       .mockResolvedValueOnce(new Response("{}", { status: 409 }));
     await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl: segundoFalla, archivos: archivoPrivado }))
       .rejects.toThrow(/segundo POST/);
     expect(segundoFalla).toHaveBeenCalledTimes(3);
+  });
+
+  it("falla cerrado ante un 422 que no sea el contrato conocido de inexistencia", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ message: "fecha inválida" }), {
+        status: 422,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl, archivos: archivoPrivado }))
+      .rejects.toThrow(/preflight/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("rechaza redirects sin seguirlos", async () => {

@@ -4,7 +4,9 @@ Este probe es destructivo únicamente en el ambiente de prueba: crea un CFE de
 test dos veces con el mismo `numero_interno` y la misma clave de idempotencia, y
 después verifica por GET que exista una sola coincidencia. Antes de escribir,
 otro GET exige que el identificador todavía no exista. Los redirects se
-rechazan en vez de seguirse. El contrato habitual
+rechazan en vez de seguirse. En la API real, esa inexistencia se expresa como
+el 422 conocido que menciona `numero_interno`; cualquier otro 422 falla cerrado.
+El contrato habitual
 `npm run contrato` permanece exclusivamente de lectura.
 
 Usar una cuenta dedicada de `https://test.biller.uy`. Guardar un payload válido
