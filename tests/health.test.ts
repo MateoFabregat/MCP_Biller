@@ -120,6 +120,7 @@ describe("biller_health_check", () => {
     const s = buildHealthStructured(inspect());
     const warnings = s.warnings as string[];
     expect(warnings.some((w) => w.includes("PRODUCCIÓN"))).toBe(true);
+    expect(warnings.some((w) => w.includes("PRODUCCIÓN NO LISTA"))).toBe(true);
   });
 
   it("el markdown incluye capability_mode y write_tools_registered", () => {

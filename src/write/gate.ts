@@ -25,6 +25,28 @@ export interface GateDecision {
   reason?: string;
 }
 
+/** Configuración mínima sin la cual un POST real no tiene recuperación segura. */
+export function faltantesParaProduccion(config: BillerConfig): string[] {
+  const faltantes: string[] = [];
+  if (!config.auditLogPath) faltantes.push("BILLER_AUDIT_LOG_PATH o BILLER_DATA_DIR");
+  if (!config.idempotencyLogPath) {
+    faltantes.push("BILLER_IDEMPOTENCY_LOG_PATH o BILLER_DATA_DIR");
+  }
+  if (Object.keys(config.maxMontos).length === 0) {
+    faltantes.push("al menos un BILLER_MAX_MONTO_<MONEDA>");
+  }
+  if (config.valorUi === undefined || config.valorUiFecha === undefined) {
+    faltantes.push("BILLER_VALOR_UI y BILLER_VALOR_UI_FECHA");
+  }
+  if (config.kapso && !config.kapso.idempotencyLogPath) {
+    faltantes.push("KAPSO_IDEMPOTENCY_LOG_PATH o BILLER_DATA_DIR");
+  }
+  if (config.kapso?.webhookSecret && !config.webhookReplayLogPath) {
+    faltantes.push("BILLER_WEBHOOK_REPLAY_LOG_PATH o BILLER_DATA_DIR");
+  }
+  return faltantes;
+}
+
 /** Evalúa el gate SIN lanzar (útil para previews informativos). */
 export function evaluateWriteGate(config: BillerConfig, req: GateRequest): GateDecision {
   const base: Omit<GateDecision, "allowed" | "reason"> = {
@@ -39,6 +61,12 @@ export function evaluateWriteGate(config: BillerConfig, req: GateRequest): GateD
   if (config.environment === "production" && !(config.allowProductionWrites && req.allowProduction)) {
     return { ...base, allowed: false, reason: "production_blocked" };
   }
+  if (config.environment === "production") {
+    const faltantes = faltantesParaProduccion(config);
+    if (faltantes.length > 0) {
+      return { ...base, allowed: false, reason: `production_not_ready:${faltantes.join(", ")}` };
+    }
+  }
   return { ...base, allowed: true };
 }
 
@@ -47,5 +75,8 @@ export function assertWriteAllowed(config: BillerConfig, req: GateRequest): void
   const decision = evaluateWriteGate(config, req);
   if (decision.allowed) return;
   if (decision.reason === "write_disabled") throw new BillerWriteDisabledError();
-  throw new BillerProductionBlockedError();
+  const detalle = decision.reason?.startsWith("production_not_ready:")
+    ? decision.reason.slice("production_not_ready:".length)
+    : undefined;
+  throw new BillerProductionBlockedError(detalle);
 }

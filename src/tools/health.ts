@@ -66,6 +66,12 @@ const outputShape = {
   audit_log_path: z.string().nullable(),
   /** Hay audit log en disco. Reemplaza a `audit_log_path` sin detalle: la ruta es del servidor. */
   tiene_audit_log: z.boolean(),
+  /** Estado del namespace de idempotencia de salidas Kapso, sin exponer ruta. */
+  kapso_configurado: z.boolean(),
+  kapso_idempotencia_persistente: z.boolean(),
+  webhook_replay_log_path: z.string().nullable(),
+  webhook_replay_ttl_ms: z.number(),
+  webhook_replay_max_entries: z.number(),
   timeout_ms: z.number(),
   log_level: z.string(),
   /**
@@ -121,6 +127,13 @@ function buildWarnings(c: ConfigInspection): string[] {
   warnings.push(...c.kapso.advertencias);
   warnings.push(...c.remitentes.advertencias);
 
+  if (c.kapso.habilitado && !c.kapso.idempotenciaPersistente) {
+    warnings.push(
+      "Las salidas Kapso usan idempotencia en memoria: un reinicio puede perder la reserva. " +
+        "Configurá KAPSO_IDEMPOTENCY_LOG_PATH o BILLER_DATA_DIR para persistirla.",
+    );
+  }
+
   // El estado más peligroso posible: canal de WhatsApp abierto sin nadie
   // autorizado. La barrera de entrada rechaza todo, así que el server se ve
   // "roto" — y la tentación es sacar la barrera en vez de poner la allowlist.
@@ -139,6 +152,22 @@ function buildWarnings(c: ConfigInspection): string[] {
         "ante DGI. Se puede corregir (nota de crédito para anular, nota de débito para revertir " +
         "la anulación), pero cada corrección es otro comprobante emitido. Usá test.biller.uy para pruebas.",
     );
+    const faltantes: string[] = [];
+    if (c.auditLogPath === null) faltantes.push("audit persistente");
+    if (c.idempotencyLogPath === null) faltantes.push("idempotencia fiscal persistente");
+    if (Object.keys(c.maxMontos).length === 0) faltantes.push("topes de monto por moneda");
+    if (c.valorUi === null || c.valorUiFecha === null) faltantes.push("valor y fecha vigente de la UI");
+    if (c.kapso.habilitado && !c.kapso.idempotenciaPersistente) {
+      faltantes.push("idempotencia persistente de salidas Kapso");
+    }
+    if (c.kapso.webhookHabilitado && c.webhookReplayLogPath === null) {
+      faltantes.push("protección persistente contra replay de webhooks");
+    }
+    if (faltantes.length > 0) {
+      warnings.push(
+        `⛔ PRODUCCIÓN NO LISTA: faltan ${faltantes.join(", ")}. El gate bloqueará los POST reales.`,
+      );
+    }
   }
 
   return warnings;
@@ -179,6 +208,11 @@ export function buildHealthStructured(
     sucursales_nombradas: c.sucursalesConfiguradas,
     audit_log_path: detalle ? c.auditLogPath : null,
     tiene_audit_log: c.auditLogPath !== null,
+    kapso_configurado: c.kapso.habilitado,
+    kapso_idempotencia_persistente: c.kapso.idempotenciaPersistente,
+    webhook_replay_log_path: detalle ? c.webhookReplayLogPath : null,
+    webhook_replay_ttl_ms: c.webhookReplayTtlMs,
+    webhook_replay_max_entries: c.webhookReplayMaxEntries,
     timeout_ms: c.timeoutMs,
     log_level: c.logLevel,
     rate_limit_default_rps: c.rateLimitDefaultRps,
@@ -227,6 +261,13 @@ function toMarkdown(s: Record<string, unknown>): string {
     `- **audit_log_path**: ${
       s.audit_log_path ?? (detalle ? "(solo stderr)" : `${OCULTO} — hay audit log: ${s.tiene_audit_log}`)
     }`,
+    `- **kapso_configurado**: ${s.kapso_configurado}`,
+    `- **kapso_idempotencia_persistente**: ${s.kapso_idempotencia_persistente}`,
+    `- **webhook_replay_log_path**: ${
+      s.webhook_replay_log_path ?? (detalle ? "(solo memoria)" : `${OCULTO} — hay journal: ${s.webhook_replay_log_path !== null}`)
+    }`,
+    `- **webhook_replay_ttl_ms**: ${s.webhook_replay_ttl_ms}`,
+    `- **webhook_replay_max_entries**: ${s.webhook_replay_max_entries}`,
     `- **timeout_ms**: ${s.timeout_ms}`,
     `- **log_level**: ${s.log_level}`,
     `- **rate_limit_default_rps**: ${s.rate_limit_default_rps}`,

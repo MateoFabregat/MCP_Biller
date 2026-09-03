@@ -39,6 +39,20 @@ describe("BillerWriteClient (gate en el borde de red)", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("bloquea producción aunque tenga doble flag si faltan barreras operativas", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({}));
+    const client = makeWriteClient(fetchImpl as unknown as typeof fetch, {
+      apiBaseUrl: "https://biller.uy",
+      environment: "production",
+      writeEnabled: true,
+      allowProductionWrites: true,
+    });
+    await expect(
+      client.post({ endpoint: "/v2/comprobantes/crear", body: {}, idempotencyKey: "k", allowProduction: true }),
+    ).rejects.toThrow(/BILLER_DATA_DIR/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("hace POST con Authorization Bearer e Idempotency-Key cuando está habilitado", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ id: 1, serie: "C", numero: "9" }));
     const client = makeWriteClient(fetchImpl as unknown as typeof fetch, { writeEnabled: true });

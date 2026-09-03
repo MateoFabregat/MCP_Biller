@@ -333,8 +333,16 @@ describe("gate de producción", () => {
     expect(fx.postMock).not.toHaveBeenCalled();
   });
 
-  it("permite producción con ambos flags habilitados", async () => {
-    const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: { ...prodCfg, allowProductionWrites: true } });
+  it("permite producción con ambos flags y barreras operativas configuradas", async () => {
+    const fx = makeCtx({ postResponse: EMIT_RESPONSE, config: {
+      ...prodCfg,
+      allowProductionWrites: true,
+      auditLogPath: "/private/tmp/biller-test-audit.jsonl",
+      idempotencyLogPath: "/private/tmp/biller-test-idempotency.jsonl",
+      maxMontos: { UYU: 1_000_000 },
+      valorUi: 6.4,
+      valorUiFecha: "2026-09-03",
+    } });
     const dry = await handleEmitirComprobante({ comprobante: COMPROBANTE }, fx.ctx);
     const token = sc(dry).confirmation_token as string;
     const exec = await handleEmitirComprobante(

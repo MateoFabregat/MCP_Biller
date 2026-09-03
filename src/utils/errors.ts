@@ -200,12 +200,13 @@ export class BillerWriteDisabledError extends BillerError {
 
 /** Se intentó escribir contra producción sin la habilitación explícita. */
 export class BillerProductionBlockedError extends BillerError {
-  constructor() {
+  constructor(detalle?: string) {
     super(
       "production_blocked",
       "Escritura contra PRODUCCIÓN bloqueada. Las operaciones POST contra biller.uy (producción) " +
         "emiten/anulan comprobantes reales ante DGI. Para habilitarlas se requiere " +
         "BILLER_ALLOW_PRODUCTION_WRITES=true Y el argumento allow_production=true. " +
+        (detalle ? `Además falta preparación operativa: ${detalle}. ` : "") +
         "Recomendación: probá primero en https://test.biller.uy.",
     );
   }
