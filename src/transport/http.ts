@@ -43,6 +43,7 @@ import {
 import { logger } from "../logger.js";
 import { enmascararTelefono, remitentesAutorizados } from "../security/remitentes.js";
 import { autenticarConTenants } from "../tenants/acceso.js";
+import type { FuenteRegistroTenants } from "../tenants/holder.js";
 import { resolverTenantPorId } from "../tenants/registry.js";
 import type { RegistroTenants, Tenant } from "../tenants/registry.js";
 import { conDialectoLimpio } from "./dialecto.js";
@@ -120,6 +121,12 @@ export interface AmbitoWebhook {
  * ruta de esa empresa se comporta como si no existiera, igual que sin secreto.
  */
 export type ResolverAmbitoWebhook = (tenant: Tenant) => AmbitoWebhook | null;
+
+type RegistroTenantsVigente = RegistroTenants | FuenteRegistroTenants;
+
+function snapshotRegistro(fuente: RegistroTenantsVigente): RegistroTenants {
+  return "actual" in fuente ? fuente.actual() : fuente;
+}
 
 export interface HttpTransportHandle {
   /** Puerto realmente escuchado (útil cuando se pide 0 en los tests). */
@@ -595,7 +602,7 @@ export class RegistroSesiones {
 export async function iniciarTransporteHttp(
   config: BillerConfig,
   crearServidorMcp: (tenant: Tenant | null) => McpServer,
-  registro: RegistroTenants = SIN_TENANTS,
+  registro: RegistroTenantsVigente = SIN_TENANTS,
   /**
    * El store de borradores del contexto base, para que el webhook sepa si la
    * conversación tiene una emisión a medio cargar. Opcional a propósito: los
@@ -641,6 +648,11 @@ export async function iniciarTransporteHttp(
         return;
       }
 
+      // Una request conserva UN snapshot coherente de principio a fin. La
+      // siguiente asignación del holder no puede mezclar auth de un registro
+      // con el webhook o el tenant de otro.
+      const registroActual = snapshotRegistro(registro);
+
       // El webhook va ANTES de la autenticación bearer: su credencial es otra
       // (la firma HMAC del cuerpo) porque quien llama es Kapso, no un cliente
       // MCP. Meterlo detrás del bearer significaría ponerle nuestro token a un
@@ -655,7 +667,7 @@ export async function iniciarTransporteHttp(
           resto === "" ? null : resto,
           config,
           borradores,
-          registro,
+          registroActual,
           opciones?.resolverAmbitoWebhook,
         );
         return;
@@ -666,7 +678,7 @@ export async function iniciarTransporteHttp(
         return;
       }
 
-      const auth = autenticarConTenants(req, config.httpAuthToken, registro);
+      const auth = autenticarConTenants(req, config.httpAuthToken, registroActual);
       if (!auth.ok) {
         // No se loguea el token presentado, ni siquiera un prefijo.
         logger.warn("http.auth.rechazado", { status: auth.status, path: url.pathname });
