@@ -62,6 +62,7 @@ function tenantsCrudos(): unknown[] {
       auth_token: TOKEN_A,
       env: {
         BILLER_API_TOKEN: "token_biller_panaderia",
+        BILLER_APPROVAL_SECRET: "approval-secret-panaderia-1234567890",
         BILLER_CAPABILITY_MODE: "write_enabled",
         BILLER_REMITENTES_AUTORIZADOS: REMITENTE_A,
         KAPSO_API_KEY: "kapso_a",
@@ -75,6 +76,7 @@ function tenantsCrudos(): unknown[] {
       auth_token: TOKEN_B,
       env: {
         BILLER_API_TOKEN: "token_biller_ferreteria",
+        BILLER_APPROVAL_SECRET: "approval-secret-ferreteria-1234567890",
         BILLER_CAPABILITY_MODE: "read_only",
         BILLER_REMITENTES_AUTORIZADOS: REMITENTE_B,
         KAPSO_API_KEY: "kapso_b",
