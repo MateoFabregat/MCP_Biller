@@ -226,7 +226,7 @@ que le escribe a TERCEROS, y estrena la allowlist de destinatarios).
 
 ## 6. El equipo de desarrollo
 
-El "equipo" son cuatro agentes especializados versionados en
+El "equipo" son siete agentes especializados versionados en
 [`.claude/agents/`](../.claude/agents/) — cada uno carga las reglas de su área
 para que no dependan de la memoria de nadie:
 
@@ -236,6 +236,16 @@ para que no dependan de la memoria de nadie:
 | **guardian-fiscal** | Una sola pregunta: ¿puede esto producir un documento fiscal o un número de plata equivocado? Conoce los errores ya cometidos (punto de miles, montos_brutos, fecha uruguaya). | Antes de mergear cualquier cambio a write/, cálculos, o emisión. |
 | **guardian-seguridad** | Las cuatro barreras + el canal de métricas + datos personales en disco. Piensa como atacante con una factura, un número de WhatsApp y los logs. | Cambios a security/, webhook, stores, logs, salidas. |
 | **dev-conversacional** | El enrutador, los textos del almacenero y el corpus de evals. Su vara: `npm run evals` no puede bajar. | Intenciones nuevas, sinónimos, mensajes, fallas de comprensión. |
+
+Los tres siguientes corren en **Fable** y son adversariales: no revisan que el
+código respete lo escrito, buscan romperlo. Por eso su regla común es que un
+hallazgo no existe hasta estar reproducido.
+
+| Agente | Rol | Cuándo se invoca |
+|---|---|---|
+| **cazador-bugs** | Busca el número equivocado, el flujo trancado y la protección que protege de más. Reproduce ANTES de arreglar, y si la carrera es angosta la ensancha a propósito. | Algo "anda raro" sin stack trace; antes de mergear una ola grande. |
+| **red-team-seguridad** | Ataca con objetivos concretos: que el modelo ejecute una instrucción de un tercero, que el token salga del proceso, que una empresa vea datos de otra. Conoce los lavados de barrera ya ocurridos. | Antes de exponer el server a internet o conectar el WhatsApp; cambios al borde de red, webhook o barrera de salida. |
+| **flujo-kapso** | El camino completo como producto: qué botón, en qué orden, qué implica tocarlo, y qué pasa si el usuario contesta otra cosa. Su hallazgo estrella son los callejones sin salida. | Antes de conectar el Agent Node; al agregar un paso o un botón; "el bot se quedó callado". |
 
 Y las **skills instaladas** (`.claude/skills/`, via `npx skills`):
 `typescript-mcp-server-generator` (patrones MCP+TS, 12K installs, org oficial
