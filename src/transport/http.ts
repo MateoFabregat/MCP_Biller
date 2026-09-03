@@ -750,7 +750,7 @@ export async function iniciarTransporteHttp(
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (id) => {
               const registrada = sesiones.registrarSiVigente(
-                `${tenantIdSesion}:${id}`,
+                `${auth.tenant?.id ?? "-"}:${id}`,
                 tenantIdSesion,
                 generacionSesion,
                 transport!,
