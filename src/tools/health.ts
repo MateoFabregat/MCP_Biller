@@ -6,6 +6,7 @@
 // =============================================================================
 
 import { z } from "zod";
+import { faltantesParaProduccion } from "../write/gate.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type ConfigInspection } from "../config.js";
 import { SERVER_NAME, SERVER_VERSION } from "../constants.js";
@@ -127,7 +128,7 @@ function buildWarnings(c: ConfigInspection): string[] {
   warnings.push(...c.kapso.advertencias);
   warnings.push(...c.remitentes.advertencias);
 
-  if (c.kapso.habilitado && !c.kapso.idempotenciaPersistente) {
+  if (c.kapso.configurado && !c.kapso.idempotenciaPersistente) {
     warnings.push(
       "Las salidas Kapso usan idempotencia en memoria: un reinicio puede perder la reserva. " +
         "Configurá KAPSO_IDEMPOTENCY_LOG_PATH o BILLER_DATA_DIR para persistirla.",
@@ -152,17 +153,23 @@ function buildWarnings(c: ConfigInspection): string[] {
         "ante DGI. Se puede corregir (nota de crédito para anular, nota de débito para revertir " +
         "la anulación), pero cada corrección es otro comprobante emitido. Usá test.biller.uy para pruebas.",
     );
-    const faltantes: string[] = [];
-    if (c.auditLogPath === null) faltantes.push("audit persistente");
-    if (c.idempotencyLogPath === null) faltantes.push("idempotencia fiscal persistente");
-    if (Object.keys(c.maxMontos).length === 0) faltantes.push("topes de monto por moneda");
-    if (c.valorUi === null || c.valorUiFecha === null) faltantes.push("valor y fecha vigente de la UI");
-    if (c.kapso.habilitado && !c.kapso.idempotenciaPersistente) {
-      faltantes.push("idempotencia persistente de salidas Kapso");
-    }
-    if (c.kapso.webhookHabilitado && c.webhookReplayLogPath === null) {
-      faltantes.push("protección persistente contra replay de webhooks");
-    }
+    // La lista NO se reescribe acá: la contesta el gate, que es quien va a
+    // bloquear. Dos listas que hay que acordarse de editar juntas terminan
+    // diciendo cosas distintas, y "el health dice listo pero el gate bloquea"
+    // es la peor combinación para quien está por facturar.
+    const faltantes = faltantesParaProduccion({
+      auditPersistente: c.auditLogPath !== null,
+      idempotenciaFiscalPersistente: c.idempotencyLogPath !== null,
+      tieneTopeDeMonto: Object.keys(c.maxMontos).length > 0,
+      valorUiVigente: c.valorUi !== null && c.valorUiFecha !== null,
+      replayWebhookPersistente: c.webhookReplayLogPath !== null,
+      kapso: c.kapso.configurado
+        ? {
+            idempotenciaPersistente: c.kapso.idempotenciaPersistente,
+            webhookHabilitado: c.kapso.webhookHabilitado,
+          }
+        : null,
+    });
     if (faltantes.length > 0) {
       warnings.push(
         `⛔ PRODUCCIÓN NO LISTA: faltan ${faltantes.join(", ")}. El gate bloqueará los POST reales.`,
@@ -208,7 +215,7 @@ export function buildHealthStructured(
     sucursales_nombradas: c.sucursalesConfiguradas,
     audit_log_path: detalle ? c.auditLogPath : null,
     tiene_audit_log: c.auditLogPath !== null,
-    kapso_configurado: c.kapso.habilitado,
+    kapso_configurado: c.kapso.configurado,
     kapso_idempotencia_persistente: c.kapso.idempotenciaPersistente,
     webhook_replay_log_path: detalle ? c.webhookReplayLogPath : null,
     webhook_replay_ttl_ms: c.webhookReplayTtlMs,

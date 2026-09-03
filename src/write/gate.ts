@@ -25,26 +25,65 @@ export interface GateDecision {
   reason?: string;
 }
 
+/**
+ * Lo que el gate mira para decidir si producción está preparada, ya reducido a
+ * las preguntas de sí o no que importan.
+ *
+ * Existe para que la regla se escriba UNA vez. Estaba escrita dos —acá y en
+ * `biller_health_check`—, sobre dos formas distintas del mismo dato (una usa
+ * `undefined`, la otra `null`), y dos listas que hay que acordarse de editar
+ * juntas terminan diciendo cosas distintas: el health decía "listo" mientras el
+ * gate bloqueaba, que es la peor combinación posible para quien está por
+ * facturar. Los NOMBRES de lo que falta viven acá y en ningún otro lado.
+ */
+export interface PreparacionProduccion {
+  auditPersistente: boolean;
+  idempotenciaFiscalPersistente: boolean;
+  tieneTopeDeMonto: boolean;
+  valorUiVigente: boolean;
+  replayWebhookPersistente: boolean;
+  /** `null` si no hay canal de WhatsApp configurado. */
+  kapso: {
+    idempotenciaPersistente: boolean;
+    /** true si la ruta del webhook entrante existe (hay secreto configurado). */
+    webhookHabilitado: boolean;
+  } | null;
+}
+
 /** Configuración mínima sin la cual un POST real no tiene recuperación segura. */
-export function faltantesParaProduccion(config: BillerConfig): string[] {
+export function faltantesParaProduccion(p: PreparacionProduccion): string[] {
   const faltantes: string[] = [];
-  if (!config.auditLogPath) faltantes.push("BILLER_AUDIT_LOG_PATH o BILLER_DATA_DIR");
-  if (!config.idempotencyLogPath) {
+  if (!p.auditPersistente) faltantes.push("BILLER_AUDIT_LOG_PATH o BILLER_DATA_DIR");
+  if (!p.idempotenciaFiscalPersistente) {
     faltantes.push("BILLER_IDEMPOTENCY_LOG_PATH o BILLER_DATA_DIR");
   }
-  if (Object.keys(config.maxMontos).length === 0) {
-    faltantes.push("al menos un BILLER_MAX_MONTO_<MONEDA>");
-  }
-  if (config.valorUi === undefined || config.valorUiFecha === undefined) {
-    faltantes.push("BILLER_VALOR_UI y BILLER_VALOR_UI_FECHA");
-  }
-  if (config.kapso && !config.kapso.idempotencyLogPath) {
+  if (!p.tieneTopeDeMonto) faltantes.push("al menos un BILLER_MAX_MONTO_<MONEDA>");
+  if (!p.valorUiVigente) faltantes.push("BILLER_VALOR_UI y BILLER_VALOR_UI_FECHA");
+  if (p.kapso !== null && !p.kapso.idempotenciaPersistente) {
     faltantes.push("KAPSO_IDEMPOTENCY_LOG_PATH o BILLER_DATA_DIR");
   }
-  if (config.kapso?.webhookSecret && !config.webhookReplayLogPath) {
+  if (p.kapso?.webhookHabilitado && !p.replayWebhookPersistente) {
     faltantes.push("BILLER_WEBHOOK_REPLAY_LOG_PATH o BILLER_DATA_DIR");
   }
   return faltantes;
+}
+
+/** La misma pregunta, hecha sobre la config cargada. */
+export function preparacionDeConfig(config: BillerConfig): PreparacionProduccion {
+  return {
+    auditPersistente: Boolean(config.auditLogPath),
+    idempotenciaFiscalPersistente: Boolean(config.idempotencyLogPath),
+    tieneTopeDeMonto: Object.keys(config.maxMontos).length > 0,
+    valorUiVigente: config.valorUi !== undefined && config.valorUiFecha !== undefined,
+    replayWebhookPersistente: Boolean(config.webhookReplayLogPath),
+    kapso:
+      config.kapso === undefined
+        ? null
+        : {
+            idempotenciaPersistente: Boolean(config.kapso.idempotencyLogPath),
+            webhookHabilitado: config.kapso.webhookSecret !== undefined,
+          },
+  };
 }
 
 /** Evalúa el gate SIN lanzar (útil para previews informativos). */
@@ -62,7 +101,7 @@ export function evaluateWriteGate(config: BillerConfig, req: GateRequest): GateD
     return { ...base, allowed: false, reason: "production_blocked" };
   }
   if (config.environment === "production") {
-    const faltantes = faltantesParaProduccion(config);
+    const faltantes = faltantesParaProduccion(preparacionDeConfig(config));
     if (faltantes.length > 0) {
       return { ...base, allowed: false, reason: `production_not_ready:${faltantes.join(", ")}` };
     }

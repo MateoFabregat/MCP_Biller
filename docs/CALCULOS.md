@@ -370,9 +370,18 @@ Cuando no hay certificado, las fechas llegan como whitespace puro
 
 ```
 iva_ventas  = Σ ( tot_iva_tasa_min + tot_iva_tasa_bas + tot_iva_tasa_otra )   [emitidos]
-iva_compras = Σ total_iva                                                     [recibidos]
+iva_compras = Σ signo(tipo) × |total_iva|                                     [recibidos]
 posicion    = iva_ventas − iva_compras
 ```
+
+**El signo lo da el TIPO de CFE, no el importe.** La API entrega los importes de
+un comprobante recibido en positivo, así que una nota de crédito recibida sumada
+tal cual inflaba el IVA crédito —y con él, la plata que el usuario cree que no
+debe—. `signo(tipo)` sale de `classifyCfe`: −1 para las notas de crédito, +1
+para el resto. Se aplica como `−|valor|` a propósito: si mañana la integración
+entrega el importe ya firmado, no se invierte dos veces. El mismo criterio rige
+las retenciones sufridas y, en `biller_ranking_proveedores`, la compra, el neto
+y el IVA por proveedor.
 
 Aritmética exacta sobre los CFE del período. **No se registra por defecto**
 (`BILLER_ENABLE_IVA_ESTIMADO=true` para habilitarla): el número se parece

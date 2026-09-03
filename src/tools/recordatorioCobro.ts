@@ -32,7 +32,6 @@
 // tiene anotaciones de escritura: manda un mensaje irreversible a un tercero.
 // =============================================================================
 
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { normalizarTelefono } from "../config.js";
@@ -191,30 +190,6 @@ const outputShape = {
   warnings: z.array(z.string()),
 };
 
-/**
- * Clave del registro anti-duplicado: un recordatorio por cliente, número y día.
- *
- * EL PAR IDENTIFICATORIO VA HASHEADO, Y NO ES PARANOIA.
- *
- * Esta clave se escribe TAL CUAL al registro persistente de idempotencia
- * (`idempotency.ts` la appendea al archivo). En claro, cada línea de ese archivo
- * era el RUT de un cliente y el teléfono de una persona: una lista de a quién se
- * le reclama plata, en texto plano, creciendo sola. Las otras siete tools de
- * escritura no tienen el problema porque derivan su clave de `claveDesdeToken`,
- * que ya hashea; esta es la excepción justamente porque no pasa por el runner.
- *
- * El DÍA queda en claro a propósito: es lo que hace legible "cuántos
- * recordatorios salieron el martes" sin identificar a nadie, y no dice de quién.
- *
- * La semántica anti-duplicado no cambia: mismo cliente + mismo número + mismo
- * día siguen dando la misma clave. Sí cambia el VALOR, así que un recordatorio
- * mandado hoy con la versión vieja no se reconoce como duplicado: la ventana de
- * corte es de un día y se cierra sola.
- */
-export function claveRecordatorio(rut: string, destinatario: string, hoyIso: string): string {
-  const huella = createHash("sha256").update(`${rut}\u0000${destinatario}`).digest("hex").slice(0, 32);
-  return `recordatorio_cobro:${huella}:${hoyIso}`;
-}
 
 export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   const parsed = recordatorioCobroInputSchema.safeParse(args);

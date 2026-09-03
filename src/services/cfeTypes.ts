@@ -163,3 +163,22 @@ export function classifyCfe(
     suma_en_resumen: false,
   };
 }
+
+/**
+ * El importe de un comprobante RECIBIDO, con el signo que le da su tipo de CFE.
+ *
+ * La API entrega los importes en positivo: el signo fiscal vive en el tipo, no
+ * en el número. Sumar una nota de crédito recibida tal cual inflaba el IVA
+ * crédito, la compra al proveedor y las retenciones sufridas — los tres números
+ * con los que alguien decide cuánto paga de IVA.
+ *
+ * Se aplica como `−|valor|` a propósito: si mañana la integración entrega el
+ * importe ya firmado, esto no lo invierte dos veces.
+ */
+export function importeFirmadoRecibido(
+  tipo: number | null,
+  valor: number | null | undefined,
+): number {
+  const n = valor ?? 0;
+  return classifyCfe(tipo).signo === -1 ? -Math.abs(n) : n;
+}

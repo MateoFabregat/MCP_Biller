@@ -628,8 +628,6 @@ export interface ConfigInspection {
   /** Estado de Kapso, SIN exponer la API key. */
   kapso: {
     configurado: boolean;
-    /** Alias legible para health: true si el canal está configurado. */
-    habilitado: boolean;
     baseUrl: string | null;
     phoneNumberIdConfigurado: boolean;
     destinatariosPermitidos: number;
@@ -949,7 +947,6 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     httpAllowedHosts: parseAllowedHosts(env.BILLER_HTTP_ALLOWED_HOSTS),
     kapso: {
       configurado: kapso !== undefined,
-      habilitado: kapso !== undefined,
       baseUrl: kapso?.baseUrl ?? null,
       phoneNumberIdConfigurado: kapso?.phoneNumberId !== undefined,
       destinatariosPermitidos: kapso?.destinatariosPermitidos.length ?? 0,

@@ -1,10 +1,11 @@
 // =============================================================================
-// Replay protection for inbound Kapso/Meta webhooks.
+// Protección contra reenvíos de webhooks entrantes de Kapso/Meta.
 //
-// A webhook message_id is the only identity we trust for retries.  The body is
-// deliberately not retained: webhook payloads can contain names, phone
-// numbers, and free text.  A digest of the normalized message_id is enough to
-// reserve it durably without putting that data in the journal.
+// El `message_id` es la única identidad que aceptamos para reconocer un
+// reintento. El cuerpo NO se guarda, y es a propósito: un webhook trae nombres,
+// teléfonos y texto libre, y nada de eso tiene por qué quedar escrito en un
+// journal. Alcanza con un digest del id normalizado para reservarlo de forma
+// durable sin llevarse esos datos puestos.
 // =============================================================================
 
 import {
@@ -32,17 +33,17 @@ export const DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES = 10_000;
 export type WebhookReplayState = "in_flight" | "processed";
 
 export interface WebhookReplayStore {
-  /** Atomically reserves an id. false means this event must not run again. */
+  /** Reserva un id en una sola transición. `false` = este evento no se corre otra vez. */
   claim(messageId: string): boolean;
-  /** Persists the successful completion of a claimed event. */
+  /** Deja asentado que un evento reservado terminó bien. */
   markProcessed(messageId: string): void;
-  /** Releases a claim only when no side effect was performed. */
+  /** Libera la reserva SOLO si no se llegó a producir ningún efecto. */
   release(messageId: string): void;
-  /** Read-only presence check, useful for diagnostics and tests. */
+  /** Consulta de presencia, sin reservar. Sirve para diagnóstico y tests. */
   has(messageId: string): boolean;
-  /** Number of retained ids after lazy expiry/eviction. */
+  /** Cuántos ids quedan retenidos, ya descontado lo vencido y lo desalojado. */
   readonly size: number;
-  /** Clears in-memory state; durable journals remain intentionally untouched. */
+  /** Limpia la memoria; el journal durable NO se toca, a propósito. */
   clear(): void;
 }
 
@@ -50,13 +51,13 @@ export interface WebhookReplayStoreOptions {
   ahora?: () => number;
   ttlMs?: number;
   maxEntries?: number;
-  /** Namespace included in the digest if a journal is ever shared. */
+  /** Entra al digest: si dos empresas compartieran journal, no se pisan. */
   tenantId?: string;
 }
 
 interface ReplayEntry {
   state: WebhookReplayState;
-  /** Last transition timestamp, in epoch milliseconds. */
+  /** Marca de la última transición, en milisegundos epoch. */
   touched: number;
 }
 
@@ -75,9 +76,11 @@ function isDigest(value: unknown): value is string {
 }
 
 /**
- * Shared bounded behavior.  The in-memory implementation is synchronous, so a
- * claim cannot yield between checking and inserting; that is the atomicity
- * required for concurrent requests in one Node process.
+ * El comportamiento acotado que comparten las dos implementaciones.
+ *
+ * La de memoria es síncrona, así que entre chequear e insertar no hay await
+ * posible: esa es toda la atomicidad que hace falta para dos requests
+ * concurrentes dentro de un mismo proceso Node.
  */
 class BoundedReplayStore implements WebhookReplayStore {
   protected readonly entries = new Map<string, ReplayEntry>();
@@ -94,7 +97,7 @@ class BoundedReplayStore implements WebhookReplayStore {
   }
 
   protected digest(messageId: string): string {
-    // The caller receives message_id from normalizarEvento. Do not trim or
+    // El id llega tal cual lo dejó `normalizarEvento`. No se recorta ni se
     // reinterpret it here: changing identity after normalization can turn two
     // legitimate events into one, or vice versa.
     return createHash("sha256").update(this.tenantId).update("\0").update(messageId).digest("hex");
@@ -118,7 +121,7 @@ class BoundedReplayStore implements WebhookReplayStore {
     }
   }
 
-  /** Hook for the file implementation to retire stale lock files. */
+  /** Enganche para que la implementación de archivo retire locks vencidos. */
   protected onExpired(_digest: string, _entry: ReplayEntry): void {
     // no-op
   }
@@ -129,7 +132,7 @@ class BoundedReplayStore implements WebhookReplayStore {
       if (oldest.done === true) return;
       const [digest, entry] = oldest.value;
       // Never evict an active operation. If every slot is active, fail closed
-      // instead of allowing an effect while losing the reservation.
+      // en vez de dejar pasar un efecto perdiendo la reserva.
       if (entry.state === "in_flight") {
         throw new Error("Se alcanzó el techo de replay mientras había eventos en ejecución.");
       }
@@ -137,7 +140,7 @@ class BoundedReplayStore implements WebhookReplayStore {
     }
   }
 
-  /** Evicts only completed entries when loading/reloading a large journal. */
+  /** Al cargar un journal grande, desaloja SOLO lo ya completado. */
   protected recortarExcedente(): void {
     while (this.entries.size > this.maxEntries) {
       const oldest = this.entries.entries().next();
@@ -191,12 +194,13 @@ class BoundedReplayStore implements WebhookReplayStore {
   }
 }
 
-/** Volatile default for local development and deployments without a data dir. */
+/** El default volátil: desarrollo local y deploys sin directorio de datos. */
 export class InMemoryWebhookReplayStore extends BoundedReplayStore {}
 
 /**
- * Durable append-only replay journal. Claims use an O_EXCL lock per digest,
- * then re-read the journal under that lock to close the stale-memory race
+ * Journal durable, append-only. Cada reserva toma un lock O_EXCL por digest y
+ * RELEE el journal con el lock tomado, que es lo que cierra la carrera con una
+ * memoria vieja
  * between independent Node processes.
  */
 export class FileWebhookReplayStore extends BoundedReplayStore {
@@ -230,7 +234,7 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
     if (!existsSync(this.path)) return;
     try {
       // Tighten an existing journal before reading any retained state. New
-      // files are opened 0600 below, so no content is ever first written with
+      // los archivos se abren 0600 más abajo, así que nada se escribe primero con
       // broader permissions.
       chmodSync(this.path, 0o600);
       const contenido = readFileSync(this.path, "utf8");
@@ -352,8 +356,9 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
   }
 
   private compactIfNeeded(): void {
-    // Compaction is best effort. The bounded Map remains the hard memory cap;
-    // failure marks the store degraded so future claims fail closed.
+    // La compactación es best effort: el techo duro de memoria lo pone el Map
+    // acotado. Si falla, el store queda marcado como degradado y las reservas
+    // siguientes fallan cerrado.
     if (this.entries.size <= this.maxEntries && this.journalTransitions <= this.maxEntries * 2) return;
     let lockFd: number | null = null;
     let journalLockHeld = false;
@@ -392,13 +397,13 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
   }
 
   protected override onExpired(digest: string): void {
-    // Expired reservations are eligible again. Remove only a lock whose file
-    // is older than the same TTL; an active claim remains fail-closed.
+    // Una reserva vencida vuelve a estar disponible. Solo se borra el lock cuyo
+    // archivo supera el mismo TTL; una reserva viva sigue fallando cerrado.
     const lock = this.lockPath(digest);
     try {
       if (statSync(lock).mtimeMs <= this.ahora() - this.ttlMs) this.liberarLock(lock);
     } catch {
-      // Missing lock is the normal processed-event case.
+      // Que no haya lock es el caso normal de un evento ya procesado.
     }
   }
 
@@ -416,7 +421,8 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
     const lock = this.lockPath(digest);
     if (!this.adquirirLock(lock)) return false;
     try {
-      // Another process may have appended this id after this instance loaded.
+      // Otro proceso pudo haber agregado este id después de que esta instancia
+      // cargó el journal.
       const actual = this.leerActual();
       const previo = actual.get(digest);
       if (previo !== undefined && !this.vencida(previo, now)) {
@@ -426,7 +432,7 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
         return false;
       }
       // A different process may have left many completed entries behind.
-      // Keep the bound before admitting this new reservation.
+      // El techo se respeta ANTES de admitir la reserva nueva.
       for (const [k, v] of actual) {
         if (this.vencida(v, now)) actual.delete(k); // check-readonly:allow Map.delete temporal, no es HTTP
       }
@@ -442,7 +448,7 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
       this.entries.clear();
       for (const [k, v] of actual) this.entries.set(k, v);
       if (!this.escribirLinea(digest, "in_flight", now)) {
-        // Keep the lock and local reservation absent: every subsequent retry
+        // Sin lock y sin reserva local: cada reintento posterior
         // fails closed because persistence is degraded.
         throw new Error("No se pudo persistir la reserva de replay; por seguridad el webhook NO se procesó.");
       }

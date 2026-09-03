@@ -137,10 +137,12 @@ function snapshotRegistro(fuente: RegistroTenantsVigente): RegistroTenants {
 }
 
 /**
- * Owns one replay store per tenant/config snapshot.  A SIGHUP that changes a
- * tenant's path or limits gets a new store, so state from the previous config
- * cannot silently bleed into the replacement tenant.  An unchanged tenant
- * keeps its store, which is what makes in-memory dedupe survive requests.
+ * Un store de replay por empresa y por snapshot de config.
+ *
+ * Si un SIGHUP le cambia la ruta o los límites a una empresa, esa empresa
+ * estrena store: el estado de la config anterior no puede colarse dentro de la
+ * que la reemplaza. La empresa que no cambió conserva el suyo, que es lo único
+ * que hace que la deduplicación en memoria sobreviva entre requests.
  */
 export class RegistroReplayWebhooks {
   private readonly stores = new Map<
@@ -160,7 +162,7 @@ export class RegistroReplayWebhooks {
     return store;
   }
 
-  /** Optional cleanup for removed tenants after a registry reload. */
+  /** Limpieza opcional para las empresas que ya no están tras una recarga. */
   quitar(tenantId: string): void {
     this.stores.delete(tenantId); // check-readonly:allow Map.delete del registro, no es HTTP
   }
@@ -385,10 +387,11 @@ async function atenderWebhook(
     }
   }
 
-  // Claim BEFORE deciding or doing any response/send effect.  A retry with the
-  // same normalized message_id gets a quiet 200 and never reaches the router.
-  // This store is selected only after the path + phone_number_id selected the
-  // tenant, so the same WhatsApp id in two companies remains independent.
+  // La reserva va ANTES de decidir nada y antes de cualquier efecto: un
+  // reenvío con el mismo message_id se contesta 200 en silencio y no llega al
+  // enrutador. El store se elige DESPUÉS de que la ruta y el phone_number_id
+  // resolvieron la empresa, así que el mismo id de WhatsApp en dos empresas
+  // sigue siendo independiente.
   const replay = ambito.webhookReplay ?? replayWebhooks.obtener(
     ambito.tenantId ?? ambito.config.tenantId,
     ambito.config,

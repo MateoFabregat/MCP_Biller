@@ -375,7 +375,14 @@ Dos duplicados son fatales por la misma razón —parecen andar—: el mismo
 `BILLER_API_TOKEN` en dos tenants (mismo `cacheId` ⇒ misma sal y mismo espacio de
 borradores, con la idempotencia separada: un reintento por el otro token emite un
 duplicado ante DGI) y el mismo archivo en cualquiera de las rutas,
-comparadas en **absoluto** y de forma **cruzada** entre las tres variables.
+comparadas en **absoluto** y de forma **cruzada** entre las cinco variables.
+
+Son cinco y no tres desde sep-2026: a `BILLER_AUDIT_LOG_PATH`,
+`BILLER_IDEMPOTENCY_LOG_PATH` y `BILLER_BORRADOR_STORE_PATH` se sumaron
+`KAPSO_IDEMPOTENCY_LOG_PATH` (idempotencia de las salidas de WhatsApp) y
+`BILLER_WEBHOOK_REPLAY_LOG_PATH` (reenvíos entrantes). La lista viva es
+`RUTAS_DE_PERSISTENCIA` en `src/tenants/registry.ts`; ninguna se hereda y
+`BILLER_DATA_DIR` las deriva a las cinco.
 
 ### Tocar el enrutador de WhatsApp
 

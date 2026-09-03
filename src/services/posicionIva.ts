@@ -27,7 +27,7 @@
 
 import { round2 } from "../biller/coerce.js";
 import type { ComprobanteEmitido, ComprobanteRecibido } from "../biller/types.js";
-import { classifyCfe } from "./cfeTypes.js";
+import { classifyCfe, importeFirmadoRecibido } from "./cfeTypes.js";
 import { clasificarEstado, estaAceptado } from "./estadoDgi.js";
 
 export interface IvaPorTasa {
@@ -162,13 +162,9 @@ export function calcularPosicionIva(
       recibidosSinMoneda += 1;
       continue;
     }
-    const esNotaCredito = classifyCfe(r.tipo).signo === -1;
-    // Algunas integraciones entregan totales absolutos y otras ya firman la
-    // NC. `-abs` evita tanto sumarla como invertirla dos veces.
-    const iva = esNotaCredito ? -Math.abs(r.total_iva ?? 0) : (r.total_iva ?? 0);
-    const retenido = esNotaCredito
-      ? -Math.abs(r.total_retenido ?? 0)
-      : (r.total_retenido ?? 0);
+    // El signo lo da el TIPO de CFE, no el importe. Ver `importeFirmadoRecibido`.
+    const iva = importeFirmadoRecibido(r.tipo, r.total_iva);
+    const retenido = importeFirmadoRecibido(r.tipo, r.total_retenido);
     const m = obtener(moneda);
     m.credito = round2(m.credito + iva);
     m.retenciones_sufridas = round2(m.retenciones_sufridas + retenido);
