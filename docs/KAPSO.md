@@ -161,9 +161,20 @@ export BILLER_API_TOKEN=<tu-token-de-biller>
 npm run build && npm start
 ```
 
-El endpoint MCP queda en `http://127.0.0.1:8848/mcp`, y hay un `/healthz` sin
-autenticación que solo devuelve `{"status":"ok","transport":"http"}` — ningún
-dato del negocio.
+El endpoint MCP queda en `http://127.0.0.1:8848/mcp`, y hay dos rutas sin
+autenticación que no devuelven ningún dato del negocio:
+
+| Ruta | Contesta |
+|---|---|
+| `/healthz` | Latido: `{"status":"ok","transport":"http"}` mientras el proceso viva. |
+| `/readyz` | Preparación: `200 {"status":"listo"}`, o `503` con los NOMBRES de las variables que faltan. |
+
+Son dos preguntas distintas y conviene no confundirlas: `/healthz` contesta 200
+aunque el gate vaya a bloquear todos los POST por configuración incompleta, así
+que un orquestador que solo mire liveness le manda tráfico a un server que no
+puede facturar. `/readyz` usa la MISMA lista que el gate, así que no puede decir
+"listo" mientras el gate bloquea. En ambiente `test`, o sin escrituras
+habilitadas, siempre da 200: ahí no hay POST real que trancar.
 
 **Sin `BILLER_HTTP_AUTH_TOKEN` el server no arranca.** No es tolerante como la
 config de Biller: un endpoint HTTP sin credencial expone la contabilidad entera
@@ -255,6 +266,7 @@ configuración — nunca valores.
 
 ```bash
 curl -s http://127.0.0.1:8848/healthz
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8848/readyz
 ```
 
 ```bash

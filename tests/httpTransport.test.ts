@@ -23,7 +23,7 @@ import {
   RegistroSesiones,
   iniciarTransporteHttp,
 } from "../src/transport/http.js";
-import { makeConfig } from "./fixtures.js";
+import { makeConfig, TEST_TOKEN } from "./fixtures.js";
 
 const TOKEN_VALIDO = "a".repeat(64);
 
@@ -421,5 +421,92 @@ describe("registro de sesiones HTTP", () => {
     t = 1000;
     expect(() => reg.barrer()).not.toThrow();
     expect(reg.size).toBe(0);
+  });
+});
+
+// =============================================================================
+// /readyz: liveness no es lo mismo que "puede trabajar"
+// =============================================================================
+//
+// `/healthz` contesta 200 mientras el proceso esté vivo, aunque el gate vaya a
+// bloquear todos los POST por configuración incompleta. Un orquestador que solo
+// mira liveness le manda tráfico igual, y el usuario descubre el problema
+// intentando facturar. `/readyz` es la otra pregunta.
+
+describe("/readyz — preparación, no latido", () => {
+  async function arrancarCon(config: Parameters<typeof makeConfig>[0]) {
+    const handle = await iniciarTransporteHttp(
+      makeConfig({ httpPort: 0, httpHost: "127.0.0.1", ...config }),
+      () => new McpServer({ name: "t", version: "0" }),
+    );
+    return { handle, base: `http://127.0.0.1:${handle.port}` };
+  }
+
+  const listaParaProduccion = {
+    apiBaseUrl: "https://biller.uy",
+    capabilityMode: "write_enabled" as const,
+    writeEnabled: true,
+    allowProductionWrites: true,
+    auditLogPath: "/tmp/audit.jsonl",
+    idempotencyLogPath: "/tmp/idem.jsonl",
+    maxMontos: { UYU: 100_000 },
+    valorUi: 6.3,
+    valorUiFecha: "2026-09-01",
+  };
+
+  it("dice 503 y QUÉ falta cuando el gate va a bloquear los POST", async () => {
+    const { handle, base } = await arrancarCon({
+      ...listaParaProduccion,
+      maxMontos: {},
+      valorUi: undefined,
+      valorUiFecha: undefined,
+    });
+    try {
+      const res = await fetch(`${base}/readyz`);
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { status: string; faltan: string[] };
+      expect(body.status).toBe("no_listo");
+      expect(body.faltan.join(" ")).toContain("BILLER_MAX_MONTO");
+      expect(body.faltan.join(" ")).toContain("BILLER_VALOR_UI");
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("dice 200 cuando la preparación está completa", async () => {
+    const { handle, base } = await arrancarCon(listaParaProduccion);
+    try {
+      const res = await fetch(`${base}/readyz`);
+      expect(res.status).toBe(200);
+      expect((await res.json()) as unknown).toMatchObject({ status: "listo" });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("en test o sin escrituras es 200: el gate no bloquea nada ahí", async () => {
+    const { handle, base } = await arrancarCon({ capabilityMode: "read_only" });
+    try {
+      expect((await fetch(`${base}/readyz`)).status).toBe(200);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("no pide auth y no filtra nada del negocio ni el token", async () => {
+    const { handle, base } = await arrancarCon({
+      ...listaParaProduccion,
+      maxMontos: {},
+      httpAuthToken: TOKEN_VALIDO,
+    });
+    try {
+      const cuerpo = await (await fetch(`${base}/readyz`)).text();
+      expect(cuerpo).not.toContain(TOKEN_VALIDO);
+      expect(cuerpo).not.toContain(TEST_TOKEN);
+      // Nombres de variable de entorno, nunca sus valores ni rutas del server.
+      expect(cuerpo).not.toContain("/tmp/audit.jsonl");
+    } finally {
+      await handle.close();
+    }
   });
 });

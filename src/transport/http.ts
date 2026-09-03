@@ -53,11 +53,26 @@ import type { FuenteRegistroTenants } from "../tenants/holder.js";
 import { resolverTenantPorId } from "../tenants/registry.js";
 import type { RegistroTenants, Tenant } from "../tenants/registry.js";
 import { conDialectoLimpio } from "./dialecto.js";
+import { faltantesParaProduccion, preparacionDeConfig } from "../write/gate.js";
 
 /** Ruta del endpoint MCP. Kapso apunta acá. */
 export const MCP_PATH = "/mcp";
 /** Ruta de liveness, SIN autenticación y sin datos. Para el orquestador. */
 export const HEALTH_PATH = "/healthz";
+/**
+ * Ruta de PREPARACIÓN, distinta del latido y también sin autenticación.
+ *
+ * `/healthz` contesta 200 mientras el proceso esté vivo — incluso cuando el
+ * gate va a bloquear todos los POST porque falta el audit persistente, los
+ * topes de monto o el valor de la UI. Un orquestador que solo mira liveness le
+ * manda tráfico igual y el problema aparece cuando alguien intenta facturar.
+ *
+ * Devuelve 503 y los NOMBRES de las variables que faltan: nombres de variable
+ * de entorno, nunca sus valores ni rutas del server. Es la misma lista que usa
+ * el gate para bloquear (`faltantesParaProduccion`), así que no puede decir
+ * "listo" mientras el gate bloquea.
+ */
+export const READY_PATH = "/readyz";
 /**
  * Ruta del webhook de Kapso (C8) EN MODO DE UNA SOLA EMPRESA. Solo existe si hay
  * `KAPSO_WEBHOOK_SECRET`.
@@ -752,6 +767,18 @@ export async function iniciarTransporteHttp(
       // Liveness: sin auth y sin ningún dato del negocio.
       if (url.pathname === HEALTH_PATH) {
         responderJson(res, 200, { status: "ok", transport: "http" });
+        return;
+      }
+
+      if (url.pathname === READY_PATH) {
+        // Solo pesa cuando el gate puede bloquear de verdad: en `test`, o sin
+        // escrituras habilitadas, no hay POST real que trancar.
+        const faltan =
+          config.environment === "production" && config.writeEnabled
+            ? faltantesParaProduccion(preparacionDeConfig(config))
+            : [];
+        if (faltan.length > 0) responderJson(res, 503, { status: "no_listo", faltan });
+        else responderJson(res, 200, { status: "listo" });
         return;
       }
 
