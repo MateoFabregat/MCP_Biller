@@ -38,6 +38,52 @@ describe("probe contractual de POST e idempotencia", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it.each([0o100400, 0o100700])("exige modo exactamente 0600 (%o no alcanza)", async (mode) => {
+    const fetchImpl = vi.fn();
+    await expect(ejecutarProbePost({
+      env: BASE_ENV,
+      fetchImpl,
+      archivos: { ...archivoPrivado, stat: () => ({ mode }) },
+    })).rejects.toThrow(/exactamente 0600/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([null, {}, { comprobantes: [] }])(
+    "falla cerrado si el preflight 200 tiene forma desconocida",
+    async (respuesta) => {
+      const fetchImpl = vi.fn().mockResolvedValue(
+        new Response(respuesta === null ? "no-json" : JSON.stringify(respuesta), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl, archivos: archivoPrivado }))
+        .rejects.toThrow(/forma desconocida/);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("falla cerrado si el preflight devuelve elementos sin numero_interno", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify([{ id: 42 }]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl, archivos: archivoPrivado }))
+      .rejects.toThrow(/sin numero_interno/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("rechaza un 206 aunque el preflight traiga un array vacío", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response("[]", { status: 206, headers: { "content-type": "application/json" } }),
+    );
+    await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl, archivos: archivoPrivado }))
+      .rejects.toThrow(/exactamente 200/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("repite exactamente body e idempotency key y confirma una sola coincidencia", async () => {
     const fetchImpl = vi
       .fn()
@@ -55,17 +101,57 @@ describe("probe contractual de POST e idempotencia", () => {
       statusPrimero: 201,
       statusSegundo: 200,
       coincidencias: 1,
+      idempotencyKeyConfirmada: true,
+      reintento: "aceptado_con_la_misma_clave",
     });
     expect(fetchImpl).toHaveBeenCalledTimes(4);
     const primera = fetchImpl.mock.calls[1]!;
     const segunda = fetchImpl.mock.calls[2]!;
-    expect(primera[0]).toBe("https://test.biller.uy/v2/comprobantes/crear");
+    expect(primera[0]).toBe("https://test.biller.uy/v3/comprobantes/emitir");
     expect(segunda[0]).toBe(primera[0]);
     expect(segunda[1]?.body).toBe(primera[1]?.body);
     expect(segunda[1]?.headers["Idempotency-Key"]).toBe(primera[1]?.headers["Idempotency-Key"]);
     expect(String(fetchImpl.mock.calls[0]![0])).toContain("numero_interno=probe-20260903");
     expect(String(fetchImpl.mock.calls[3]![0])).toContain("numero_interno=probe-20260903");
     for (const llamada of fetchImpl.mock.calls) expect(llamada[1]?.redirect).toBe("manual");
+  });
+
+  it("distingue el rechazo por numero_interno duplicado de idempotencia server-side", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify([{ field: "numero_interno", message: "No existe un comprobante con numero_interno probe-20260903" }]),
+        { status: 422, headers: { "content-type": "application/json" } },
+      ))
+      .mockResolvedValueOnce(new Response("{}", { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        { field: "Comprobantes[numero_interno]", message: ["Número interno no puede estar repetido"] },
+      ]), { status: 422, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        { id: 42, numero_interno: "probe-20260903" },
+      ]), { status: 200, headers: { "content-type": "application/json" } }));
+
+    await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl, archivos: archivoPrivado })).resolves.toEqual({
+      statusPrimero: 201,
+      statusSegundo: 422,
+      coincidencias: 1,
+      idempotencyKeyConfirmada: false,
+      reintento: "rechazado_por_numero_interno_duplicado",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it("no declara efecto único si el GET final no devuelve el array documentado", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify([{ field: "numero_interno", message: "No existe un comprobante con numero_interno probe-20260903" }]),
+        { status: 422, headers: { "content-type": "application/json" } },
+      ))
+      .mockResolvedValueOnce(new Response("{}", { status: 201 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+    await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl, archivos: archivoPrivado }))
+      .rejects.toThrow(/forma desconocida/);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 
   it("no declara idempotencia si el identificador ya existía o el segundo POST falla", async () => {

@@ -38,7 +38,33 @@ export function sanitizarComprobante(value) {
 
 function evidenciaPagina(label, response) {
   const lista = asList(response);
-  return { sonda: label, cantidad: lista.length, comprobantes: lista.slice(0, 10).map(sanitizarComprobante) };
+  return {
+    sonda: label,
+    cantidad: lista.length,
+    evidencia_disponible: lista.length > 0,
+    comprobantes: lista.slice(0, 10).map(sanitizarComprobante),
+  };
+}
+
+const CAMPOS_ERROR_PERMITIDOS = new Set(["numero", "serie", "numero_interno"]);
+
+function evidenciaRespuesta(label, status, response) {
+  if (status === 422 && Array.isArray(response)) {
+    const campos = response
+      .map((error) => error && typeof error === "object" ? error.field : null)
+      .filter((field) => typeof field === "string")
+      .map((field) => CAMPOS_ERROR_PERMITIDOS.has(field) ? field : "otro");
+    const camposUnicos = [...new Set(campos)];
+    const ternaIncompletaConfirmada =
+      camposUnicos.includes("numero") && camposUnicos.includes("serie");
+    return {
+      sonda: label,
+      http_status: status,
+      evidencia_disponible: ternaIncompletaConfirmada,
+      campos_error: camposUnicos,
+    };
+  }
+  return { ...evidenciaPagina(label, response), http_status: status };
 }
 
 /** La única función autorizada a tocar la red: GET fijo, sin cuerpos. */
@@ -78,15 +104,27 @@ export async function runReadonlyContract({
   const requests = [
     ["paginacion_emitidos_pagina_1", "/v2/comprobantes/obtener", { desde: `${hoy} 00:00:00`, hasta: `${hoy} 23:59:59`, pagina: 1 }],
     ["paginacion_emitidos_pagina_2", "/v2/comprobantes/obtener", { desde: `${hoy} 00:00:00`, hasta: `${hoy} 23:59:59`, pagina: 2 }],
-    ["filtro_tipo_comprobante_emitidos", "/v2/comprobantes/obtener", { desde: `${hoy} 00:00:00`, hasta: `${hoy} 23:59:59`, tipo_comprobante: 101 }],
+    ["tipo_sin_serie_numero_rechazado", "/v2/comprobantes/obtener", { desde: `${hoy} 00:00:00`, hasta: `${hoy} 23:59:59`, tipo_comprobante: 101 }],
     ["iva_numerico_recibidos", "/v2/comprobantes/recibidos/obtener", { fecha_desde: hoy, fecha_hasta: hoy }],
   ];
   const results = await Promise.all(requests.map(([, path, query]) => getJson(base, token, path, query, fetchImpl)));
+  const sondas = results.map((result, index) =>
+    evidenciaRespuesta(requests[index][0], result.status, result.data),
+  );
+  const emitidos = [...asList(results[0].data), ...asList(results[1].data)].map(sanitizarComprobante);
+  const recibidos = asList(results[3].data).map(sanitizarComprobante);
   const artifact = {
     tipo: "evidencia_externa_pendiente_de_interpretacion", version_harness: HARNESS_VERSION,
     capturado_en: now().toISOString(), ambiente: "test.biller.uy",
     nota: "Observaciones externas: no modifican reglas fiscales ni reemplazan tests con mocks.",
-    sondas: results.map((result, index) => ({ ...evidenciaPagina(requests[index][0], result.data), http_status: result.status })),
+    cobertura: {
+      paginacion: results[0].status === 200 && results[1].status === 200 && emitidos.length > 0,
+      estados: emitidos.some((comprobante) => comprobante.estado !== null),
+      terna_incompleta:
+        results[2].status === 422 && sondas[2].evidencia_disponible === true,
+      iva_numerico_recibidos: recibidos.some((comprobante) => comprobante.iva !== null),
+    },
+    sondas,
   };
   write(artifactPath, artifact);
   return { skipped: false, artifactPath, artifact };

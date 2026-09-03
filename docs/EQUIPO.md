@@ -287,8 +287,12 @@ medible el resto, y lo proactivo recién cuando alguien real usó lo reactivo.**
 
 1. El modelo no calcula ni un solo número. Si estás por promptear una decisión
    fiscal, va en código.
-2. Todo POST vive en `write/`. `npm run check:readonly` lo verifica; no se
-   discute con el guard, se discute con el CTO.
+2. Todo POST fiscal del runtime hacia Biller vive en `src/write/`;
+   `src/tools/write/` prepara y valida la operación.
+   `npm run check:readonly` lo verifica; no se discute con el guard, se discute
+   con el CTO. La única excepción que emite hacia Biller fuera del runtime es
+   `scripts/contrato-post.mjs`: un
+   probe externo, fuera del servidor, con doble opt-in y host fijado a TEST.
 3. Toda funcionalidad transversal se monta interceptando `registerTool`.
 4. Nada que vuelva a entrar en un payload usa las claves envueltas
    (`concepto`, `razon_social`, `adenda`…). El texto sensible viaja por el

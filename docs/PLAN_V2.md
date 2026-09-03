@@ -13,7 +13,7 @@ Lo que existe hoy y funciona:
 | Capa | Estado |
 |---|---|
 | Transporte | MCP stdio, TypeScript + Zod + Vitest |
-| Lectura | 7 tools GET (`health`, `buscar_cliente_por_rut`, `emitidos`, `recibidos`, `obtener`, `pdf`, `resumen_facturacion_periodo`) |
+| Lectura | En el corte original había 7 tools GET (`health`, `buscar_cliente_por_rut`, `emitidos`, `recibidos`, `obtener`, `pdf`, `resumen_facturacion_periodo`). El estado actual es 27 tools de lectura; ver `READ_TOOL_NAMES`. |
 | Escritura | 7 tools POST con dry-run → `confirmation_token` → confirm, doble gate de producción, idempotencia y audit log |
 | Aislamiento | `BILLER_CAPABILITY_MODE=read_only` por defecto; `scripts/check-readonly.mjs` prueba estáticamente que fuera de `src/write/` no hay POST |
 | Calidad | Suite automatizada, CI en GitHub Actions, evals declarativos |

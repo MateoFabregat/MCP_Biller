@@ -21,13 +21,20 @@ function validarBase(raw) {
   return normalizada;
 }
 
-function extraerLista(datos) {
-  if (Array.isArray(datos)) return datos;
-  if (datos !== null && typeof datos === "object") {
-    if (Array.isArray(datos.comprobantes)) return datos.comprobantes;
-    if (typeof datos.numero_interno === "string") return [datos];
-  }
-  return [];
+function sinAcentos(valor) {
+  return String(valor).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function esDuplicadoNumeroInterno(datos) {
+  if (!Array.isArray(datos)) return false;
+  return datos.some((error) => {
+    if (error === null || typeof error !== "object") return false;
+    if (error.field !== "Comprobantes[numero_interno]") return false;
+    const mensajes = Array.isArray(error.message) ? error.message : [error.message];
+    return mensajes.some((mensaje) =>
+      sinAcentos(mensaje).includes("numero interno no puede estar repetido"),
+    );
+  });
 }
 
 async function jsonSeguro(response) {
@@ -58,8 +65,8 @@ export async function ejecutarProbePost({
   if (idempotencyKey.length < 16) throw new Error("BILLER_CONTRATO_POST_IDEMPOTENCY_KEY es demasiado corta.");
 
   const metadata = archivos.stat(payloadPath);
-  if ((metadata.mode & 0o077) !== 0) {
-    throw new Error("El payload del probe debe tener permisos 0600.");
+  if ((metadata.mode & 0o777) !== 0o600) {
+    throw new Error("El payload del probe debe tener permisos exactamente 0600.");
   }
 
   let payload;
@@ -92,9 +99,26 @@ export async function ejecutarProbePost({
   if (!preflight.ok && !inexistente) {
     throw new Error(`El preflight GET falló con HTTP ${preflight.status}.`);
   }
+  if (!inexistente && preflight.status !== 200) {
+    throw new Error(`El preflight GET respondió HTTP ${preflight.status}; se exige exactamente 200 o el 422 conocido.`);
+  }
+  if (preflight.ok && !Array.isArray(datosPreflight)) {
+    throw new Error("El preflight GET respondió 200 con una forma desconocida; no se hizo POST.");
+  }
+  if (
+    preflight.ok &&
+    datosPreflight.some(
+      (comprobante) =>
+        comprobante === null ||
+        typeof comprobante !== "object" ||
+        typeof comprobante.numero_interno !== "string",
+    )
+  ) {
+    throw new Error("El preflight GET respondió 200 con comprobantes sin numero_interno; no se hizo POST.");
+  }
   const previos = inexistente
     ? 0
-    : extraerLista(datosPreflight).filter(
+    : datosPreflight.filter(
         (comprobante) => comprobante?.numero_interno === executionId,
       ).length;
   if (previos !== 0) {
@@ -112,21 +136,37 @@ export async function ejecutarProbePost({
     },
     body,
   };
-  const endpoint = `${baseUrl}/v2/comprobantes/crear`;
+  const endpoint = `${baseUrl}/v3/comprobantes/emitir`;
   const primero = await fetchImpl(endpoint, postOptions);
   if (!primero.ok) {
     throw new Error(`El primer POST falló con HTTP ${primero.status}; no se reintentó.`);
   }
   const segundo = await fetchImpl(endpoint, postOptions);
-  if (!segundo.ok) {
+  const datosSegundo = await jsonSeguro(segundo);
+  const rechazadoPorNumeroInterno =
+    segundo.status === 422 && esDuplicadoNumeroInterno(datosSegundo);
+  if (!segundo.ok && !rechazadoPorNumeroInterno) {
     throw new Error(`El segundo POST falló con HTTP ${segundo.status}; no se declara idempotencia verificada.`);
   }
 
   const evidencia = await fetchImpl(consulta.toString(), getOptions);
-  if (!evidencia.ok) throw new Error(`No se pudo verificar el efecto por GET: HTTP ${evidencia.status}.`);
+  if (evidencia.status !== 200) {
+    throw new Error(`No se pudo verificar el efecto por GET: HTTP ${evidencia.status}; se exige exactamente 200.`);
+  }
 
   const datos = await jsonSeguro(evidencia);
-  const coincidencias = extraerLista(datos).filter(
+  if (
+    !Array.isArray(datos) ||
+    datos.some(
+      (comprobante) =>
+        comprobante === null ||
+        typeof comprobante !== "object" ||
+        typeof comprobante.numero_interno !== "string",
+    )
+  ) {
+    throw new Error("El GET de evidencia respondió con una forma desconocida; no se declara efecto único.");
+  }
+  const coincidencias = datos.filter(
     (comprobante) => comprobante?.numero_interno === executionId,
   ).length;
   if (coincidencias !== 1) {
@@ -137,14 +177,19 @@ export async function ejecutarProbePost({
     statusPrimero: primero.status,
     statusSegundo: segundo.status,
     coincidencias,
+    idempotencyKeyConfirmada: segundo.ok,
+    reintento: rechazadoPorNumeroInterno
+      ? "rechazado_por_numero_interno_duplicado"
+      : "aceptado_con_la_misma_clave",
   };
 }
 
 async function main() {
   const resultado = await ejecutarProbePost();
   console.log(
-    `✓ Idempotencia verificada en test: POST ${resultado.statusPrimero}/${resultado.statusSegundo}; ` +
-      `${resultado.coincidencias} comprobante para el identificador dedicado.`,
+    `✓ Efecto no duplicado en test: POST ${resultado.statusPrimero}/${resultado.statusSegundo}; ` +
+      `${resultado.coincidencias} comprobante; Idempotency-Key ` +
+      `${resultado.idempotencyKeyConfirmada ? "confirmada" : "no confirmada (numero_interno rechazó el reintento)"}.`,
   );
 }
 

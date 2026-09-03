@@ -1,11 +1,17 @@
 # Probe contractual de POST e idempotencia
 
 Este probe es destructivo únicamente en el ambiente de prueba: crea un CFE de
-test dos veces con el mismo `numero_interno` y la misma clave de idempotencia, y
+test mediante `POST /v3/comprobantes/emitir` dos veces con el mismo
+`numero_interno` y la misma clave de idempotencia, y
 después verifica por GET que exista una sola coincidencia. Antes de escribir,
 otro GET exige que el identificador todavía no exista. Los redirects se
 rechazan en vez de seguirse. En la API real, esa inexistencia se expresa como
 el 422 conocido que menciona `numero_interno`; cualquier otro 422 falla cerrado.
+El segundo POST tiene dos resultados aceptables, pero no equivalentes: un 2xx
+confirma que el proveedor reconoció el reintento; el 422 exacto
+`Comprobantes[numero_interno]` / `Número interno no puede estar repetido`
+demuestra que no se duplicó el efecto, pero **no** confirma soporte server-side
+de `Idempotency-Key`. Cualquier otro error falla cerrado.
 El contrato habitual
 `npm run contrato` permanece exclusivamente de lectura.
 
@@ -24,5 +30,6 @@ Variables requeridas:
 - `BILLER_CONTRATO_POST_IDEMPOTENCY_KEY` única, de al menos 16 caracteres
 
 Ejecutar `node --env-file=.env scripts/contrato-post.mjs`. La salida solo muestra los tres estados
-necesarios: HTTP del primer intento, HTTP del segundo y cantidad de
-coincidencias. No muestra tokens, payloads ni respuestas fiscales.
+necesarios: HTTP del primer intento, HTTP del segundo, cantidad de coincidencias
+y si el header quedó realmente confirmado. No muestra tokens, payloads ni
+respuestas fiscales.

@@ -265,15 +265,19 @@ archivo son los backlogs previos, todavía válidos.
   Hacer una emisión real en `test.biller.uy` con `biller_emitir_comprobante`
   (dry-run → confirm) y confirmar que Biller acepta el payload.
   Idem para `biller_crear_cliente`, `biller_crear_recibo`, etc.
-  Parcial: los preview salieron contra el server real (dry-run, 28/07) y de ahí
+  Parcial: la emisión mínima real por `POST /v3/comprobantes/emitir` fue aceptada
+  en TEST el 03/09/2026. Los preview también salieron contra el server real
+  (dry-run, 28/07) y de ahí
   salieron hallazgos que contradicen al OpenAPI —`direccion`/`ciudad`
   obligatorias, 422 por `numero_interno` inexistente— anotados en
-  [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) §7. Falta el `confirm` real.
+  [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) §7. Faltan validar los demás
+  endpoints de escritura (cliente, producto, recibo, pago y anulación).
 
-- [ ] **Confirmar soporte server-side del header `Idempotency-Key`.**
-  El MCP envía el header pero no hay garantía de que Biller lo procese.
-  Actualmente la idempotencia es in-process (in-memory por sesión).
-  Si el servidor Biller lo soporta, la protección se extiende entre sesiones.
+- [x] **Confirmar soporte server-side del header `Idempotency-Key`.**
+  Validado en TEST el 03/09/2026 contra `/v3/comprobantes/emitir`: el primer POST
+  devolvió 201 y el reintento con el mismo body, `numero_interno` y header devolvió
+  422 por número interno repetido. El header no quedó confirmado. La defensa real
+  es el `numero_interno` único más el journal persistente del MCP.
 
 - [x] **Publicar como npm package o binario.** Hecho: `biller-mcp-server@0.1.1`
   publicado (`package.json` sin `private: true`), instalable con

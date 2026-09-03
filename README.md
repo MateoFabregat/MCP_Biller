@@ -590,9 +590,13 @@ En stdio y en el server HTTP largo la memoria alcanza de sobra.
 
 ## Seguridad y límites
 
-- **Aislamiento de escritura**: todo el código que hace `POST` vive en `src/write/`.
+- **Aislamiento de escritura fiscal**: todo `POST` del runtime hacia Biller vive
+  en `src/write/`; `src/tools/write/` prepara y valida la operación.
   El guard estático (`npm run check:readonly` + `tests/readonly.test.ts`) falla si
   aparece escritura en cualquier otro lado: la superficie de lectura es GET-only.
+  La única excepción que emite hacia Biller fuera del runtime es el probe destructivo de integración
+  [`scripts/contrato-post.mjs`](scripts/contrato-post.mjs), que exige doble opt-in,
+  credenciales y payload dedicados, permisos 0600 y el host exacto de TEST.
 - **Escritura apagada por defecto** + dry-run + confirmación + doble gate de
   producción + idempotencia + audit log.
 - **Credenciales protegidas**: el bearer token de Biller y `BILLER_APPROVAL_SECRET`
@@ -637,8 +641,11 @@ No documentado en el OpenAPI público (no se inventó):
 5. **Filtros nativos de moneda/cliente** → se hacen locales.
 6. **Semántica de fechas** (`desde`/`hasta`) → filtran por `fecha_creacion`. Para la
    fecha de **emisión** fiscal hay filtros locales `emitidas_desde`/`emitidas_hasta`.
-7. **Soporte del header `Idempotency-Key`** server-side → la idempotencia fuerte es
-   in-process; la defensa que sí persiste es el chequeo de `numero_interno`.
+7. **Header `Idempotency-Key` server-side** → probado en TEST el 03/09/2026:
+   Biller aceptó el primer `/v3/comprobantes/emitir` (201), pero rechazó el
+   reintento idéntico con 422 por `numero_interno` repetido. El header no quedó
+   confirmado; la defensa efectiva es el número interno único más el journal
+   persistente del MCP.
 8. **Esquema de request de `POST /v3/comprobantes/emitir`** → la doc trae la *Tabla
    de Valores* completa y 12 ejemplos, pero no un JSON Schema. El cuerpo se valida
    contra esa tabla (ver abajo) y los campos no documentados pasan sin tocarse.

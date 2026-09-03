@@ -48,6 +48,7 @@ const DOCS_CON_CONTEOS = [
   "docs/HANDBOOK.md",
   "docs/ARQUITECTURA.md",
   "docs/EQUIPO.md",
+  "docs/PLAN_V2.md",
   ".env.example",
 ] as const;
 

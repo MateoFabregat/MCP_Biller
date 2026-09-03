@@ -1,0 +1,9 @@
+# Falsos positivos verificados: credenciales deliberadamente ficticias usadas
+# por tests de configuración, aislamiento e idempotencia. Las entradas están
+# fijadas a commit, archivo, regla y línea para no silenciar hallazgos futuros.
+07e10c2fb56c5e02206f8a53ae6408a3641e4b11:tests/webhookMultiEmpresa.test.ts:generic-api-key:65
+07e10c2fb56c5e02206f8a53ae6408a3641e4b11:tests/webhookMultiEmpresa.test.ts:generic-api-key:79
+e699e92914e5655bd08defbe6da6a9216f87dd84:tests/sighupIntegracion.test.ts:generic-api-key:32
+35fdf8cdda279c23dafa2d7a7857597d41001d8c:tests/contratoPost.test.ts:generic-api-key:12
+db204dd18f22f535de6296e4db44f6388c0435c1:tests/recargaTenants.test.ts:generic-api-key:77
+1b84ca5537f6c9856b540c70ff89576b9fdd520e:tests/config.test.ts:generic-api-key:59

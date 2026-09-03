@@ -192,10 +192,15 @@ dry-run → confirmation_token (TTL 15 min, ligado al payload por hash)
 
 ### 4.4. Read-only estático — ¿puede haber un POST?
 
-`scripts/check-readonly.mjs` falla el build si aparece un POST fuera de
-`src/write/`. Las excepciones se declaran por línea con
+`scripts/check-readonly.mjs` falla el build si aparece un POST fiscal del runtime
+fuera de `src/write/`; `src/tools/write/` prepara y valida la operación. Las
+excepciones se declaran por línea con
 `// check-readonly:allow <motivo>`, y hay un test que exige que el motivo esté
 escrito.
+
+El probe manual `scripts/contrato-post.mjs` no forma parte del runtime del MCP:
+es la única excepción operativa, está fijado a `test.biller.uy` y exige doble
+opt-in, payload privado 0600 e identificadores dedicados.
 
 ### 4.5. Instrumentación — ¿cómo sabemos que anda?
 
