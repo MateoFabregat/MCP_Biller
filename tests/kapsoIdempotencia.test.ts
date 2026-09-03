@@ -1,0 +1,125 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  KapsoClient,
+  KapsoIdempotencyError,
+  type KapsoSendOptions,
+} from "../src/kapso/client.js";
+import { claveSalidaKapso } from "../src/kapso/idempotency.js";
+import { FileIdempotencyStore } from "../src/write/idempotency.js";
+import type { KapsoConfig } from "../src/config.js";
+
+const destino = "59899123456";
+const actor = "59895923567";
+
+function config(overrides: Partial<KapsoConfig> = {}): KapsoConfig {
+  return {
+    apiKey: "kapso-secret",
+    baseUrl: "https://api.kapso.ai",
+    phoneNumberId: "110987654321",
+    destinatariosPermitidos: [destino],
+    tenantId: "panaderia",
+    ...overrides,
+  };
+}
+
+function ok(body = '{"messages":[{"id":"wamid.1"}]}'): Response {
+  return new Response(body, { status: 200 });
+}
+
+describe("claves de salidas Kapso", () => {
+  it("son determinísticas, cambian por tenant/actor/destinatario/operación/payload y no llevan PII", () => {
+    const input = {
+      tenantId: "panaderia",
+      actorIdentity: actor,
+      destinatario: destino,
+      operation: "recordatorio",
+      payload: { body: "Juan debe UYU 100" },
+    } as const;
+    const clave = claveSalidaKapso(input);
+    expect(clave).toBe(claveSalidaKapso(input));
+    expect(clave).toMatch(/^kapso:v1:[0-9a-f]{64}$/);
+    expect(clave).not.toContain(actor);
+    expect(clave).not.toContain(destino);
+    expect(clave).not.toContain("Juan");
+    expect(claveSalidaKapso({ ...input, tenantId: "ferreteria" })).not.toBe(clave);
+    expect(claveSalidaKapso({ ...input, actorIdentity: "59890000000" })).not.toBe(clave);
+    expect(claveSalidaKapso({ ...input, destinatario: "59890000000" })).not.toBe(clave);
+    expect(claveSalidaKapso({ ...input, operation: "menu" })).not.toBe(clave);
+    expect(claveSalidaKapso({ ...input, payload: { body: "otro" } })).not.toBe(clave);
+  });
+});
+
+describe("KapsoClient: reserva antes de cada salida", () => {
+  it("dos envíos concurrentes idénticos hacen como máximo una llamada", async () => {
+    let liberar!: () => void;
+    const espera = new Promise<void>((resolve) => (liberar = resolve));
+    const fetchImpl = vi.fn(async () => {
+      await espera;
+      return ok();
+    }) as unknown as typeof fetch;
+    const client = new KapsoClient(config(), { fetchImpl });
+    const opciones: KapsoSendOptions = { actorIdentity: actor, operation: "recordatorio" };
+    const a = client.enviar(destino, "debe UYU 100", opciones);
+    const b = client.enviar(destino, "debe UYU 100", opciones);
+    liberar();
+    const resultados = await Promise.allSettled([a, b]);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(resultados.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(resultados.find((r) => r.status === "rejected")?.reason).toBeInstanceOf(KapsoIdempotencyError);
+  });
+
+  it("una respuesta perdida deja ambiguous y un retry no vuelve a salir", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("socket closed after request");
+    }) as unknown as typeof fetch;
+    const client = new KapsoClient(config(), { fetchImpl });
+    const opciones: KapsoSendOptions = { actorIdentity: actor, operation: "recordatorio" };
+    await expect(client.enviar(destino, "debe UYU 100", opciones)).rejects.toThrow(/red|socket/i);
+    await expect(client.enviar(destino, "debe UYU 100", opciones)).rejects.toBeInstanceOf(KapsoIdempotencyError);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("documento trata subida + mensaje como una sola operación: al perder respuesta no duplica ninguna llamada", async () => {
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (String(init?.body).includes("[object FormData]")) return ok('{"id":"media-1"}');
+      throw new Error("socket closed after request");
+    }) as unknown as typeof fetch;
+    const client = new KapsoClient(config(), { fetchImpl });
+    const opciones: KapsoSendOptions = { actorIdentity: actor, operation: "documento" };
+    const archivo = { contenido: new Uint8Array([37, 80, 68, 70]), filename: "factura.pdf", mimeType: "application/pdf" };
+    await expect(client.enviarDocumento(destino, archivo, opciones)).rejects.toThrow();
+    await expect(client.enviarDocumento(destino, archivo, opciones)).rejects.toBeInstanceOf(KapsoIdempotencyError);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("Kapso persistente", () => {
+  let dir = "";
+  afterEach(() => {
+    if (dir !== "") rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("sobrevive reinicio, conserva estados inciertos y no guarda payload", () => {
+    dir = mkdtempSync(join(tmpdir(), "biller-kapso-"));
+    const path = join(dir, "kapso.jsonl");
+    const primero = new FileIdempotencyStore(path);
+    const clave = claveSalidaKapso({
+      tenantId: "panaderia",
+      actorIdentity: actor,
+      destinatario: destino,
+      operation: "recordatorio",
+      payload: { body: "Juan debe UYU 100" },
+    });
+    expect(primero.claim(clave)).toBe(true);
+    primero.markAmbiguous(clave);
+    const reiniciado = new FileIdempotencyStore(path);
+    expect(reiniciado.claim(clave)).toBe(false);
+    const contenido = readFileSync(path, "utf8");
+    expect(contenido).not.toContain(actor);
+    expect(contenido).not.toContain(destino);
+    expect(contenido).not.toContain("Juan");
+  });
+});

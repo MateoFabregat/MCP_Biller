@@ -337,7 +337,7 @@ export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): 
     const check = ctx.getApprovalCycle().verify(a.confirmation_token, {
       endpoint: ENDPOINT_TOKEN,
       subject: payload,
-      actorIdentity: identidad,
+      actorIdentity: identidad ?? undefined,
     });
     if (!check.ok) {
       const extra =
@@ -349,20 +349,13 @@ export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): 
       return simpleErrorResult(`${check.mensaje}${extra}`, ctx);
     }
 
-    // Barrera 3: ¿ya se lo mandamos hoy?
-    const { idempotency } = ctx.getWriteContext();
-    const clave = claveRecordatorio(a.cliente_rut, destino, corrida.hoyIso);
-    if (!a.permitir_reenvio && idempotency.has(clave)) {
-      return simpleErrorResult(
-        `Ya se le mandó un recordatorio a este cliente hoy (${corrida.hoyIso}). No se envió otro: ` +
-          "dos mensajes de cobranza el mismo día empeoran la cobranza en vez de mejorarla. Si el " +
-          "usuario insiste, pasá permitir_reenvio=true.",
-        ctx,
-      );
-    }
-
-    const envio = await kapso.enviar(destino, recordatorio.mensaje);
-    idempotency.markUsed(clave);
+    // La reserva durable vive en el namespace Kapso, no en el store fiscal.
+    // `permitir_reenvio` cambia deliberadamente la operación para permitir un
+    // segundo envío explícito, pero un retry del mismo reenvío sigue bloqueado.
+    const envio = await kapso.enviar(destino, recordatorio.mensaje, {
+      actorIdentity: identidad ?? undefined,
+      operation: a.permitir_reenvio ? "recordatorio_reenvio" : "recordatorio",
+    });
 
     return jsonResult({
       ...base,

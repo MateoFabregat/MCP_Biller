@@ -135,7 +135,10 @@ export async function manejarRequestServerless(
 
   // Un server y un transporte NUEVOS por request. Es lo correcto en serverless
   // y además aísla por completo una request de otra.
-  const ctx = createToolContext(entorno);
+  const ctx = createToolContext(entorno, {
+    tenantId: auth.tenant?.id,
+    serverless: true,
+  });
   const server = crearServidorMcp(ctx, modo);
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless: ver el comentario de cabecera

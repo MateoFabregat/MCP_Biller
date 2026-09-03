@@ -35,10 +35,22 @@
 // propia barrera, no una fuga en la superficie de lectura.
 // =============================================================================
 
+import { createHash } from "node:crypto";
 import type { KapsoConfig } from "../config.js";
 import { logger } from "../logger.js";
 import { BillerError, redactSecrets } from "../utils/errors.js";
+import {
+  claveSalidaKapso,
+  crearKapsoIdempotencyStore,
+  KapsoIdempotencyError,
+  KapsoPersistenciaRequeridaError,
+  type KapsoIdempotencyStore,
+  type KapsoOutgoingOperation,
+} from "./idempotency.js";
+import type { IdempotencyStore } from "../write/idempotency.js";
 import { readTextBounded } from "../utils/boundedResponse.js";
+
+export { KapsoIdempotencyError, KapsoPersistenciaRequeridaError } from "./idempotency.js";
 
 /** Largo máximo de un mensaje de texto de WhatsApp. */
 export const MAX_MENSAJE_CHARS = 4096;
@@ -270,19 +282,77 @@ export interface KapsoClientOptions {
   uploadTimeoutMs?: number;
   /** Inyectable para tests. Default: fetch global. */
   fetchImpl?: typeof fetch;
+  /** Store propio de Kapso; nunca se comparte con el store fiscal. */
+  idempotencyStore?: KapsoIdempotencyStore;
+  /** Identidad opaca del actor que pidió la salida. Nunca se loguea en claro. */
+  actorIdentity?: string;
 }
+
+export interface KapsoSendOptions {
+  /** Identidad opaca del actor/remitente que originó la salida. */
+  actorIdentity?: string;
+  /** Clasificación explícita de la salida externa. */
+  operation?: KapsoOutgoingOperation;
+}
+
+interface ReservaKapso {
+  key: string;
+  store: IdempotencyStore;
+}
+
+// Los handlers construyen un cliente por invocación, pero comparten el mismo
+// objeto de configuración del tenant. Esta tabla conserva el store de memoria
+// entre esos clientes sin convertirlo en singleton global entre tenants.
+const storesPorConfig = new WeakMap<object, KapsoIdempotencyStore>();
 
 export class KapsoClient {
   private readonly config: KapsoConfig;
   private readonly timeoutMs: number;
   private readonly uploadTimeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly idempotency: KapsoIdempotencyStore;
+  private readonly actorIdentity: string;
 
   constructor(config: KapsoConfig, options: KapsoClientOptions = {}) {
     this.config = config;
     this.timeoutMs = options.timeoutMs ?? KAPSO_TIMEOUT_MS;
     this.uploadTimeoutMs = options.uploadTimeoutMs ?? KAPSO_UPLOAD_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.idempotency = options.idempotencyStore ?? this.storeParaConfig(config);
+    this.actorIdentity = options.actorIdentity ?? "";
+  }
+
+  private storeParaConfig(config: KapsoConfig): KapsoIdempotencyStore {
+    const existente = storesPorConfig.get(config as object);
+    if (existente !== undefined) return existente;
+    const nuevo = crearKapsoIdempotencyStore(config.idempotencyLogPath);
+    storesPorConfig.set(config as object, nuevo);
+    return nuevo;
+  }
+
+  private exigirPersistenciaCompatible(): void {
+    // El archivo de la función serverless es efímero aunque tenga una ruta:
+    // usarlo como si fuera durable reabre exactamente la ventana de duplicados
+    // que este store está encargado de cerrar.
+    if (this.config.serverless) throw new KapsoPersistenciaRequeridaError();
+  }
+
+  private reservar(
+    destinatario: string,
+    operation: KapsoOutgoingOperation,
+    payload: unknown,
+    options: KapsoSendOptions = {},
+  ): ReservaKapso {
+    this.exigirPersistenciaCompatible();
+    const key = claveSalidaKapso({
+      tenantId: this.config.tenantId ?? "_proceso",
+      actorIdentity: options.actorIdentity ?? this.actorIdentity,
+      destinatario,
+      operation,
+      payload,
+    });
+    if (!this.idempotency.claim(key)) throw new KapsoIdempotencyError();
+    return { key, store: this.idempotency };
   }
 
   /** true si `destinatario` (solo dígitos) está habilitado. */
@@ -379,29 +449,49 @@ export class KapsoClient {
     destinatario: string,
     mensaje: Record<string, unknown>,
     meta: Record<string, unknown>,
+    options: KapsoSendOptions = {},
+    reserva?: ReservaKapso,
   ): Promise<string | null> {
     const phoneNumberId = this.exigirDestinoValido(destinatario);
+    const propia =
+      reserva ??
+      this.reservar(
+        destinatario,
+        options.operation ?? (mensaje.type === "interactive" ? "interactivo" : "texto"),
+        mensaje,
+        options,
+      );
 
-    const raw = await this.ejecutar(
-      this.url("messages", phoneNumberId),
-      {
-        method: "POST", // check-readonly:allow POST a Kapso (WhatsApp), no a la API fiscal de Biller; capa de salida con allowlist
-        headers: {
-          "x-api-key": this.config.apiKey,
-          "content-type": "application/json",
+    let raw: string;
+    try {
+      raw = await this.ejecutar(
+        this.url("messages", phoneNumberId),
+        {
+          method: "POST", // check-readonly:allow POST a Kapso (WhatsApp), no a la API fiscal de Biller; capa de salida con allowlist
+          headers: {
+            "x-api-key": this.config.apiKey,
+            "content-type": "application/json",
+            "idempotency-key": propia.key,
+          },
+          body: JSON.stringify({
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
+            to: destinatario,
+            ...mensaje,
+          }),
         },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          recipient_type: "individual",
-          to: destinatario,
-          ...mensaje,
-        }),
-      },
-      this.timeoutMs,
-      "enviar el mensaje",
-    );
+        this.timeoutMs,
+        "enviar el mensaje",
+      );
+    } catch (err) {
+      // Un timeout/corte no demuestra que Kapso no haya entregado el mensaje.
+      // Se bloquea para siempre en vez de inducir un reintento duplicado.
+      propia.store.markAmbiguous(propia.key);
+      throw err;
+    }
 
     const messageId = KapsoClient.messageId(raw);
+    propia.store.markExecuted(propia.key);
 
     // Se loguea el HECHO del envío, no el contenido: el mensaje puede
     // incluir montos, RUTs y nombres de clientes.
@@ -410,18 +500,24 @@ export class KapsoClient {
       tipo: mensaje["type"],
       ...meta,
       message_id: messageId,
+      idempotency_key: propia.key,
     });
 
     return messageId;
   }
 
   /** Envía un mensaje de texto por WhatsApp. */
-  async enviar(destinatario: string, texto: string): Promise<EnvioResultado> {
+  async enviar(
+    destinatario: string,
+    texto: string,
+    options: KapsoSendOptions = {},
+  ): Promise<EnvioResultado> {
     const cuerpo = texto.slice(0, MAX_MENSAJE_CHARS);
     const messageId = await this.postMensaje(
       destinatario,
       { type: "text", text: { body: cuerpo } },
       { caracteres: cuerpo.length },
+      options,
     );
     return { message_id: messageId, destinatario, caracteres: cuerpo.length };
   }
@@ -434,12 +530,17 @@ export class KapsoClient {
    * falla igual sin destinatario válido. El orden real de salida lo sigue
    * fijando `postMensaje`.
    */
-  async enviarInteractivo(destinatario: string, interactivo: Interactivo): Promise<EnvioResultado> {
+  async enviarInteractivo(
+    destinatario: string,
+    interactivo: Interactivo,
+    options: KapsoSendOptions = {},
+  ): Promise<EnvioResultado> {
     const payload = construirPayloadInteractivo(interactivo);
     const messageId = await this.postMensaje(
       destinatario,
       { type: "interactive", interactive: payload },
       { interactivo: interactivo.tipo, caracteres: interactivo.cuerpo.length },
+      options,
     );
     return { message_id: messageId, destinatario, caracteres: interactivo.cuerpo.length };
   }
@@ -455,8 +556,20 @@ export class KapsoClient {
   async subirMedia(
     destinatario: string,
     archivo: { contenido: Uint8Array; filename: string; mimeType: string },
+    options: KapsoSendOptions = {},
   ): Promise<{ media_id: string; bytes: number }> {
     const phoneNumberId = this.exigirDestinoValido(destinatario);
+
+    return this.subirMediaConReserva(destinatario, phoneNumberId, archivo, options);
+  }
+
+  private async subirMediaConReserva(
+    destinatario: string,
+    phoneNumberId: string,
+    archivo: { contenido: Uint8Array; filename: string; mimeType: string },
+    options: KapsoSendOptions = {},
+    reserva?: ReservaKapso,
+  ): Promise<{ media_id: string; bytes: number }> {
 
     if (archivo.contenido.byteLength === 0) {
       throw new KapsoMensajeInvalidoError("El archivo a subir está vacío (0 bytes): no se envió nada.");
@@ -468,22 +581,36 @@ export class KapsoClient {
       );
     }
 
+    const payload = {
+      sha256: createHash("sha256").update(archivo.contenido).digest("hex"),
+      filename: archivo.filename,
+      mimeType: archivo.mimeType,
+      bytes: archivo.contenido.byteLength,
+    };
+    const propia = reserva ?? this.reservar(destinatario, options.operation ?? "media", payload, options);
+
     const form = new FormData();
     form.append("messaging_product", "whatsapp");
     form.append("type", archivo.mimeType);
     form.append("file", new Blob([archivo.contenido], { type: archivo.mimeType }), archivo.filename);
 
-    const raw = await this.ejecutar(
-      this.url("media", phoneNumberId),
-      {
-        method: "POST", // check-readonly:allow POST a Kapso (subida de media), no a la API fiscal de Biller
-        // Sin content-type explícito: fetch arma el boundary del multipart.
-        headers: { "x-api-key": this.config.apiKey },
-        body: form,
-      },
-      this.uploadTimeoutMs,
-      "subir el archivo",
-    );
+    let raw: string;
+    try {
+      raw = await this.ejecutar(
+        this.url("media", phoneNumberId),
+        {
+          method: "POST", // check-readonly:allow POST a Kapso (subida de media), no a la API fiscal de Biller
+          // Sin content-type explícito: fetch arma el boundary del multipart.
+          headers: { "x-api-key": this.config.apiKey, "idempotency-key": propia.key },
+          body: form,
+        },
+        this.uploadTimeoutMs,
+        "subir el archivo",
+      );
+    } catch (err) {
+      propia.store.markAmbiguous(propia.key);
+      throw err;
+    }
 
     let mediaId: string | null = null;
     try {
@@ -493,6 +620,7 @@ export class KapsoClient {
       mediaId = null;
     }
     if (mediaId === null) {
+      propia.store.markAmbiguous(propia.key);
       throw new KapsoError(
         "Kapso aceptó la subida pero no devolvió un 'id' de media. Sin ese id no se puede adjuntar " +
           "el archivo a un mensaje.",
@@ -503,7 +631,10 @@ export class KapsoClient {
       bytes: archivo.contenido.byteLength,
       mime: archivo.mimeType,
       media_id: mediaId,
+      idempotency_key: propia.key,
     });
+
+    propia.store.markExecuted(propia.key);
 
     return { media_id: mediaId, bytes: archivo.contenido.byteLength };
   }
@@ -515,30 +646,61 @@ export class KapsoClient {
   async enviarDocumento(
     destinatario: string,
     archivo: { contenido: Uint8Array; filename: string; mimeType: string; caption?: string },
+    options: KapsoSendOptions = {},
   ): Promise<EnvioDocumentoResultado> {
-    const { media_id, bytes } = await this.subirMedia(destinatario, archivo);
-
-    const messageId = await this.postMensaje(
+    const phoneNumberId = this.exigirDestinoValido(destinatario);
+    if (archivo.contenido.byteLength === 0) {
+      throw new KapsoMensajeInvalidoError("El archivo a subir está vacío (0 bytes): no se envió nada.");
+    }
+    if (archivo.contenido.byteLength > MAX_DOCUMENTO_BYTES) {
+      throw new KapsoMensajeInvalidoError(
+        `El archivo pesa ${archivo.contenido.byteLength} bytes y WhatsApp admite hasta ${MAX_DOCUMENTO_BYTES} ` +
+          "para documentos.",
+      );
+    }
+    const caption = archivo.caption?.slice(0, MAX_CAPTION_CHARS);
+    const reserva = this.reservar(
       destinatario,
+      options.operation ?? "documento",
       {
-        type: "document",
-        document: {
-          id: media_id,
-          filename: archivo.filename,
-          ...(archivo.caption !== undefined
-            ? { caption: archivo.caption.slice(0, MAX_CAPTION_CHARS) }
-            : {}),
-        },
+        sha256: createHash("sha256").update(archivo.contenido).digest("hex"),
+        filename: archivo.filename,
+        mimeType: archivo.mimeType,
+        bytes: archivo.contenido.byteLength,
+        ...(caption === undefined ? {} : { caption }),
       },
-      { bytes, media_id },
+      options,
     );
 
-    return {
-      message_id: messageId,
-      destinatario,
-      media_id,
-      filename: archivo.filename,
-      bytes,
-    };
+    try {
+      const { media_id, bytes } = await this.subirMediaConReserva(
+        destinatario,
+        phoneNumberId,
+        archivo,
+        options,
+        reserva,
+      );
+
+      const messageId = await this.postMensaje(
+        destinatario,
+        {
+          type: "document",
+          document: {
+            id: media_id,
+            filename: archivo.filename,
+            ...(caption !== undefined ? { caption } : {}),
+          },
+        },
+        { bytes, media_id },
+        options,
+        reserva,
+      );
+      reserva.store.markExecuted(reserva.key);
+
+      return { message_id: messageId, destinatario, media_id, filename: archivo.filename, bytes };
+    } catch (err) {
+      reserva.store.markAmbiguous(reserva.key);
+      throw err;
+    }
   }
 }

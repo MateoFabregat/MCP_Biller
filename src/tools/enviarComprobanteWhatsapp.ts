@@ -37,6 +37,7 @@ import { extractClienteNombre } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { normalizarTelefono } from "../config.js";
 import { KapsoClient } from "../kapso/client.js";
+import { remitenteSchema } from "../security/remitentes.js";
 import { advertenciaDeEstado } from "../services/estadoDgi.js";
 import { descargarPdf } from "../services/pdf.js";
 import {
@@ -144,6 +145,7 @@ const inputShape = {
     .enum(["generico", "ticket-generico"])
     .optional()
     .describe("Formato de la representación impresa. Si se omite, el configurado en Biller."),
+  remitente: remitenteSchema,
 };
 
 const inputSchema = z.object(inputShape);
@@ -270,7 +272,7 @@ export async function handleEnviarComprobanteWhatsapp(
       filename,
       mimeType: "application/pdf",
       caption,
-    });
+    }, { actorIdentity: a.remitente, operation: "documento" });
 
     return jsonResult({
       enviado: true,

@@ -245,7 +245,10 @@ async function adjuntarDobleConfirmacion(
           ambiente: config.environment,
           token: tokenDelBoton,
         });
-    const envio = await new KapsoClient(config.kapso).enviarInteractivo(destino, mensaje);
+    const envio = await new KapsoClient(config.kapso).enviarInteractivo(destino, mensaje, {
+      actorIdentity: p.remitente,
+      operation: "confirmacion_anulacion",
+    });
     const {
       confirmation_token: _tokenEjecutable,
       next_step: _pasoEjecutable,

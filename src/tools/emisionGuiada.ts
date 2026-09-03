@@ -1079,7 +1079,10 @@ async function responder(p: {
     const destino = normalizarTelefono(a.destinatario!);
     sufijo = destino.slice(-4);
     const kapso = new KapsoClient(config.kapso);
-    const resultado = await kapso.enviarInteractivo(destino, interactivo);
+    const resultado = await kapso.enviarInteractivo(destino, interactivo, {
+      actorIdentity: a.remitente,
+      operation: "paso_emision",
+    });
     realizado = true;
     messageId = resultado.message_id;
   }

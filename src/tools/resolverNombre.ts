@@ -60,6 +60,7 @@ import { normalizarTelefono } from "../config.js";
 import { traerPorId } from "../biller/traerDetalles.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { KapsoClient, type InteractivoBotones } from "../kapso/client.js";
+import { remitenteSchema } from "../security/remitentes.js";
 import { PERIODOS_SOPORTADOS } from "../services/periodo.js";
 import { resolverRango, traerVentana } from "../services/ventana.js";
 import {
@@ -135,6 +136,7 @@ const inputShape = {
     .string()
     .optional()
     .describe("Número de WhatsApp en formato internacional. Obligatorio si enviar=true."),
+  remitente: remitenteSchema,
 };
 
 const inputSchema = z.object(inputShape);
@@ -322,6 +324,7 @@ export async function handleResolverNombre(args: unknown, ctx: ToolContext): Pro
       const res = await kapso.enviarInteractivo(
         destino,
         construirBotonesCandidatos(resolucion.candidatos, a.tipo),
+        { actorIdentity: a.remitente, operation: "resolucion" },
       );
       realizado = true;
       messageId = res.message_id;

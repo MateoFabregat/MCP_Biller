@@ -160,7 +160,7 @@ export function getRegisteredToolNames(
  */
 export function createToolContext(
   env: Record<string, string | undefined> = process.env,
-  opciones: { tenantId?: string } = {},
+  opciones: { tenantId?: string; serverless?: boolean } = {},
 ): ToolContext {
   // Un registro por contexto = uno por empresa. Ver el comentario de `metricas`
   // en ToolContext: compartirlo entre tenants expondría el uso de una a la otra.
@@ -198,7 +198,17 @@ export function createToolContext(
   let cachedDetalles: CacheDetalles | undefined;
 
   const getConfig = (): BillerConfig => {
-    cachedConfig ??= loadConfig(env);
+    if (cachedConfig === undefined) {
+      cachedConfig = loadConfig(env);
+      if (opciones.serverless && cachedConfig.kapso !== undefined) {
+        // Vercel puede conservar /tmp solo dentro de una instancia; no es una
+        // garantía durable entre invocaciones. El cliente bloqueará el envío.
+        cachedConfig = {
+          ...cachedConfig,
+          kapso: { ...cachedConfig.kapso, serverless: true },
+        };
+      }
+    }
     return cachedConfig;
   };
   const getClient = (): BillerClient => {

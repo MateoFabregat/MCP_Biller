@@ -463,6 +463,7 @@ export async function handleEmitirComprobante(
     destinatario: a.confirmar_por_whatsapp,
     confirm: a.confirm,
     payload,
+    actorIdentity: a.remitente,
   });
 }
 
@@ -486,6 +487,7 @@ async function adjuntarConfirmacionWhatsapp(
     destinatario: string;
     confirm: boolean;
     payload: ComprobanteBody;
+    actorIdentity?: string;
   },
 ): Promise<ToolResult> {
   const structured = resultado.structuredContent;
@@ -539,6 +541,7 @@ async function adjuntarConfirmacionWhatsapp(
         ambiente: config.environment,
         token,
       }),
+      { actorIdentity: p.actorIdentity, operation: "confirmacion_emision" },
     );
 
     return jsonResult({

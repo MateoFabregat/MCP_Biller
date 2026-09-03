@@ -18,6 +18,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { normalizarTelefono } from "../config.js";
 import { KapsoClient } from "../kapso/client.js";
+import { remitenteSchema } from "../security/remitentes.js";
 import { generarAlertas } from "../services/alertas.js";
 import { compararPeriodos } from "../services/comparacion.js";
 import { calcularCuentaCorriente } from "../services/cuentaCorriente.js";
@@ -54,8 +55,9 @@ const inputShape = {
     .optional()
     .describe(
       "Número de WhatsApp en formato internacional (ej. 59899123456). Obligatorio si enviar=true. " +
-        "Debe estar en KAPSO_DESTINATARIOS_PERMITIDOS.",
+      "Debe estar en KAPSO_DESTINATARIOS_PERMITIDOS.",
     ),
+  remitente: remitenteSchema,
   periodo_facturacion: z
     .string()
     .optional()
@@ -245,7 +247,10 @@ export async function handleReporteDiario(args: unknown, ctx: ToolContext): Prom
       const destino = normalizarTelefono(a.destinatario!);
       sufijo = destino.slice(-4);
       const kapso = new KapsoClient(config.kapso);
-      const resultado = await kapso.enviar(destino, digest.texto);
+      const resultado = await kapso.enviar(destino, digest.texto, {
+        actorIdentity: a.remitente,
+        operation: "reporte_diario",
+      });
       realizado = true;
       messageId = resultado.message_id;
       motivo = null;

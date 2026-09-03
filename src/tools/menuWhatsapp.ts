@@ -442,10 +442,16 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
       // las dos o tres cosas que su mensaje puede significar, como botones.
       const resultado =
         candidatas.length > 1
-          ? await kapso.enviarInteractivo(destino, construirDesambiguacion(candidatas))
+          ? await kapso.enviarInteractivo(destino, construirDesambiguacion(candidatas), {
+              actorIdentity: a.remitente,
+              operation: "menu",
+            })
           : a.formato === "texto"
-            ? await kapso.enviar(destino, texto)
-            : await kapso.enviarInteractivo(destino, construirMenuInteractivo(opcionesMenu));
+            ? await kapso.enviar(destino, texto, { actorIdentity: a.remitente, operation: "menu" })
+            : await kapso.enviarInteractivo(destino, construirMenuInteractivo(opcionesMenu), {
+                actorIdentity: a.remitente,
+                operation: "menu",
+              });
       realizado = true;
       formatoUsado = candidatas.length > 1 ? "desambiguacion" : a.formato;
       messageId = resultado.message_id;
