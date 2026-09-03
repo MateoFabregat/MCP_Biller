@@ -387,10 +387,33 @@ export class KapsoClient {
     // El tramo anterior solo se consulta: un reintento que cruzó el borde de la
     // ventana no puede estrenar reserva y salir de nuevo.
     if (claves.previa !== undefined && this.idempotency.has(claves.previa)) {
-      throw new KapsoIdempotencyError();
+      throw this.bloqueada(operation, destinatario, "tramo_anterior");
     }
-    if (!this.idempotency.claim(claves.actual)) throw new KapsoIdempotencyError();
+    if (!this.idempotency.claim(claves.actual)) {
+      throw this.bloqueada(operation, destinatario, "reserva_vigente");
+    }
     return { key: claves.actual, store: this.idempotency };
+  }
+
+  /**
+   * Un mensaje que NO salió por la reserva deja rastro.
+   *
+   * Sin esto, la única forma de enterarse de que la ventana está mal calibrada
+   * —que es como se rompió esta protección la primera vez, bloqueando para
+   * siempre— es que alguien reporte que el bot no le contestó. Se loguea el
+   * hecho y la operación, nunca el contenido ni el número entero.
+   */
+  private bloqueada(
+    operation: KapsoOutgoingOperation,
+    destinatario: string,
+    motivo: "reserva_vigente" | "tramo_anterior",
+  ): KapsoIdempotencyError {
+    logger.warn("kapso.salida.bloqueada_por_reserva", {
+      operacion: operation,
+      destinatario_sufijo: destinatario.slice(-4),
+      motivo,
+    });
+    return new KapsoIdempotencyError();
   }
 
   /** true si `destinatario` (solo dígitos) está habilitado. */

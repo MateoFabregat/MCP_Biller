@@ -200,3 +200,28 @@ describe("una salida idéntica no queda bloqueada para siempre", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("una salida bloqueada deja rastro", () => {
+  it("loguea el hecho y la operación, sin el contenido ni el número entero", async () => {
+    const { logger } = await import("../src/logger.js");
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      const c = new KapsoClient(config(), {
+        fetchImpl: (async () => ok()) as unknown as typeof fetch,
+        ahora: () => 1_800_000_000_000,
+      });
+      const opts: KapsoSendOptions = { actorIdentity: actor, operation: "reporte_diario" };
+      await c.enviar(destino, "Hoy facturaste $12.500", opts);
+      await expect(c.enviar(destino, "Hoy facturaste $12.500", opts)).rejects.toBeInstanceOf(
+        KapsoIdempotencyError,
+      );
+      const [evento, meta] = warn.mock.calls.at(-1)!;
+      expect(evento).toBe("kapso.salida.bloqueada_por_reserva");
+      expect(meta).toMatchObject({ operacion: "reporte_diario", motivo: "reserva_vigente" });
+      expect(JSON.stringify(meta)).not.toContain(destino);
+      expect(JSON.stringify(meta)).not.toContain("12.500");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
