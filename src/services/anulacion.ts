@@ -397,14 +397,18 @@ export function lineasNota(c: ComprobanteAAnular, razon: string): LineasNota {
     (desglose.tasa_basica === null && desglose.tasa_minima === null && desglose.tasa_otra === null);
 
   const advertencias: string[] = [];
-  // Las retenciones del original NO se revierten con esta nota: no se copian.
-  // Se dice, porque una factura con retención de IRPF "anulada" así deja la
-  // retención en pie y nadie lo ve.
+  // No se ofrece un cuerpo incompleto: una retención que queda viva después de
+  // "anular" el comprobante es un error fiscal silencioso. Sin contrato
+  // documentado para invertir esta estructura variable, se deriva a revisión.
   if (c.retenciones_percepciones !== undefined && c.retenciones_percepciones !== null) {
-    advertencias.push(
-      "El comprobante original tiene retenciones/percepciones y esta nota NO las revierte: el " +
-        "cuerpo sugerido no las copia. Revisá con tu contador qué corresponde para esa parte.",
-    );
+    return {
+      items: null,
+      advertencias: [
+        "El comprobante original tiene retenciones/percepciones. No se genera un cuerpo sugerido " +
+          "porque copiarlo sin una regla documentada podría dejar la retención sin revertir o " +
+          "duplicarla. Armá la nota con el detalle original y validala con tu contador.",
+      ],
+    };
   }
 
   // --- IVA a una tasa que no conocemos: se aborta ANTES de cualquier camino --

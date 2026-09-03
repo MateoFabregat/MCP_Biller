@@ -368,9 +368,10 @@ describe("derivar la tasa no puede acreditar de más (los bordes)", () => {
     expect(p.advertencias.join(" ")).toMatch(/modalidad_venta/);
   });
 
-  it("avisa que las retenciones del original NO se revierten", () => {
+  it("no sugiere un cuerpo fiscal incompleto si el original tiene retenciones", () => {
     const p = plan({ retenciones_percepciones: [{ codigo: "2183", valor: 100 }] });
     expect(p.advertencias.join(" ")).toMatch(/retenciones/i);
+    expect(p.cuerpo_sugerido).toBeNull();
   });
 
   it("cuando no hay cuerpo, los pasos no dicen que lo copies", () => {
