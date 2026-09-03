@@ -60,12 +60,12 @@ describe("clasificarEstado", () => {
 describe("estaAceptado (el criterio de todo total de plata)", () => {
   // Una fila por clase de estado: es la tabla que decide si el número del
   // asistente coincide con el del panel de Biller.
-  it("solo cuenta 'Aceptado DGI'", () => {
+  it("cuenta aceptados y los que válidamente van por reporte diario", () => {
     expect(estaAceptado("Aceptado DGI")).toBe(true);
     expect(estaAceptado("Rechazado DGI")).toBe(false);
     expect(estaAceptado("Sobre Rechazado DGI")).toBe(false);
     expect(estaAceptado("Pendiente DGI")).toBe(false);
-    expect(estaAceptado("Envío no corresponde")).toBe(false);
+    expect(estaAceptado("Envío no corresponde")).toBe(true);
     expect(estaAceptado(null)).toBe(false);
     expect(estaAceptado("")).toBe(false);
     expect(estaAceptado("Estado Inventado XYZ")).toBe(false);
@@ -84,15 +84,8 @@ describe("estaAceptado (el criterio de todo total de plata)", () => {
     expect(estaAceptado("  aceptado dgi  ")).toBe(true);
   });
 
-  // "Envío no corresponde" es el hallazgo abierto: `esVentaValida` sostiene que
-  // debería contar (es una venta real; que no viaje sola a DGI es el canal de
-  // reporte, no la validez del documento) y ningún total le hace caso. Este
-  // test PINEA la diferencia: el día que se decida cambiarlo, falla acá y se
-  // ve, en vez de moverse de arriba de otro cambio.
-  it("difiere de esVentaValida solo en 'Envío no corresponde'", () => {
-    expect(esVentaValida("Envío no corresponde")).toBe(true);
-    expect(estaAceptado("Envío no corresponde")).toBe(false);
-    for (const estado of ["Aceptado DGI", "Rechazado DGI", "Pendiente DGI", null, ""]) {
+  it("coincide con esVentaValida para todos los estados", () => {
+    for (const estado of ["Aceptado DGI", "Envío no corresponde", "Rechazado DGI", "Pendiente DGI", null, ""]) {
       expect(esVentaValida(estado)).toBe(estaAceptado(estado));
     }
   });
@@ -157,9 +150,9 @@ describe("el mismo total para los mismos comprobantes", () => {
       0,
     );
 
-    expect(resumen.totales_por_moneda.UYU!.total).toBe(1000);
-    expect(totalClientes).toBe(1000);
-    expect(totalSucursales).toBe(1000);
+    expect(resumen.totales_por_moneda.UYU!.total).toBe(2000);
+    expect(totalClientes).toBe(2000);
+    expect(totalSucursales).toBe(2000);
     // Y el total de referencia sin filtro de estado sigue disponible.
     expect(resumen.totales_por_moneda_todos_los_estados.UYU!.total).toBe(7000);
   });
@@ -172,12 +165,12 @@ describe("el mismo total para los mismos comprobantes", () => {
       { desde: "2026-05-01", hasta: "2026-05-31" },
       { hoy: new Date("2026-07-05T12:00:00Z") },
     );
-    expect(r.actual.total_por_moneda.UYU).toBe(1000);
+    expect(r.actual.total_por_moneda.UYU).toBe(2000);
   });
 
   it("la posición de IVA usa el mismo criterio", () => {
     const r = calcularPosicionIva(LISTA, [], {});
-    expect(r.por_moneda[0]!.debito.tasa_basica).toBe(220);
+    expect(r.por_moneda[0]!.debito.tasa_basica).toBe(440);
   });
 });
 
@@ -405,7 +398,7 @@ describe("las alertas de rechazo distinguen estado AUSENTE de estado IRRECONOCIB
     expect(r.conteo_total).toBe(0);
   });
 
-  it("los estados conocidos que no son aceptación siguen alertando", () => {
+  it("los rechazos y pendientes alertan; el reporte diario válido no", () => {
     const r = detectarRechazos(
       normalizeComprobantesEmitidos([
         { id: 1, tipo_comprobante: 111, moneda: "UYU", total: 100, estado: "Rechazado DGI" },
@@ -413,7 +406,7 @@ describe("las alertas de rechazo distinguen estado AUSENTE de estado IRRECONOCIB
         { id: 3, tipo_comprobante: 111, moneda: "UYU", total: 100, estado: "Envío no corresponde" },
       ]),
     );
-    expect(r.conteo_total).toBe(3);
+    expect(r.conteo_total).toBe(2);
     expect(r.por_estado.find((e) => e.estado === "Rechazado DGI")!.severidad).toBe("critica");
   });
 });

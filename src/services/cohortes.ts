@@ -35,7 +35,7 @@ import { round2 } from "../biller/coerce.js";
 import { extractClienteNombre, extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./estadoDgi.js";
+import { clasificarEstado, estaAceptado } from "./estadoDgi.js";
 import { monedaDeOrden } from "./monedaOrden.js";
 
 /** Actividad de una cohorte en un mes concreto. */
@@ -172,7 +172,7 @@ export function calcularCohortes(
     // entrar al comprobante al cálculo. Un documento sin total o moneda no es
     // una venta relevante cuyo estado falte: ya quedó afuera por otro motivo.
     if (claseEstado === "desconocido") sinEstado += 1;
-    if (soloAceptados && claseEstado !== "aceptado") continue;
+    if (soloAceptados && !estaAceptado(c.estado)) continue;
     analizados += 1;
 
     const rut = extractClienteRut(c.cliente);

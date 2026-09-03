@@ -12,7 +12,7 @@ import { round2 } from "../biller/coerce.js";
 import { extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido, ComprobanteRecibido } from "../biller/types.js";
 import { classifyCfe, type CfeClassification } from "./cfeTypes.js";
-import { clasificarEstado } from "./estadoDgi.js";
+import { clasificarEstado, estaAceptado } from "./estadoDgi.js";
 
 // =============================================================================
 // LA REGLA DE QUÉ SUMA EN UN TOTAL DE FACTURACIÓN
@@ -72,7 +72,7 @@ export function clasificarParaFacturacion(
 ): CfeClassification | null {
   const clasif = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
   if (!clasif.suma_en_resumen) return null;
-  if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") return null;
+  if (soloAceptados && !estaAceptado(c.estado)) return null;
   return clasif;
 }
 

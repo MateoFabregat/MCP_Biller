@@ -25,7 +25,7 @@
 import { INDICADORES_FACTURACION } from "../biller/cfeSchema.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./estadoDgi.js";
+import { estaAceptado } from "./estadoDgi.js";
 import type { EstadoEmision, ItemEnCurso, PerfilCasa } from "../kapso/emision.js";
 
 /** Qué se pudo copiar del comprobante anterior, para contárselo al agente. */
@@ -69,7 +69,7 @@ export function esVentaAceptada(c: ComprobanteEmitido): boolean {
   if (classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia).categoria !== "venta") {
     return false;
   }
-  return clasificarEstado(c.estado) === "aceptado";
+  return estaAceptado(c.estado);
 }
 
 /**

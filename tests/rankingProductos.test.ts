@@ -425,8 +425,9 @@ describe("regla compartida de facturación (comprobanteFilters)", () => {
     }
   });
 
-  it("con solo_aceptados solo pasa 'Aceptado DGI'; sin él pasan todos los estados", () => {
-    const noAceptados = ["Rechazado DGI", "Sobre Rechazado DGI", "Pendiente DGI", "Envío no corresponde", null, ""];
+  it("con solo_aceptados pasan los CFE válidos; sin él pasan todos los estados", () => {
+    expect(clasificarParaFacturacion(uno({ estado: "Envío no corresponde" }), true)).not.toBeNull();
+    const noAceptados = ["Rechazado DGI", "Sobre Rechazado DGI", "Pendiente DGI", null, ""];
     for (const estado of noAceptados) {
       expect(clasificarParaFacturacion(uno({ estado }), true)).toBeNull();
       expect(clasificarParaFacturacion(uno({ estado }), false)).not.toBeNull();

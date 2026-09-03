@@ -177,7 +177,7 @@ export function detectarRechazos(
     // que volver a separarlas acá a mano para no perder esa alerta: este cambio
     // unificó el criterio de los TOTALES, no el de las alertas.
     const clase = clasificarEstado(c.estado);
-    if (clase === "aceptado") continue;
+    if (clase === "aceptado" || clase === "no_corresponde_enviar") continue;
     if (clase === "desconocido" && (c.estado === null || c.estado.trim() === "")) continue;
     // No hace falta default: los dos filtros de arriba ya sacaron el null y el
     // vacío, así que acá siempre hay texto. Se trimea para que "Rechazado DGI"

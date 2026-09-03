@@ -35,7 +35,7 @@ import { round2 } from "../biller/coerce.js";
 import { extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./estadoDgi.js";
+import { clasificarEstado, estaAceptado } from "./estadoDgi.js";
 import { monedaDeOrden } from "./monedaOrden.js";
 
 /** Clave del grupo que junta los comprobantes sin sucursal declarada. */
@@ -136,7 +136,7 @@ function acumular(
 
     const estado = clasificarEstado(c.estado);
     if (estado === "desconocido") sinEstado += 1;
-    if (soloAceptados && estado !== "aceptado") continue;
+    if (soloAceptados && !estaAceptado(c.estado)) continue;
 
     if (c.total === null || c.moneda === null) continue;
     analizados += 1;

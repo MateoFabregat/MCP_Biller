@@ -368,8 +368,8 @@ export function resumirFacturacion(
     bucketTodos.total = round2(bucketTodos.total + aporte);
     bucketTodos.comprobantes += 1;
 
-    // Criterio de estado para el total principal: SOLO "Aceptado DGI", igual
-    // que en rankings, comparación, cohortes y posición IVA. El estado
+    // Criterio de estado para el total principal: CFE fiscalmente válido
+    // (aceptado individualmente o informado por reporte diario). El estado
     // desconocido tampoco cuenta.
     //
     // Antes acá se excluía únicamente lo que se sabía rechazado, con el
@@ -388,7 +388,7 @@ export function resumirFacturacion(
       const bruto = aporte >= 0 ? montoSinEstadoPositivo : montoSinEstadoNegativo;
       bruto[moneda] = round2((bruto[moneda] ?? 0) + aporte);
     }
-    if (soloAceptados && estadoClasificado !== "aceptado") {
+    if (soloAceptados && !estaAceptado(c.estado)) {
       excluidosPorEstado += 1;
       conteo_excluidos += 1;
       continue;

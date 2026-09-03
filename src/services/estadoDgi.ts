@@ -69,7 +69,8 @@ export function clasificarEstado(estado: string | null | undefined): ClaseEstado
 
 /**
  * EL criterio de estado de todo total de plata del proyecto (`solo_aceptados`):
- * cuenta únicamente "Aceptado DGI".
+ * cuenta los CFE fiscalmente válidos, tanto "Aceptado DGI" como "Envío no
+ * corresponde". Este último se informa por reporte diario y no es un rechazo.
  *
  * Por qué tan estricto, incluido el estado DESCONOCIDO (`estado: null`, vacío,
  * o un texto que no reconocemos): el valor del asistente depende de que sus
@@ -108,7 +109,8 @@ export function clasificarEstado(estado: string | null | undefined): ClaseEstado
  * nota.
  */
 export function estaAceptado(estado: string | null | undefined): boolean {
-  return clasificarEstado(estado) === "aceptado";
+  const clase = clasificarEstado(estado);
+  return clase === "aceptado" || clase === "no_corresponde_enviar";
 }
 
 /**
@@ -118,16 +120,11 @@ export function estaAceptado(estado: string | null | undefined): boolean {
  * Excluirla porque no fue enviada individualmente a DGI es confundir el canal
  * de reporte con la validez del documento.
  *
- * OJO: esto NO es lo que usan los totales. Los totales usan `estaAceptado`, que
- * compara contra "Aceptado DGI" a secas y por lo tanto DEJA AFUERA el "Envío no
- * corresponde". La discrepancia es conocida y está sin resolver: arreglarla
- * cambia el criterio fiscal de todos los totales del proyecto y merece su
- * propio commit con su propio diferencial, no venir de arriba de otro cambio.
- * Ver el aviso de `advertenciaDeEstado`.
+ * Se conserva como nombre semántico para callers que preguntan por validez;
+ * comparte deliberadamente el mismo criterio que `estaAceptado`.
  */
 export function esVentaValida(estado: string | null | undefined): boolean {
-  const clase = clasificarEstado(estado);
-  return clase === "aceptado" || clase === "no_corresponde_enviar";
+  return estaAceptado(estado);
 }
 
 /**

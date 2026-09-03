@@ -29,7 +29,7 @@
 import { round2 } from "../biller/coerce.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./estadoDgi.js";
+import { clasificarEstado, estaAceptado } from "./estadoDgi.js";
 import type { RangoFechas } from "./periodo.js";
 import { hoyComoDateUy, hoyIsoUy } from "./fechaUy.js";
 
@@ -153,7 +153,7 @@ function totalizar(
     // elegibilidad que el total. Si ya faltaba total o moneda, no corresponde
     // atribuir su exclusión a la ausencia de estado.
     if (clase === "desconocido") sinEstado += 1;
-    if (soloAceptados && clase !== "aceptado") continue;
+    if (soloAceptados && !estaAceptado(c.estado)) continue;
     totales[c.moneda] = round2((totales[c.moneda] ?? 0) + c.total * clasificacion.signo);
     conteo += 1;
   }
@@ -186,7 +186,7 @@ function calcularExposicion(
   for (const c of comprobantes) {
     const clasificacion = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
     if (!clasificacion.suma_en_resumen) continue;
-    if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") continue;
+    if (soloAceptados && !estaAceptado(c.estado)) continue;
     if (c.total === null || c.moneda === null || c.moneda === MONEDA_LOCAL) continue;
 
     const actual = porMoneda.get(c.moneda) ?? { total: 0, equivalente: 0, conteo: 0, sinTasa: 0 };
@@ -297,7 +297,7 @@ function proyectarPorPatron(
   for (const c of comprobantes) {
     const clasificacion = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
     if (!clasificacion.suma_en_resumen) continue;
-    if (soloAceptados && clasificarEstado(c.estado) !== "aceptado") continue;
+    if (soloAceptados && !estaAceptado(c.estado)) continue;
     if (c.total === null || c.moneda !== moneda) continue;
     const dia = c.fecha_emision?.slice(0, 10);
     if (dia === undefined || dia === "") continue;

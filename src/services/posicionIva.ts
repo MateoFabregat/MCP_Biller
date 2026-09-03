@@ -28,7 +28,7 @@
 import { round2 } from "../biller/coerce.js";
 import type { ComprobanteEmitido, ComprobanteRecibido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
-import { clasificarEstado } from "./estadoDgi.js";
+import { clasificarEstado, estaAceptado } from "./estadoDgi.js";
 
 export interface IvaPorTasa {
   tasa_minima: number;
@@ -131,7 +131,7 @@ export function calcularPosicionIva(
     if (!clasificacion.suma_en_resumen) continue;
     const claseEstado = clasificarEstado(c.estado);
     if (claseEstado === "desconocido") emitidosSinEstado += 1;
-    if (soloAceptados && claseEstado !== "aceptado") continue;
+    if (soloAceptados && !estaAceptado(c.estado)) continue;
     if (c.moneda === null) continue;
 
     const min = c.iva.tasa_minima ?? 0;

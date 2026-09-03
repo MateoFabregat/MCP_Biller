@@ -106,6 +106,11 @@ describe("estados DGI", () => {
     expect(r.por_moneda[0]!.debito.total).toBe(220);
   });
 
+  it("'Envío no corresponde' genera débito porque no es un rechazo", () => {
+    const r = calcular([emitido({ estado: "Envío no corresponde", tot_iva_tasa_bas: 220 })]);
+    expect(r.por_moneda[0]!.debito.total).toBe(220);
+  });
+
   it("un recibido rechazado no da crédito fiscal", () => {
     const r = calcular(
       [emitido()],
