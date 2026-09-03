@@ -41,6 +41,7 @@ describe("probe contractual de POST e idempotencia", () => {
   it("repite exactamente body e idempotency key y confirma una sola coincidencia", async () => {
     const fetchImpl = vi
       .fn()
+      .mockResolvedValueOnce(new Response("[]", { status: 200 }))
       .mockResolvedValueOnce(new Response("{}", { status: 201 }))
       .mockResolvedValueOnce(new Response("{}", { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify([
@@ -52,13 +53,42 @@ describe("probe contractual de POST e idempotencia", () => {
       statusSegundo: 200,
       coincidencias: 1,
     });
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
-    const primera = fetchImpl.mock.calls[0]!;
-    const segunda = fetchImpl.mock.calls[1]!;
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    const primera = fetchImpl.mock.calls[1]!;
+    const segunda = fetchImpl.mock.calls[2]!;
     expect(primera[0]).toBe("https://test.biller.uy/v2/comprobantes/crear");
     expect(segunda[0]).toBe(primera[0]);
     expect(segunda[1]?.body).toBe(primera[1]?.body);
     expect(segunda[1]?.headers["Idempotency-Key"]).toBe(primera[1]?.headers["Idempotency-Key"]);
-    expect(String(fetchImpl.mock.calls[2]![0])).toContain("numero_interno=probe-20260903");
+    expect(String(fetchImpl.mock.calls[0]![0])).toContain("numero_interno=probe-20260903");
+    expect(String(fetchImpl.mock.calls[3]![0])).toContain("numero_interno=probe-20260903");
+    for (const llamada of fetchImpl.mock.calls) expect(llamada[1]?.redirect).toBe("manual");
+  });
+
+  it("no declara idempotencia si el identificador ya existía o el segundo POST falla", async () => {
+    const yaExistia = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify([{ numero_interno: "probe-20260903" }]), { status: 200 }),
+    );
+    await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl: yaExistia, archivos: archivoPrivado }))
+      .rejects.toThrow(/ya existe/);
+    expect(yaExistia).toHaveBeenCalledTimes(1);
+
+    const segundoFalla = vi.fn()
+      .mockResolvedValueOnce(new Response("[]", { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 201 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 409 }));
+    await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl: segundoFalla, archivos: archivoPrivado }))
+      .rejects.toThrow(/segundo POST/);
+    expect(segundoFalla).toHaveBeenCalledTimes(3);
+  });
+
+  it("rechaza redirects sin seguirlos", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(null, { status: 307, headers: { location: "https://otro.example/probe" } }),
+    );
+    await expect(ejecutarProbePost({ env: BASE_ENV, fetchImpl, archivos: archivoPrivado }))
+      .rejects.toThrow(/preflight/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]![1]?.redirect).toBe("manual");
   });
 });

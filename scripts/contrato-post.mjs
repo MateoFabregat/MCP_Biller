@@ -75,9 +75,26 @@ export async function ejecutarProbePost({
     throw new Error("El numero_interno del payload debe coincidir con BILLER_CONTRATO_POST_EXECUTION_ID.");
   }
 
+  const consulta = new URL(`${baseUrl}/v2/comprobantes/obtener`);
+  consulta.searchParams.set("numero_interno", executionId);
+  const getOptions = {
+    method: "GET",
+    redirect: "manual",
+    headers: { Authorization: `Bearer ${token}`, accept: "application/json" },
+  };
+  const preflight = await fetchImpl(consulta.toString(), getOptions);
+  if (!preflight.ok) throw new Error(`El preflight GET falló con HTTP ${preflight.status}.`);
+  const previos = extraerLista(await jsonSeguro(preflight)).filter(
+    (comprobante) => comprobante?.numero_interno === executionId,
+  ).length;
+  if (previos !== 0) {
+    throw new Error("El numero_interno del probe ya existe; elegí un identificador nuevo.");
+  }
+
   const body = JSON.stringify(payload);
   const postOptions = {
     method: "POST",
+    redirect: "manual",
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
@@ -91,13 +108,11 @@ export async function ejecutarProbePost({
     throw new Error(`El primer POST falló con HTTP ${primero.status}; no se reintentó.`);
   }
   const segundo = await fetchImpl(endpoint, postOptions);
+  if (!segundo.ok) {
+    throw new Error(`El segundo POST falló con HTTP ${segundo.status}; no se declara idempotencia verificada.`);
+  }
 
-  const consulta = new URL(`${baseUrl}/v2/comprobantes/obtener`);
-  consulta.searchParams.set("numero_interno", executionId);
-  const evidencia = await fetchImpl(consulta.toString(), {
-    method: "GET",
-    headers: { Authorization: `Bearer ${token}`, accept: "application/json" },
-  });
+  const evidencia = await fetchImpl(consulta.toString(), getOptions);
   if (!evidencia.ok) throw new Error(`No se pudo verificar el efecto por GET: HTTP ${evidencia.status}.`);
 
   const datos = await jsonSeguro(evidencia);
@@ -129,4 +144,3 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
     process.exitCode = 1;
   });
 }
-

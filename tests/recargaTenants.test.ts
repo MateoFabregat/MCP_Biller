@@ -168,18 +168,38 @@ describe("invalidación selectiva de contextos", () => {
 });
 
 describe("invalidación de sesiones por tenant", () => {
+  it("una sesión que termina de inicializar después de la revocación no puede registrarse", () => {
+    const sesiones = new RegistroSesiones();
+    const generacionVieja = sesiones.generacionTenant("panaderia");
+    const transporte = { cerrado: false, close: () => {
+      transporte.cerrado = true;
+      return Promise.resolve();
+    } };
+
+    sesiones.cerrarTenant("panaderia");
+
+    expect(sesiones.registrarSiVigente(
+      "panaderia:sesion-tardia",
+      "panaderia",
+      generacionVieja,
+      transporte as never,
+    )).toBe(false);
+    expect(transporte.cerrado).toBe(true);
+    expect(sesiones.obtener("panaderia:sesion-tardia")).toBeUndefined();
+  });
+
   it("el handle cierra los transportes afectados y preserva los demás", async () => {
     const sesiones = new RegistroSesiones();
-    const falso = () => {
+    const crearTransporteFalso = () => {
       const transporte = { cerrado: false, close: () => {
         transporte.cerrado = true;
         return Promise.resolve();
       } };
       return transporte;
     };
-    const a1 = falso();
-    const a2 = falso();
-    const b1 = falso();
+    const a1 = crearTransporteFalso();
+    const a2 = crearTransporteFalso();
+    const b1 = crearTransporteFalso();
     sesiones.registrar("panaderia:1", a1 as never);
     sesiones.registrar("panaderia:2", a2 as never);
     sesiones.registrar("ferreteria:1", b1 as never);

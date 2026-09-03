@@ -460,6 +460,7 @@ interface SesionViva {
  */
 export class RegistroSesiones {
   private readonly sesiones = new Map<string, SesionViva>();
+  private readonly generaciones = new Map<string, number>();
   private readonly ahora: () => number;
   private readonly ttlMs: number;
   private readonly techo: number;
@@ -521,6 +522,29 @@ export class RegistroSesiones {
     this.aplicarTecho();
   }
 
+  /** Generación vigente para impedir que una inicialización vieja reviva tras una recarga. */
+  generacionTenant(tenantId: string): number {
+    return this.generaciones.get(tenantId) ?? 0;
+  }
+
+  /**
+   * Registra solamente si el tenant no fue revocado desde que empezó el
+   * handshake. Si cambió la generación, cierra el transporte tardío.
+   */
+  registrarSiVigente(
+    clave: string,
+    tenantId: string,
+    generacion: number,
+    transporte: StreamableHTTPServerTransport,
+  ): boolean {
+    if (this.generacionTenant(tenantId) !== generacion) {
+      void Promise.resolve(transporte.close()).catch(() => undefined);
+      return false;
+    }
+    this.registrar(clave, transporte);
+    return true;
+  }
+
   /** Cierre limpio avisado por el propio transporte (`onsessionclosed`). */
   quitar(clave: string): void {
     this.sesiones.delete(clave); // check-readonly:allow Map.delete de una sesión en memoria, no es HTTP
@@ -541,6 +565,7 @@ export class RegistroSesiones {
    * justamente para lo que ese prefijo existe.
    */
   cerrarTenant(tenantId: string): number {
+    this.generaciones.set(tenantId, this.generacionTenant(tenantId) + 1);
     const prefijo = `${tenantId}:`;
     let cerradas = 0;
     for (const [clave, sesion] of this.sesiones) {
@@ -706,6 +731,8 @@ export async function iniciarTransporteHttp(
         // tengas". Esto último cuesta una interpolación.
         const sessionKey =
           sessionIdRaw === undefined ? undefined : `${auth.tenant?.id ?? "-"}:${sessionIdRaw}`;
+        const tenantIdSesion = auth.tenant?.id ?? "-";
+        const generacionSesion = sesiones.generacionTenant(tenantIdSesion);
 
         // Barrido perezoso: se paga en el tráfico, no en un timer que además
         // habría que `unref()` para no impedir que el proceso termine.
@@ -713,11 +740,25 @@ export async function iniciarTransporteHttp(
 
         let transport = sessionKey !== undefined ? sesiones.obtener(sessionKey) : undefined;
 
+        if (sessionKey !== undefined && transport === undefined) {
+          responderErrorRpc(res, 404, "Sesión MCP no encontrada.");
+          return;
+        }
+
         if (transport === undefined) {
           transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (id) => {
-              sesiones.registrar(`${auth.tenant?.id ?? "-"}:${id}`, transport!);
+              const registrada = sesiones.registrarSiVigente(
+                `${tenantIdSesion}:${id}`,
+                tenantIdSesion,
+                generacionSesion,
+                transport!,
+              );
+              if (!registrada) {
+                logger.warn("http.sesion.revocada_durante_inicio", { empresa: tenantIdSesion });
+                return;
+              }
               logger.info("http.sesion.abierta", { sesiones_activas: sesiones.size });
             },
             onsessionclosed: (id) => {
