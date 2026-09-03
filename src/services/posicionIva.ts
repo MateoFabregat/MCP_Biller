@@ -162,9 +162,16 @@ export function calcularPosicionIva(
       recibidosSinMoneda += 1;
       continue;
     }
+    const esNotaCredito = classifyCfe(r.tipo).signo === -1;
+    // Algunas integraciones entregan totales absolutos y otras ya firman la
+    // NC. `-abs` evita tanto sumarla como invertirla dos veces.
+    const iva = esNotaCredito ? -Math.abs(r.total_iva ?? 0) : (r.total_iva ?? 0);
+    const retenido = esNotaCredito
+      ? -Math.abs(r.total_retenido ?? 0)
+      : (r.total_retenido ?? 0);
     const m = obtener(moneda);
-    m.credito = round2(m.credito + (r.total_iva ?? 0));
-    m.retenciones_sufridas = round2(m.retenciones_sufridas + (r.total_retenido ?? 0));
+    m.credito = round2(m.credito + iva);
+    m.retenciones_sufridas = round2(m.retenciones_sufridas + retenido);
     m.comprobantes_recibidos += 1;
     recibidosAnalizados += 1;
   }

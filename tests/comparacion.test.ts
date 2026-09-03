@@ -277,6 +277,25 @@ describe("ranking de proveedores", () => {
     expect(r.retenciones_por_moneda["UYU"]).toBe(50);
   });
 
+  it("una nota de crédito recibida reduce compra, IVA y retenciones", () => {
+    const r = proveedores([
+      recibido({ tipo: 111, monto_total: 1220, total_neto: 1000, total_iva: 220, total_retenido: 50 }),
+      recibido({ tipo: 112, numero: 2, monto_total: 610, total_neto: 500, total_iva: 110, total_retenido: 20 }),
+    ]);
+    expect(r.total_por_moneda.UYU).toBe(610);
+    expect(r.iva_credito_por_moneda.UYU).toBe(110);
+    expect(r.retenciones_por_moneda.UYU).toBe(30);
+  });
+
+  it("no invierte dos veces una NC recibida que ya viene con importes negativos", () => {
+    const r = proveedores([
+      recibido({ tipo: 112, monto_total: -610, total_neto: -500, total_iva: -110, total_retenido: -20 }),
+    ]);
+    expect(r.total_por_moneda.UYU).toBe(-610);
+    expect(r.iva_credito_por_moneda.UYU).toBe(-110);
+    expect(r.retenciones_por_moneda.UYU).toBe(-20);
+  });
+
   it("excluye los recibidos rechazados por DGI", () => {
     const r = proveedores([
       recibido({ monto_total: 1000 }),

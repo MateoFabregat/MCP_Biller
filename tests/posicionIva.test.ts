@@ -87,6 +87,20 @@ describe("aritmética de la posición", () => {
     expect(r.por_moneda[0]!.debito.total).toBe(0);
   });
 
+  it("una nota de crédito recibida RESTA IVA crédito", () => {
+    const r = calcular(
+      [emitido({ tot_iva_tasa_bas: 220 })],
+      [recibido({ tipo: 111, total_iva: 110 }), recibido({ tipo: 112, numero: 2, total_iva: 40 })],
+    );
+    expect(r.por_moneda[0]!.credito).toBe(70);
+    expect(r.por_moneda[0]!.posicion).toBe(150);
+  });
+
+  it("no invierte dos veces una NC recibida que ya trae IVA negativo", () => {
+    const r = calcular([], [recibido({ tipo: 112, total_iva: -40 })]);
+    expect(r.por_moneda[0]!.credito).toBe(-40);
+  });
+
   it("los recibos no generan IVA débito", () => {
     const r = calcular([
       emitido({ id: 1, tot_iva_tasa_bas: 220 }),

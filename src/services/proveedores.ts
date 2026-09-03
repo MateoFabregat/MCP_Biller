@@ -17,6 +17,7 @@
 import { round2 } from "../biller/coerce.js";
 import type { ComprobanteRecibido } from "../biller/types.js";
 import { monedaDeOrden } from "./monedaOrden.js";
+import { classifyCfe } from "./cfeTypes.js";
 
 /** Estados de un recibido que NO representan una compra válida. */
 function esValido(r: ComprobanteRecibido): boolean {
@@ -100,14 +101,19 @@ export function rankingProveedores(
       participacion_pct: null,
     };
 
-    const total = r.monto_total ?? 0;
+    // Las NC recibidas reducen la compra, el IVA crédito y las retenciones. La
+    // API entrega importes positivos: el signo fiscal vive en el tipo de CFE.
+    const esNotaCredito = classifyCfe(r.tipo).signo === -1;
+    const firmado = (valor: number | null): number =>
+      esNotaCredito ? -Math.abs(valor ?? 0) : (valor ?? 0);
+    const total = firmado(r.monto_total);
     sumar(actual.total_por_moneda, r.moneda, total);
-    sumar(actual.iva_por_moneda, r.moneda, r.total_iva ?? 0);
-    sumar(actual.neto_por_moneda, r.moneda, r.total_neto ?? 0);
-    sumar(actual.retenido_por_moneda, r.moneda, r.total_retenido ?? 0);
+    sumar(actual.iva_por_moneda, r.moneda, firmado(r.total_iva));
+    sumar(actual.neto_por_moneda, r.moneda, firmado(r.total_neto));
+    sumar(actual.retenido_por_moneda, r.moneda, firmado(r.total_retenido));
     sumar(totalPorMoneda, r.moneda, total);
-    sumar(ivaPorMoneda, r.moneda, r.total_iva ?? 0);
-    sumar(retenidoPorMoneda, r.moneda, r.total_retenido ?? 0);
+    sumar(ivaPorMoneda, r.moneda, firmado(r.total_iva));
+    sumar(retenidoPorMoneda, r.moneda, firmado(r.total_retenido));
     actual.comprobantes += 1;
 
     if (r.fecha !== null) {
