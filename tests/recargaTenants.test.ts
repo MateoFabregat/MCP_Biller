@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { firmar } from "../src/kapso/webhook.js";
 import { HolderRegistroTenants } from "../src/tenants/holder.js";
+import { ContextosPorTenant } from "../src/tenants/contextos.js";
 import { construirRegistro, entornoDe } from "../src/tenants/registry.js";
 import {
   MCP_PATH,
@@ -18,6 +19,13 @@ const BASE = { BILLER_API_BASE_URL: "https://test.biller.uy" };
 function registro(id: string, authToken: string) {
   return construirRegistro([
     { id, auth_token: authToken, env: { BILLER_API_TOKEN: `api-${id}` } },
+  ], BASE);
+}
+
+function registroDos(tokenA = TOKEN_A, apiA = "api-panaderia") {
+  return construirRegistro([
+    { id: "panaderia", auth_token: tokenA, env: { BILLER_API_TOKEN: apiA } },
+    { id: "ferreteria", auth_token: TOKEN_B, env: { BILLER_API_TOKEN: "api-ferreteria" } },
   ], BASE);
 }
 
@@ -123,5 +131,36 @@ describe("consumidores del registro vigente", () => {
     } finally {
       await handle.close();
     }
+  });
+});
+
+describe("invalidación selectiva de contextos", () => {
+  it("reconstruye el tenant cambiado y conserva por identidad el que no cambió", () => {
+    const anterior = registroDos();
+    const contextos = new ContextosPorTenant(BASE);
+    const contextoPanaderia = contextos.para(anterior.tenants[0]!);
+    const contextoFerreteria = contextos.para(anterior.tenants[1]!);
+    const siguiente = registroDos(TOKEN_A, "api-panaderia-nueva");
+
+    expect(contextos.invalidarCambios(anterior, siguiente)).toEqual(["panaderia"]);
+    expect(contextos.para(siguiente.tenants[0]!)).not.toBe(contextoPanaderia);
+    expect(contextos.para(siguiente.tenants[1]!)).toBe(contextoFerreteria);
+  });
+
+  it("invalida al rotar auth_token aunque el entorno sea idéntico y también al eliminar", () => {
+    const anterior = registroDos();
+    const contextos = new ContextosPorTenant(BASE);
+    const contextoPanaderia = contextos.para(anterior.tenants[0]!);
+    contextos.para(anterior.tenants[1]!);
+    const rotado = registroDos("c".repeat(64));
+
+    expect(contextos.invalidarCambios(anterior, rotado)).toEqual(["panaderia"]);
+    expect(contextos.para(rotado.tenants[0]!)).not.toBe(contextoPanaderia);
+
+    const soloPanaderia = construirRegistro([
+      { id: "panaderia", auth_token: "c".repeat(64), env: { BILLER_API_TOKEN: "api-panaderia" } },
+    ], BASE);
+    expect(contextos.invalidarCambios(rotado, soloPanaderia)).toEqual(["ferreteria"]);
+    expect(contextos.tamano).toBe(1);
   });
 });

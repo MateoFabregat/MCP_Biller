@@ -16,7 +16,15 @@
 import { registrarHabilitacionCache } from "../services/periodo.js";
 import { createToolContext } from "../tools/register.js";
 import type { ToolContext } from "../tools/shared.js";
-import { entornoDe, type Tenant } from "./registry.js";
+import { stableStringify } from "../utils/stableStringify.js";
+import { entornoDe, type RegistroTenants, type Tenant } from "./registry.js";
+
+function tokenDe(registro: RegistroTenants, tenantId: string): string | null {
+  for (const [token, tenant] of registro.porToken) {
+    if (tenant.id === tenantId) return token;
+  }
+  return null;
+}
 
 /** Cache de contextos por id de tenant. La clave es el id, nunca el token. */
 export class ContextosPorTenant {
@@ -65,6 +73,46 @@ export class ContextosPorTenant {
     this.cache.set(tenant.id, ctx);
     this.indexarHabilitacionCache(tenant, ctx);
     return ctx;
+  }
+
+  /**
+   * Descarta únicamente el estado en memoria de tenants eliminados o cuya
+   * configuración operativa cambió. Devuelve esos ids para que el dueño del
+   * transporte cierre también sus sesiones.
+   */
+  invalidarCambios(anterior: RegistroTenants, siguiente: RegistroTenants): string[] {
+    const siguientes = new Map(siguiente.tenants.map((tenant) => [tenant.id, tenant]));
+    const afectados: string[] = [];
+
+    for (const tenantAnterior of anterior.tenants) {
+      const tenantSiguiente = siguientes.get(tenantAnterior.id);
+      const eliminado = tenantSiguiente === undefined;
+      const cambioDeEntorno =
+        tenantSiguiente !== undefined &&
+        stableStringify(tenantAnterior.env) !== stableStringify(tenantSiguiente.env);
+      const cambioDeCredencial =
+        tenantSiguiente !== undefined &&
+        tokenDe(anterior, tenantAnterior.id) !== tokenDe(siguiente, tenantAnterior.id);
+
+      if (!eliminado && !cambioDeEntorno && !cambioDeCredencial) continue;
+      afectados.push(tenantAnterior.id);
+      this.descartar(tenantAnterior.id);
+    }
+
+    return afectados;
+  }
+
+  private descartar(tenantId: string): void {
+    const contexto = this.cache.get(tenantId);
+    if (contexto !== undefined) {
+      try {
+        const cacheId = contexto.getClient().cacheId;
+        if (typeof cacheId === "string" && cacheId !== "") this.habilitacionCache.delete(cacheId);
+      } catch {
+        // Un contexto con configuración incompleta puede no construir cliente.
+      }
+    }
+    this.cache.delete(tenantId);
   }
 
   /**
