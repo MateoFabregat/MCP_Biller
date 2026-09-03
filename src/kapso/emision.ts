@@ -653,8 +653,7 @@ export function construirSubmenuPrecioNoPositivo(
   precio: number,
   moneda: string,
 ): InteractivoBotones {
-  const magnitud = `${simboloMoneda(moneda)}${formatearUy(Math.abs(precio))}`;
-  const mostrado = precio < 0 ? `−${magnitud}` : magnitud;
+  const mostrado = montoConSigno(moneda, precio);
   return {
     tipo: "botones",
     encabezado: "Precio no positivo",
@@ -711,7 +710,7 @@ export function construirSubmenuMontosBrutos(precio: number, moneda: string): In
     tipo: "botones",
     encabezado: "Una cosa sobre el precio",
     cuerpo:
-      `Los ${simboloMoneda(moneda)}${formatearUy(precio)} que me pasaste, ¿ya tienen el IVA adentro?\n\n` +
+      `Los ${montoConSigno(moneda, precio)} que me pasaste, ¿ya tienen el IVA adentro?\n\n` +
       "Si es el precio que le cobrás al cliente en el mostrador, sí. Si es el precio sin impuestos " +
       "y el IVA se suma aparte, no.",
     pie: "Si me equivoco acá, la factura sale 22% distinta.",
@@ -744,7 +743,7 @@ export function construirSubmenuIvaFusionado(precio: number, moneda: string): In
     tipo: "botones",
     encabezado: "Una cosa sobre el precio",
     cuerpo:
-      `Los ${simboloMoneda(moneda)}${formatearUy(precio)} que me pasaste, ¿ya tienen el IVA adentro?\n\n` +
+      `Los ${montoConSigno(moneda, precio)} que me pasaste, ¿ya tienen el IVA adentro?\n\n` +
       "Si es el precio que le cobrás al cliente en el mostrador, sí. Si es el precio sin impuestos " +
       "y el IVA se suma aparte, no.\n\n" +
       "En los dos casos tomo la tasa básica (22%). Si esto lleva otro IVA —10%, exento—, tocá el " +
@@ -763,6 +762,21 @@ export function simboloMoneda(moneda: string | undefined): string {
   const m = (moneda ?? "UYU").toUpperCase();
   if (m === "USD") return "U$S";
   return m === "UYU" ? "$" : `${m} `;
+}
+
+/**
+ * La plata, escrita como se escribe en Uruguay, con el signo ANTES del símbolo.
+ *
+ * "$-200" no es como se escribe un importe negativo en ningún lado, y este eco
+ * lo lee alguien que está por tocar un botón que TIRA esa línea. La convención
+ * ya estaba fijada y testeada en `calcularTotales` (`not.toContain("$-")`);
+ * esto es el mismo criterio en un solo lugar, para que no vuelva a divergir.
+ * Se usa el menos tipográfico (−) por lo mismo que el resto del flujo: el
+ * guión ASCII pegado al símbolo se lee como parte del número.
+ */
+export function montoConSigno(moneda: string | undefined, valor: number): string {
+  const magnitud = `${simboloMoneda(moneda)}${formatearUy(Math.abs(valor))}`;
+  return valor < 0 ? `−${magnitud}` : magnitud;
 }
 
 /** Moneda. Solo se pregunta si algo en el mensaje sugiere que no es UYU. */
@@ -1621,7 +1635,7 @@ export function siguientePaso(
       const cual = items.length <= 1 ? "" : ` (el ítem ${indice + 1} de ${items.length})`;
       const plata =
         typeof enCurso.precio === "number"
-          ? `${simboloMoneda(estado.moneda)}${formatearUy(enCurso.precio)}`
+          ? montoConSigno(estado.moneda, enCurso.precio)
           : null;
       return paso({
         paso: "concepto",
@@ -1707,7 +1721,7 @@ export function siguientePaso(
     return paso({
       paso: "iva",
       pregunta:
-        `Los ${simboloMoneda(estado.moneda)}${formatearUy(precioMuestra)} que me pasaste, ` +
+        `Los ${montoConSigno(estado.moneda, precioMuestra)} que me pasaste, ` +
         "¿ya tienen el IVA adentro? (tomo tasa básica 22% salvo que me digas otra cosa)",
       interactivo: construirSubmenuIvaFusionado(precioMuestra, estado.moneda ?? "UYU"),
     });
@@ -1723,7 +1737,7 @@ export function siguientePaso(
     return paso({
       paso: "precio_incluye_iva",
       pregunta:
-        `Los ${simboloMoneda(estado.moneda)}${formatearUy(precioMuestra)} que me pasaste, ` +
+        `Los ${montoConSigno(estado.moneda, precioMuestra)} que me pasaste, ` +
         "¿ya tienen el IVA adentro?",
       interactivo: construirSubmenuMontosBrutos(precioMuestra, estado.moneda ?? "UYU"),
     });

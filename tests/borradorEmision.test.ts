@@ -269,7 +269,11 @@ describe("rellenarDesdePedido: la jerarquía no se invierte", () => {
     expect(formatearPrecioAviso(6500)).toBe("$6.500");
     expect(formatearPrecioAviso(12.5)).toBe("$12,50");
     expect(formatearPrecioAviso(0)).toBe("$0");
-    expect(formatearPrecioAviso(-1200, "USD")).toBe("U$S-1.200");
+    // El signo va ANTES del símbolo. Antes salía "U$S-1.200", que es la misma
+    // convención que `calcularTotales` prohíbe y testea (`not.toContain("$-")`):
+    // el guión pegado al símbolo se lee como parte del número.
+    expect(formatearPrecioAviso(-1200, "USD")).toBe("−U$S1.200");
+    expect(formatearPrecioAviso(-1200, "USD")).not.toContain("$-");
 
     const estado: EstadoEmision = {
       moneda: "USD",

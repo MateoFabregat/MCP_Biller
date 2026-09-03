@@ -2299,3 +2299,45 @@ describe("el borrador de la emisión es del remitente verificado", () => {
     expect(dos.sesion.recuperado_del_store.length).toBeGreaterThan(0);
   });
 });
+
+// =============================================================================
+// El signo va antes del símbolo: "−$200", nunca "$-200"
+// =============================================================================
+
+describe("una línea de precio negativo se nombra con la convención uruguaya", () => {
+  // La convención ya estaba fijada en `calcularTotales` (`not.toContain("$-")`)
+  // y en el submenú de precio no positivo, pero la pregunta por la línea sin
+  // descripción y su botón de descarte escribían el número crudo. "$-200" no es
+  // como se escribe plata en ningún lado, y el botón —que es el que TIRA la
+  // línea— es justo donde el usuario tiene que poder leer lo que saca.
+  const estado: EstadoEmision = {
+    clase_receptor: "consumidor_final",
+    fecha_emision: HOY,
+    sin_receptor: true,
+    montos_brutos: true,
+    indicador_facturacion: 3,
+    items: [{ cantidad: 1, precio: -200 }],
+  };
+
+  it("la pregunta escribe −$200, no $-200", () => {
+    const s = siguientePaso(estado);
+    expect(s.paso).toBe("concepto");
+    expect(s.pregunta).toContain("−$200");
+    expect(s.pregunta).not.toContain("$-");
+  });
+
+  it("el botón que saca la línea la nombra igual", () => {
+    const s = siguientePaso(estado);
+    const titulos = (s.interactivo as { botones: Array<{ titulo: string }> }).botones.map(
+      (b) => b.titulo,
+    );
+    expect(titulos.join(" ")).toContain("−$200");
+    expect(titulos.join(" ")).not.toContain("$-");
+  });
+
+  it("un precio positivo se sigue escribiendo igual que siempre", () => {
+    const s = siguientePaso({ ...estado, items: [{ cantidad: 1, precio: 6500 }] });
+    expect(s.pregunta).toContain("$6.500");
+    expect(s.pregunta).not.toContain("−");
+  });
+});

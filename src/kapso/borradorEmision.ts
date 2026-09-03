@@ -41,7 +41,7 @@ import {
   siguientePaso,
   itemPuedeViajar,
   itemsVigentes,
-  simboloMoneda,
+  montoConSigno,
   type EstadoEmision,
   type ItemEnCurso,
 } from "./emision.js";
@@ -59,7 +59,7 @@ import { formatearUy, parsearCantidad, parsearImporte } from "../services/import
  */
 export function formatearPrecioAviso(precio: number | string, moneda?: string): string {
   const valor = typeof precio === "number" ? precio : parsearImporte(precio).valor;
-  return valor === null ? String(precio) : `${simboloMoneda(moneda)}${formatearUy(valor)}`;
+  return valor === null ? String(precio) : montoConSigno(moneda, valor);
 }
 
 /**
