@@ -297,6 +297,17 @@ export function construirSubmenuIva(): InteractivoBotones {
  * Se conserva para el camino explícito: el usuario que dice "quiero cambiar la
  * fecha" sin decir cuál. Ahí sí hay una pregunta genuina que hacer.
  */
+/**
+ * OJO: hoy NO LO MANDA NADIE, y es una decisión, no un olvido.
+ *
+ * El retroceso de la fecha se pensó para el preview, y ahí no hay lugar: Meta
+ * permite tres botones y los tres están tomados (✅ Emitir · ➕ Otro ítem ·
+ * ✖️ Cancelar). El camino que SÍ funciona es el id `emision:fecha:otra`, que
+ * marca el borrador (`fecha_a_elegir`) y deja la pregunta abierta hasta que la
+ * fecha llegue escrita — eso está probado en `tests/flujoMostradorAuditoria.test.ts`.
+ * Se conserva el constructor porque el día que haya un mensaje con lugar para
+ * él, el resto del camino ya existe.
+ */
 export function construirSubmenuFecha(hoy: string = hoyDgiUy()): InteractivoBotones {
   return {
     tipo: "botones",
@@ -536,11 +547,21 @@ export function construirSubmenuMoneda(): InteractivoBotones {
 export function construirListaClientes(
   clientes: ReadonlyArray<{ id?: string; nombre: string; documento?: string }>,
 ): InteractivoLista {
-  const filas = clientes.slice(0, 9).map((c, i) => ({
-    id: `${PREFIJO_PASO}cliente:${c.documento ?? c.id ?? String(i)}`,
-    titulo: c.nombre.slice(0, 24),
-    ...(c.documento !== undefined ? { descripcion: `RUT/CI ${c.documento}` } : {}),
-  }));
+  // UNA FILA SIN DOCUMENTO NO SE PUEDE TOCAR.
+  //
+  // El id lleva el documento, que es lo que el paso `cliente` sabe leer. Sin
+  // él salía `emision:cliente:0`, y tocar esa fila contestaba "0 no tiene forma
+  // de RUT" y volvía a preguntar lo mismo: una opción visible que no resuelve
+  // nada. El que no tiene documento entra por "➕ Otro cliente", que sí tiene
+  // camino.
+  const filas: Array<{ id: string; titulo: string; descripcion?: string }> = clientes
+    .filter((c) => (c.documento ?? "").trim() !== "")
+    .slice(0, 9)
+    .map((c) => ({
+      id: `${PREFIJO_PASO}cliente:${c.documento!}`,
+      titulo: c.nombre.slice(0, 24),
+      descripcion: `RUT/CI ${c.documento!}`,
+    }));
 
   filas.push({ id: `${PREFIJO_PASO}cliente:otro`, titulo: "➕ Otro cliente" });
 

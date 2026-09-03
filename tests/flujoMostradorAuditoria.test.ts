@@ -131,3 +131,76 @@ describe("el RUT escrito se lee: la pregunta no rebota su propia respuesta", () 
     });
   });
 });
+
+describe("las preguntas de fecha aceptan lo que ellas mismas sugieren", () => {
+  it('"30 días" contesta el vencimiento, y también una fecha escrita', () => {
+    // La pregunta dice: 'Decime la fecha (dd/mm/aaaa) o en cuántos días (por
+    // ejemplo "30 días")'. No tiene botones: si no lee ninguna de las dos
+    // formas, la única salida era que el agente CALCULARA la fecha — y el
+    // prompt le prohíbe hacer cuentas.
+    const HOY = "03/09/2026";
+    expect(interpretarRespuestaLibre("30 días", "fecha_vencimiento", HOY)).toEqual({
+      paso: "vencimiento",
+      fecha: "03/10/2026",
+    });
+    expect(interpretarRespuestaLibre("a 15 dias", "fecha_vencimiento", HOY)).toEqual({
+      paso: "vencimiento",
+      fecha: "18/09/2026",
+    });
+    expect(interpretarRespuestaLibre("15/10/2026", "fecha_vencimiento", HOY)).toEqual({
+      paso: "vencimiento",
+      fecha: "15/10/2026",
+    });
+  });
+
+  it("una fecha imposible no se acepta ni se corrige en silencio", () => {
+    expect(interpretarRespuestaLibre("31/02/2026", "fecha_vencimiento", "03/09/2026")).toEqual({
+      paso: "ninguna",
+    });
+    expect(interpretarRespuestaLibre("31/02/2026", "fecha", "03/09/2026")).toEqual({
+      paso: "ninguna",
+    });
+  });
+
+  it("la fecha de emisión escrita ya no se pierde", () => {
+    expect(interpretarRespuestaLibre("15/08/2026", "fecha", "03/09/2026")).toEqual({
+      paso: "fecha_elegida",
+      fecha: "15/08/2026",
+    });
+    expect(interpretarRespuestaLibre("hoy", "fecha", "03/09/2026")).toEqual({ paso: "fecha_hoy" });
+  });
+
+  it("el retroceso de '✏️ Otra fecha' sobrevive al mensaje siguiente", async () => {
+    // EL RETROCESO DURA DOS MENSAJES: uno para pedirlo y otro para decir la
+    // fecha. Antes la intención vivía en una variable del turno, así que en el
+    // segundo mensaje el default ya había repuesto "hoy" y la fecha escrita se
+    // perdía sin decir nada: la factura salía fechada hoy.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const base = {
+      sesion: SESION,
+      clase_receptor: "consumidor_final" as const,
+      sin_receptor: true,
+      items: [{ concepto: "queso", cantidad: 1, precio: 490 }],
+      montos_brutos: true,
+      indicador_facturacion: 3,
+    };
+    const pidio = j(await handleEmisionGuiada({ ...base, mensaje: "emision:fecha:otra" }, ctx));
+    expect(pidio.paso).toBe("fecha");
+
+    const conFecha = j(await handleEmisionGuiada({ sesion: SESION, mensaje: "15/08/2026" }, ctx));
+    expect(conFecha.estado_entendido?.fecha_emision).toBe("15/08/2026");
+    expect(conFecha.paso).toBe("confirmar");
+  });
+});
+
+describe("una fila de la lista de clientes siempre se puede tocar", () => {
+  it("no se ofrece un cliente sin documento: tocarlo no resolvía nada", async () => {
+    const { construirListaClientes } = await import("../src/kapso/render.js");
+    const lista = construirListaClientes([
+      { nombre: "Pérez SRL", documento: "219999830019" },
+      { nombre: "El de la esquina" },
+    ]);
+    const filas = lista.secciones[0]!.filas;
+    expect(filas.map((f) => f.titulo)).toEqual(["Pérez SRL", "➕ Otro cliente"]);
+  });
+});

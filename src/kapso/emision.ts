@@ -36,7 +36,13 @@
 // se redacta lo que sale por WhatsApp. La dependencia va en un solo sentido.
 // =============================================================================
 
-import { FORMAS_PAGO, INDICADORES_FACTURACION, TIPOS_COMPROBANTE } from "../biller/cfeSchema.js";
+import {
+  FORMAS_PAGO,
+  INDICADORES_FACTURACION,
+  TIPOS_COMPROBANTE,
+  formatFechaDgi,
+  parseFechaDgi,
+} from "../biller/cfeSchema.js";
 import { hoyDgiUy } from "../services/fechaUy.js";
 import { formatearUy, montoConSigno } from "../services/importe.js";
 import type { InteractivoBotones, InteractivoLista } from "./client.js";
@@ -45,7 +51,6 @@ import {
   construirDesempateReceptor,
   construirListaClientes,
   construirSubmenuConceptoExtra,
-  construirSubmenuFecha,
   construirSubmenuFormaPago,
   construirSubmenuIva,
   construirSubmenuIvaFusionado,
@@ -236,6 +241,16 @@ export interface EstadoEmision {
   clase_receptor?: ClaseReceptor;
   /** Fecha de emisión en dd/mm/aaaa, como la espera Biller. */
   fecha_emision?: string;
+  /**
+   * El usuario pidió cambiar la fecha y todavía no la dijo.
+   *
+   * Vive en el BORRADOR y no en una variable del turno porque el retroceso
+   * dura DOS mensajes: uno para pedirlo ("✏️ Otra fecha") y otro para decir la
+   * fecha. Con el flag solo en memoria del turno, el default reponía "hoy" en
+   * el mensaje siguiente y la fecha escrita se perdía: el retroceso se deshacía
+   * solo y la factura salía con la fecha de hoy sin que nadie lo pidiera.
+   */
+  fecha_a_elegir?: boolean;
   /** RUT o CI del receptor, como lo escribió el usuario. */
   documento?: string;
   /** Razón social o nombre. */
@@ -511,6 +526,10 @@ export type RespuestaPaso =
   | { paso: "cliente_sin_identificar" }
   | { paso: "fecha_hoy" }
   | { paso: "fecha_otra" }
+  /** Una fecha de emisión escrita a mano, ya validada como fecha real. */
+  | { paso: "fecha_elegida"; fecha: string }
+  /** El vencimiento de una venta a crédito, escrito como fecha o como plazo. */
+  | { paso: "vencimiento"; fecha: string }
   | { paso: "cantidad"; cantidad: number }
   | { paso: "item_otro" }
   | { paso: "item_listo" }
@@ -560,7 +579,11 @@ function normalizarLibre(texto: string): string {
  * Devuelve `ninguna` ante la duda: que el agente repregunte es barato, y que un
  * texto ambiguo mueva el flujo solo, no.
  */
-export function interpretarRespuestaLibre(raw: string, paso: string): RespuestaPaso {
+export function interpretarRespuestaLibre(
+  raw: string,
+  paso: string,
+  hoy: string = hoyDgi(),
+): RespuestaPaso {
   const t = normalizarLibre(raw);
   if (t === "") return { paso: "ninguna" };
   const es = (...frases: string[]): boolean => frases.includes(t);
@@ -647,9 +670,34 @@ export function interpretarRespuestaLibre(raw: string, paso: string): RespuestaP
       if (es("otro", "otro mas", "agrego otro", "uno mas")) return { paso: "item_otro" };
       return { paso: "ninguna" };
 
-    case "fecha":
+    case "fecha": {
       if (es("hoy", "de hoy", "hoy mismo")) return { paso: "fecha_hoy" };
+      // La pregunta es "Escribímela como dd/mm/aaaa" y no tiene botones: si la
+      // fecha escrita no se lee, el retroceso de "✏️ Otra fecha" se deshace
+      // solo y la factura sale con la fecha de hoy sin que nadie lo haya
+      // pedido. `parseFechaDgi` rechaza el 31/02 en vez de correrlo al 03/03.
+      const d = parseFechaDgi(raw);
+      return d === null ? { paso: "ninguna" } : { paso: "fecha_elegida", fecha: formatFechaDgi(d) };
+    }
+
+    case "fecha_vencimiento": {
+      // Los dos formatos que la propia pregunta ofrece: "15/10/2026" y
+      // "30 días". El plazo se cuenta desde HOY en Uruguay —`hoy` entra por
+      // parámetro, nunca `new Date()` acá— porque entre las 21:00 y las 00:00
+      // el día UTC ya es otro y el vencimiento saldría corrido un día.
+      const d = parseFechaDgi(raw);
+      if (d !== null) return { paso: "vencimiento", fecha: formatFechaDgi(d) };
+      const plazo = /^(?:a|en|dentro de)?\s*(\d{1,3})\s*(?:d|dias?|días?)$/.exec(t);
+      if (plazo !== null) {
+        const base = parseFechaDgi(hoy);
+        if (base !== null) {
+          const venc = new Date(base.getTime());
+          venc.setUTCDate(venc.getUTCDate() + Number(plazo[1]));
+          return { paso: "vencimiento", fecha: formatFechaDgi(venc) };
+        }
+      }
       return { paso: "ninguna" };
+    }
 
     case "tasa_cambio": {
       // "PESOS" ACÁ NO ES RUIDO: ES UNA CORRECCIÓN.
@@ -915,7 +963,7 @@ export function aplicarDefaults(
   // hoy, siempre. Un promedio de las fechas de las últimas facturas no
   // significa nada, y copiar la última es el error que el TTL del borrador
   // existe para evitar.
-  if ((salida.fecha_emision ?? "") === "") {
+  if ((salida.fecha_emision ?? "") === "" && salida.fecha_a_elegir !== true) {
     salida.fecha_emision = hoy;
     aplicados.push("fecha_emision");
   }
@@ -1237,6 +1285,14 @@ export function siguientePaso(
   // 6b. Vencimiento, SOLO a crédito. Sin esto la venta a crédito no aparece en
   //     "¿quién me debe?" ni en vencimientos: se emitió para cobrar después y
   //     la cobranza queda invisible.
+  if (estado.fecha_a_elegir === true && (estado.fecha_emision ?? "") === "") {
+    return paso({
+      paso: "fecha",
+      pregunta: "Dale, ¿qué fecha? Escribímela como dd/mm/aaaa.",
+      interactivo: null,
+    });
+  }
+
   if (estado.forma_pago === 2 && (estado.fecha_vencimiento ?? "") === "") {
     return paso({
       paso: "fecha_vencimiento",

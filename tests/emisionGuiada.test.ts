@@ -117,7 +117,11 @@ describe("los mensajes tocables de cada paso", () => {
   });
 
   it("una lista de clientes larga se recorta para no romper el límite de 10 filas", () => {
-    const muchos = Array.from({ length: 40 }, (_, i) => ({ nombre: `Cliente ${i}` }));
+    // Con documento: una fila sin él no se ofrece (tocarla no resolvía nada).
+    const muchos = Array.from({ length: 40 }, (_, i) => ({
+      nombre: `Cliente ${i}`,
+      documento: String(210000000000 + i),
+    }));
     const lista = construirListaClientes(muchos);
     expect(lista.secciones.flatMap((s) => s.filas)).toHaveLength(10);
     expect(() => construirPayloadInteractivo(lista)).not.toThrow();

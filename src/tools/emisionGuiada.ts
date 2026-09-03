@@ -452,6 +452,14 @@ function aplicarRespuestaDelUsuario(
       break;
     case "fecha_hoy":
       estado.fecha_emision = hoyDgi();
+      delete estado.fecha_a_elegir;
+      break;
+    case "fecha_elegida":
+      estado.fecha_emision = r.fecha;
+      delete estado.fecha_a_elegir;
+      break;
+    case "vencimiento":
+      estado.fecha_vencimiento = r.fecha;
       break;
     case "tasa_cambio":
       estado.tasa_cambio = r.tasa;
@@ -459,6 +467,12 @@ function aplicarRespuestaDelUsuario(
     case "fecha_otra":
       // Tocó "otra fecha": no hay dato todavía, solo la intención. El paso
       // sigue siendo "fecha", pero preguntado como texto libre.
+      //
+      // La intención se GUARDA en el borrador —no alcanza con la variable del
+      // turno— porque la fecha llega en el mensaje siguiente, y para entonces
+      // el default ya habría repuesto "hoy". Ver `fecha_a_elegir`.
+      estado.fecha_a_elegir = true;
+      delete estado.fecha_emision;
       pidioOtraFecha = true;
       break;
     case "cantidad":
