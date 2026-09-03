@@ -247,3 +247,36 @@ describe("registro de la tool: el health check es del TENANT, no del proceso", (
     expect(JSON.stringify(res)).not.toContain(RUT_DEL_TENANT);
   });
 });
+
+describe("el webhook sin journal de replay se avisa aunque no se escriba", () => {
+  // Un deploy read_only con WhatsApp abierto es el caso más común de todos, y
+  // ahí el aviso de "PRODUCCIÓN NO LISTA" no corre: solo mira las escrituras.
+  // Sin journal, el store de replay se degrada a memoria EN SILENCIO, y un
+  // reenvío de Meta después de un reinicio se vuelve a procesar.
+  const base = {
+    BILLER_API_BASE_URL: "https://test.biller.uy",
+    BILLER_API_TOKEN: "tok",
+    KAPSO_API_KEY: "kapso-secret",
+    KAPSO_WEBHOOK_SECRET: "s".repeat(32),
+    KAPSO_DESTINATARIOS_PERMITIDOS: "59899123456",
+    BILLER_REMITENTES_AUTORIZADOS: "59899123456",
+  };
+
+  it("avisa cuando hay webhook y el replay quedó solo en memoria", () => {
+    const warnings = buildHealthStructured(inspectConfig(base)).warnings as string[];
+    expect(warnings.some((w) => w.includes("replay") && w.includes("memoria"))).toBe(true);
+  });
+
+  it("no avisa cuando el journal está configurado", () => {
+    const warnings = buildHealthStructured(
+      inspectConfig({ ...base, BILLER_WEBHOOK_REPLAY_LOG_PATH: "/tmp/replay.jsonl" }),
+    ).warnings as string[];
+    expect(warnings.some((w) => w.includes("replay") && w.includes("memoria"))).toBe(false);
+  });
+
+  it("no avisa si no hay webhook: sin ruta entrante no hay nada que deduplicar", () => {
+    const { KAPSO_WEBHOOK_SECRET: _s, ...sinWebhook } = base;
+    const warnings = buildHealthStructured(inspectConfig(sinWebhook)).warnings as string[];
+    expect(warnings.some((w) => w.includes("replay") && w.includes("memoria"))).toBe(false);
+  });
+});

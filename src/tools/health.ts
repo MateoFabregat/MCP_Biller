@@ -128,6 +128,20 @@ function buildWarnings(c: ConfigInspection): string[] {
   warnings.push(...c.kapso.advertencias);
   warnings.push(...c.remitentes.advertencias);
 
+  // El replay entrante se degrada a memoria SIN DECIR NADA cuando no hay ruta,
+  // y el aviso de "PRODUCCIÓN NO LISTA" no lo cubre porque ese solo mira las
+  // escrituras: un deploy read_only con WhatsApp abierto —el caso más común—
+  // se quedaba sin ningún aviso. Un reenvío de Meta después de un reinicio se
+  // vuelve a procesar, y en modo lectura eso es contestar dos veces; con
+  // escritura habilitada, el gate además bloquea.
+  if (c.kapso.webhookHabilitado && c.webhookReplayLogPath === null) {
+    warnings.push(
+      "El webhook entrante está habilitado y la protección contra replay quedó solo en memoria: " +
+        "un reenvío de Meta después de un reinicio se vuelve a procesar. Configurá " +
+        "BILLER_WEBHOOK_REPLAY_LOG_PATH o BILLER_DATA_DIR.",
+    );
+  }
+
   if (c.kapso.configurado && !c.kapso.idempotenciaPersistente) {
     warnings.push(
       "Las salidas Kapso usan idempotencia en memoria: un reinicio puede perder la reserva. " +
