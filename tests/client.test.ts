@@ -32,8 +32,18 @@ describe("BillerClient", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(init.method).toBe("GET");
+    expect(init.redirect).toBe("error");
     expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TEST_TOKEN}`);
     expect(url).toBe("https://test.biller.uy/v2/comprobantes/obtener?sucursal=1");
+  });
+
+  it("corta una respuesta exitosa que supera el límite seguro", async () => {
+    const fetchImpl = vi.fn(async () => textResponse("x".repeat(2 * 1024 * 1024 + 1)));
+    const client = makeClient(fetchImpl as unknown as typeof fetch);
+
+    await expect(client.get({ path: "/v2/comprobantes/obtener" })).rejects.toThrow(
+      /supera el límite seguro/,
+    );
   });
 
   it("buildUrl normaliza base con barra final y arma el query string", () => {

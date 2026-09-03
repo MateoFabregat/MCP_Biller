@@ -110,6 +110,7 @@ describe("request a Kapso", () => {
     ];
     expect(url).toBe("https://api.kapso.ai/meta/whatsapp/v24.0/110987654321/messages");
     expect((init.headers as Record<string, string>)["x-api-key"]).toBe(API_KEY);
+    expect(init.redirect).toBe("error");
     expect(JSON.parse(init.body as string)).toEqual({
       messaging_product: "whatsapp",
       recipient_type: "individual",
@@ -145,6 +146,15 @@ describe("request a Kapso", () => {
     const client = new KapsoClient(kapsoConfig(), { fetchImpl: fakeFetch(200, "OK") });
     const r = await client.enviar("59899123456", "hola");
     expect(r.message_id).toBeNull();
+  });
+
+  it("corta una respuesta de Kapso que supera el límite seguro", async () => {
+    const client = new KapsoClient(kapsoConfig(), {
+      fetchImpl: fakeFetch(200, "x".repeat(1024 * 1024 + 1)),
+    });
+    await expect(client.enviar("59899123456", "respuesta grande")).rejects.toThrow(
+      /se cortó la respuesta/,
+    );
   });
 });
 

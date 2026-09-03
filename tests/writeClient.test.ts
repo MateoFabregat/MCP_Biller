@@ -55,10 +55,20 @@ describe("BillerWriteClient (gate en el borde de red)", () => {
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://test.biller.uy/v2/comprobantes/crear");
     expect(init.method).toBe("POST");
+    expect(init.redirect).toBe("error");
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Bearer ${TEST_TOKEN}`);
     expect(headers["Idempotency-Key"]).toBe("idem-42");
     expect(init.body).toBe(JSON.stringify({ tipo_comprobante: 101 }));
+  });
+
+  it("corta una respuesta exitosa que supera el límite seguro", async () => {
+    const fetchImpl = vi.fn(async () => textResponse("x".repeat(2 * 1024 * 1024 + 1), 201));
+    const client = makeWriteClient(fetchImpl as unknown as typeof fetch, { writeEnabled: true });
+
+    await expect(
+      client.post({ endpoint: "/v2/comprobantes/crear", body: {}, idempotencyKey: "k", allowProduction: false }),
+    ).rejects.toThrow(/supera el límite seguro/);
   });
 
   it("no filtra el token en errores 422", async () => {

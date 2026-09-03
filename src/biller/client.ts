@@ -26,6 +26,7 @@ import {
   type RateLimiters,
 } from "../utils/rateLimit.js";
 import { ALLOWED_METHOD, assertReadOnlyMethod } from "./httpGuard.js";
+import { readTextBounded } from "../utils/boundedResponse.js";
 
 export type QueryValue = string | number | boolean | undefined | null;
 export type QueryParams = Record<string, QueryValue>;
@@ -48,6 +49,7 @@ export interface BillerClientDeps {
 }
 
 const MAX_BODY_SNIPPET = 600;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 export class BillerClient {
   private readonly fetchImpl: FetchImpl;
@@ -123,6 +125,7 @@ export class BillerClient {
           Accept: "application/json, text/plain, */*",
         },
         signal: controller.signal,
+        redirect: "error",
       });
     } catch (err) {
       if (controller.signal.aborted) {
@@ -134,22 +137,31 @@ export class BillerClient {
       clearTimeout(timeout);
     }
 
-    const rawText = await this.safeReadText(res);
+    const { text: rawText, truncated } = await this.safeReadText(res);
 
     if (!res.ok) {
-      const snippet = rawText ? this.redact(rawText).slice(0, MAX_BODY_SNIPPET) : undefined;
+      const suffix = truncated ? " [respuesta truncada]" : "";
+      const snippet = rawText
+        ? `${this.redact(rawText).slice(0, MAX_BODY_SNIPPET)}${suffix}`
+        : undefined;
       logger.warn("biller.response.error", { status: res.status, path: options.path });
       throw new BillerApiError(res.status, snippet);
+    }
+
+    if (truncated) {
+      throw new BillerParseError(
+        `la respuesta supera el límite seguro de ${MAX_RESPONSE_BYTES} bytes. Acotá la consulta.`,
+      );
     }
 
     return this.parseBody<T>(rawText);
   }
 
-  private async safeReadText(res: Response): Promise<string> {
+  private async safeReadText(res: Response): Promise<{ text: string; truncated: boolean }> {
     try {
-      return await res.text();
+      return await readTextBounded(res, MAX_RESPONSE_BYTES);
     } catch {
-      return "";
+      return { text: "", truncated: false };
     }
   }
 

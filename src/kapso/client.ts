@@ -38,9 +38,11 @@
 import type { KapsoConfig } from "../config.js";
 import { logger } from "../logger.js";
 import { BillerError, redactSecrets } from "../utils/errors.js";
+import { readTextBounded } from "../utils/boundedResponse.js";
 
 /** Largo máximo de un mensaje de texto de WhatsApp. */
 export const MAX_MENSAJE_CHARS = 4096;
+const MAX_KAPSO_RESPONSE_BYTES = 1024 * 1024;
 
 /**
  * Límites de los mensajes interactivos de WhatsApp.
@@ -327,8 +329,17 @@ export class KapsoClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await this.fetchImpl(url, { ...init, signal: controller.signal });
-      const raw = await res.text();
+      const res = await this.fetchImpl(url, {
+        ...init,
+        signal: controller.signal,
+        redirect: "error",
+      });
+      const { text: raw, truncated } = await readTextBounded(res, MAX_KAPSO_RESPONSE_BYTES);
+      if (truncated) {
+        throw new KapsoError(
+          `Kapso devolvió más de ${MAX_KAPSO_RESPONSE_BYTES} bytes al ${accion}; se cortó la respuesta.`,
+        );
+      }
       if (!res.ok) {
         // El cuerpo de error de Kapso puede repetir headers: se redacta.
         const snippet = redactSecrets(raw.slice(0, 500), [this.config.apiKey]);

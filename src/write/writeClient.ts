@@ -22,6 +22,7 @@ import {
 } from "../utils/errors.js";
 import { createDefaultRateLimiters, type RateLimitClass, type RateLimiters } from "../utils/rateLimit.js";
 import { assertWriteAllowed } from "./gate.js";
+import { readTextBounded } from "../utils/boundedResponse.js";
 
 export type WriteFetchImpl = typeof fetch;
 
@@ -46,6 +47,7 @@ export interface PostResult<T = unknown> {
 }
 
 const MAX_BODY_SNIPPET = 600;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const WRITE_METHOD = "POST" as const;
 
 export class BillerWriteClient {
@@ -92,6 +94,7 @@ export class BillerWriteClient {
         },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: controller.signal,
+        redirect: "error",
       });
     } catch (err) {
       if (controller.signal.aborted) throw new BillerTimeoutError(this.config.timeoutMs);
@@ -101,12 +104,22 @@ export class BillerWriteClient {
       clearTimeout(timeout);
     }
 
-    const rawText = await this.safeReadText(res);
+    const { text: rawText, truncated } = await this.safeReadText(res);
 
     if (!res.ok) {
-      const snippet = rawText ? this.redact(rawText).slice(0, MAX_BODY_SNIPPET) : undefined;
+      const suffix = truncated ? " [respuesta truncada]" : "";
+      const snippet = rawText
+        ? `${this.redact(rawText).slice(0, MAX_BODY_SNIPPET)}${suffix}`
+        : undefined;
       logger.warn("biller.write.response.error", { status: res.status, endpoint: options.endpoint });
       throw new BillerApiError(res.status, snippet);
+    }
+
+
+    if (truncated) {
+      throw new BillerParseError(
+        `la respuesta supera el límite seguro de ${MAX_RESPONSE_BYTES} bytes. Acotá la operación.`,
+      );
     }
 
     return { status: res.status, data: this.parseBody<T>(rawText) };
@@ -125,11 +138,11 @@ export class BillerWriteClient {
     return url.toString();
   }
 
-  private async safeReadText(res: Response): Promise<string> {
+  private async safeReadText(res: Response): Promise<{ text: string; truncated: boolean }> {
     try {
-      return await res.text();
+      return await readTextBounded(res, MAX_RESPONSE_BYTES);
     } catch {
-      return "";
+      return { text: "", truncated: false };
     }
   }
 
