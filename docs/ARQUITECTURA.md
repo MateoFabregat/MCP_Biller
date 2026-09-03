@@ -444,7 +444,7 @@ autorizado. Tres cierres que entraron juntos:
   se **borra** del entorno del proceso —las `KAPSO_*`, la allowlist de
   remitentes, los tres flags de escritura, la identidad fiscal— en vez de
   heredarse. Borrar hace el error imposible; exigir que se declare solo lo hace
-  detectable. Las tres rutas de persistencia y los topes `BILLER_MAX_MONTO_*` van
+  detectable. Las rutas de persistencia y los topes `BILLER_MAX_MONTO_*` van
   por la puerta opuesta —borrarlas afloja— y por eso son **fatales al arrancar**
   si el proceso las define y el tenant no. Y dos tenants no pueden compartir el
   `BILLER_API_TOKEN` (mismo `cacheId` ⇒ mismo espacio de borradores, con la

@@ -88,6 +88,38 @@ una optimización. Los borradores vencen a las **24 h**: es la ventana de
 servicio de WhatsApp, y una conversación más vieja que eso no se está
 continuando, se está empezando de nuevo.
 
+### 1.0.1. Replay de Meta/Kapso
+
+Cada mensaje entrante se deduplica por el `message_id` ya normalizado por el
+webhook. La reserva es atómica y ocurre antes de interpretar o ejecutar
+efectos; un reintento ya reservado responde `200` sin volver a rutear ni
+enviar. El estado tiene TTL y techo LRU para no crecer sin límite.
+
+Por defecto el estado vive en memoria. Para sobrevivir reinicios se puede
+configurar `BILLER_WEBHOOK_REPLAY_LOG_PATH`; con `BILLER_DATA_DIR` se deriva
+automáticamente a `<data_dir>/<tenant>/webhook-replay.jsonl`, también en modo
+mono-tenant (`_proceso`). El journal solo guarda digests de ids, con archivos
+0600 y directorios 0700: nunca el cuerpo del webhook ni datos personales.
+
+```dotenv
+BILLER_WEBHOOK_REPLAY_LOG_PATH=./data/webhook-replay.jsonl
+BILLER_WEBHOOK_REPLAY_TTL_MS=86400000
+BILLER_WEBHOOK_REPLAY_MAX_ENTRIES=10000
+```
+
+Si el journal está corrupto o no se puede reservar, el webhook falla cerrado
+con `503` y no interpreta el evento. Cada tenant conserva su propio store; una
+recarga de configuración no reutiliza el store de otra configuración.
+
+### 1.0.2. Idempotencia de salidas
+
+Cada salida a Kapso se reserva antes de tocar la red con una clave opaca que
+liga empresa, actor, destinatario, operación y payload. Un timeout queda en
+estado incierto y no se reintenta automáticamente. El journal es distinto del
+fiscal y del replay entrante: `KAPSO_IDEMPOTENCY_LOG_PATH`, o la ruta derivada
+`<data_dir>/<tenant>/kapso-idempotencia.jsonl` al configurar `BILLER_DATA_DIR`.
+En serverless, las salidas se bloquean si no existe persistencia durable.
+
 ### 1.1. El bloqueante y cómo se resolvió
 
 Kapso rechaza URLs que resuelven a **localhost** (protección SSRF), y el server

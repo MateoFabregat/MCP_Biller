@@ -364,7 +364,7 @@ no sale ningún mensaje. Lo que sí se hereda es lo que describe al **despliegue
 no al cliente: base URL, timeouts, puerto.
 
 Y hay una tercera regla, para las variables donde borrar afloja en vez de
-apretar: las tres rutas de persistencia (`BILLER_AUDIT_LOG_PATH`,
+apretar: las rutas de persistencia (`BILLER_AUDIT_LOG_PATH`,
 `BILLER_IDEMPOTENCY_LOG_PATH`, `BILLER_BORRADOR_STORE_PATH`) y los topes
 `BILLER_MAX_MONTO_<MONEDA>` **ni se heredan ni se borran**: si el proceso las
 define y un tenant no declara la suya, el server **no arranca**. Sin ruta de
@@ -374,7 +374,7 @@ CFE por cien veces lo que valía.
 Dos duplicados son fatales por la misma razón —parecen andar—: el mismo
 `BILLER_API_TOKEN` en dos tenants (mismo `cacheId` ⇒ misma sal y mismo espacio de
 borradores, con la idempotencia separada: un reintento por el otro token emite un
-duplicado ante DGI) y el mismo archivo en cualquiera de las tres rutas,
+duplicado ante DGI) y el mismo archivo en cualquiera de las rutas,
 comparadas en **absoluto** y de forma **cruzada** entre las tres variables.
 
 ### Tocar el enrutador de WhatsApp

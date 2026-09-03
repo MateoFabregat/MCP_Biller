@@ -423,6 +423,11 @@ Copiá `.env.example` a `.env`. **Empezá siempre por TEST.** El `.env` está en
 | `BILLER_WRITE_ENABLED` | No | `false` | Gate de ejecución POST. Sin esto, solo dry-run (requiere `write_enabled`). |
 | `BILLER_ALLOW_PRODUCTION_WRITES` | No | `false` | Habilita POST contra producción (+ `allow_production=true`). |
 | `BILLER_AUDIT_LOG_PATH` | No | — | Archivo opcional para el audit log de escrituras. |
+| `BILLER_DATA_DIR` | No | — | Directorio base que deriva, por tenant, audit, idempotencia fiscal, borradores, idempotencia Kapso y replay de webhooks. Requerido para una puesta en producción simple y persistente. |
+| `KAPSO_IDEMPOTENCY_LOG_PATH` | No | — | Journal separado para deduplicar salidas de WhatsApp; con `BILLER_DATA_DIR` se deriva automáticamente. |
+| `BILLER_WEBHOOK_REPLAY_LOG_PATH` | No | — | Journal opcional de replay; con `BILLER_DATA_DIR` se deriva por tenant y sobrevive reinicios. Solo guarda digests de `message_id`. |
+| `BILLER_WEBHOOK_REPLAY_TTL_MS` | No | `86400000` | Ventana de deduplicación de webhooks entrantes (24 h). |
+| `BILLER_WEBHOOK_REPLAY_MAX_ENTRIES` | No | `10000` | Techo de ids retenidos por tenant (LRU). |
 
 ## Build, test y guard
 

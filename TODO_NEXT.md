@@ -87,8 +87,10 @@ Y de la revisión de seguridad:
   lo acepta. El binding separa a dos humanos autorizados bajo un cliente honesto;
   no protege contra el reenvío deliberado. Vale para las ocho tools, no es nuevo,
   pero el comentario de `recordatorioCobro.ts` promete un poco más de lo que da.
-- [ ] **Las retenciones/percepciones del original no se revierten** en la nota
-  sugerida (hoy se avisa, no se resuelve).
+- [x] **Las retenciones/percepciones del original no se revierten** en la nota
+  sugerida: cerrado de forma segura (sep-2026). Si existen, ya no se entrega un
+  cuerpo parcial que parezca ejecutable; el plan queda sin cuerpo y exige
+  reconstrucción/revisión explícita con el detalle original.
 
 ### Falta — y necesita una decisión, no código
 
@@ -156,11 +158,11 @@ archivo son los backlogs previos, todavía válidos.
   `null` siempre y el arreglo no habría atado nada. Fijado en
   `tests/recordatorioCobro.test.ts` ("el token de un remitente NO lo puede
   confirmar otro").
-- [ ] **NC recibida suma IVA compras en vez de restarlo.** `posicionIva.ts:166`
-  y `proveedores.ts` no miran `r.tipo`: una compra anulada por el proveedor
-  infla el crédito fiscal. **Antes de codear: confirmar con `npm run contrato`
-  si Biller devuelve `total_iva` negativo en las NC recibidas** — si ya viene
-  negativo, el fix es el opuesto. No tocar a ciegas.
+- [x] **NC recibida suma IVA compras en vez de restarlo:** corregido (sep-2026).
+  `posicionIva.ts` y `proveedores.ts` aplican el signo fiscal del tipo de CFE a
+  neto, IVA, total y retenciones. Para una NC usan `-abs`, por lo que funciona
+  tanto si la API entrega magnitudes positivas como si ya vienen negativas;
+  hay regresiones para ambas formas.
 - [x] **La NC que sugiere `biller_plan_anulacion` va siempre a 22%**: hecho
   (ago-2026). `lineasNota` (`src/services/anulacion.ts`) deriva la tasa en tres
   escalones: (1) `items[].indicador_facturacion` del original cuando todas las
@@ -319,17 +321,15 @@ equivocado en un documento fiscal.
   viene de un problema de la API y no del comprobante, excluirlo da un total
   bajo sin motivo. Decidir y unificar en un commit propio, con el diferencial
   que muestre qué comprobantes cambian de lado.
-- [ ] **"Envío no corresponde" no cuenta en ningún total, y probablemente
-  debería.** `esVentaValida` (`src/services/estadoDgi.ts`) sostiene que es una
+- [x] **"Envío no corresponde" no cuenta en ningún total:** corregido
+  (sep-2026). `esVentaValida` (`src/services/estadoDgi.ts`) sostiene que es una
   venta real y facturada, y que excluirla porque no viajó individualmente a DGI
-  es confundir el canal de reporte con la validez del documento. Ningún total le
-  hace caso: todos usan `estaAceptado`, que compara contra "Aceptado DGI" a
-  secas. Se dejó así a propósito en la unificación de criterios de agosto de
-  2026 —cambiar dos criterios fiscales en el mismo commit hace imposible saber
-  cuál movió qué número— y la diferencia está pineada en
-  `tests/estadoDgi.test.ts`. Lo que hay que medir antes de decidir: en un
-  comercio de tickets chicos, los e-Ticket por debajo de 5.000 UI quedan en ese
-  estado, así que contarlos puede mover el total de casi toda la facturación, y
+  es confundir el canal de reporte con la validez del documento. Todos los
+  totales comparten ahora `estaAceptado`, que reconoce la aceptación individual y
+  el reporte diario válido, mientras sigue excluyendo pendientes, rechazados y
+  estados desconocidos. El diferencial está cubierto transversalmente en
+  `tests/estadoDgi.test.ts`: en un comercio de tickets chicos puede mover el
+  total de casi toda la facturación, y
   hay que confirmar contra el panel de Biller si Biller los cuenta o no.
 
 - [x] **Un ítem incompleto en el MEDIO le corría los conceptos a las demás
@@ -507,7 +507,7 @@ cada uno está acá para no tener que volver a encontrarlo.
 
 - [x] **Campo `estado` en emitidos** — sí viene en el GET y ya se usa:
   `src/biller/normalize.ts` lo mapea y `solo_aceptados` (default `true`) cuenta
-  solo "Aceptado DGI", que es el criterio con el que Biller arma sus totales.
+  CFE válidos: "Aceptado DGI" y "Envío no corresponde" (reporte diario).
   Queda abierto lo otro: no hay un campo de **anulación**, así que una venta
   anulada por NC se descuenta por el signo negativo de la nota, no por estado.
 
