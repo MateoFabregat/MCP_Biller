@@ -131,6 +131,8 @@ function snapshotRegistro(fuente: RegistroTenantsVigente): RegistroTenants {
 export interface HttpTransportHandle {
   /** Puerto realmente escuchado (útil cuando se pide 0 en los tests). */
   port: number;
+  /** Revoca las sesiones ya abiertas de tenants removidos o modificados. */
+  cerrarSesionesTenants(tenantIds: readonly string[]): number;
   close: () => Promise<void>;
 }
 
@@ -771,6 +773,11 @@ export async function iniciarTransporteHttp(
 
   return {
     port: puerto,
+    cerrarSesionesTenants: (tenantIds) => {
+      let cerradas = 0;
+      for (const tenantId of new Set(tenantIds)) cerradas += sesiones.cerrarTenant(tenantId);
+      return cerradas;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         sesiones.cerrarTodo();

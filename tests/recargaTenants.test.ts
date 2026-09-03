@@ -7,6 +7,7 @@ import { ContextosPorTenant } from "../src/tenants/contextos.js";
 import { construirRegistro, entornoDe } from "../src/tenants/registry.js";
 import {
   MCP_PATH,
+  RegistroSesiones,
   iniciarTransporteHttp,
   rutaWebhookTenant,
 } from "../src/transport/http.js";
@@ -162,5 +163,42 @@ describe("invalidación selectiva de contextos", () => {
     ], BASE);
     expect(contextos.invalidarCambios(rotado, soloPanaderia)).toEqual(["ferreteria"]);
     expect(contextos.tamano).toBe(1);
+  });
+});
+
+describe("invalidación de sesiones por tenant", () => {
+  it("el handle cierra los transportes afectados y preserva los demás", async () => {
+    const sesiones = new RegistroSesiones();
+    const falso = () => {
+      const transporte = { cerrado: false, close: () => {
+        transporte.cerrado = true;
+        return Promise.resolve();
+      } };
+      return transporte;
+    };
+    const a1 = falso();
+    const a2 = falso();
+    const b1 = falso();
+    sesiones.registrar("panaderia:1", a1 as never);
+    sesiones.registrar("panaderia:2", a2 as never);
+    sesiones.registrar("ferreteria:1", b1 as never);
+    const config = makeConfig({ httpPort: 0, httpHost: "127.0.0.1", httpAuthToken: TOKEN_A });
+    const handle = await iniciarTransporteHttp(
+      config,
+      () => new McpServer({ name: "t", version: "0" }),
+      undefined,
+      undefined,
+      { registroSesiones: sesiones },
+    );
+
+    try {
+      expect(handle.cerrarSesionesTenants(["panaderia"])).toBe(2);
+      expect(a1.cerrado).toBe(true);
+      expect(a2.cerrado).toBe(true);
+      expect(b1.cerrado).toBe(false);
+      expect(sesiones.obtener("ferreteria:1")).toBeDefined();
+    } finally {
+      await handle.close();
+    }
   });
 });
