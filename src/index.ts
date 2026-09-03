@@ -185,15 +185,19 @@ async function main(): Promise<void> {
       );
     }
 
-    logger.info("biller-mcp-server listo (http).", {
-      endpoint: `http://${config.httpHost}:${handle.port}${MCP_PATH}`,
-      capability_mode: config.capabilityMode,
-      tools: getRegisteredToolNames(config.capabilityMode, {
-        enableIvaEstimado: config.enableIvaEstimado,
-      }),
-      kapso_configurado: inspection.kapso.configurado,
-    });
-
+    // LAS SEÑALES SE ATIENDEN ANTES DE DECIR "LISTO", Y NO ES ORDEN ESTÉTICO.
+    //
+    // Ese log ES la señal de que el server está arriba: lo esperan el test de
+    // integración, un supervisor y cualquier script de deploy que arranque el
+    // proceso y le mande algo. Con los handlers instalados DESPUÉS, entre el
+    // log y el `process.on` queda una ventana en la que la acción por defecto
+    // de SIGHUP —terminar el proceso— sigue vigente: quien lea "listo" y mande
+    // SIGHUP en ese instante mata el server en vez de recargarlo. Con SIGTERM
+    // es lo mismo con otra cara: en vez de cerrar ordenado, muere.
+    //
+    // La ventana es de milisegundos y por eso se veía como un test flaky
+    // ("fetch failed", una vez cada tantas corridas). Se reprodujo al 100%
+    // ensanchándola a 300 ms, que es lo que un arranque cargado hace solo.
     const apagar = (): void => {
       void handle.close().then(() => process.exit(0));
     };
@@ -210,6 +214,16 @@ async function main(): Promise<void> {
     process.on("SIGHUP", () => {
       recargarTenants();
     });
+
+    logger.info("biller-mcp-server listo (http).", {
+      endpoint: `http://${config.httpHost}:${handle.port}${MCP_PATH}`,
+      capability_mode: config.capabilityMode,
+      tools: getRegisteredToolNames(config.capabilityMode, {
+        enableIvaEstimado: config.enableIvaEstimado,
+      }),
+      kapso_configurado: inspection.kapso.configurado,
+    });
+
     return;
   }
 
