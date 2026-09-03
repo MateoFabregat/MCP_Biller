@@ -574,12 +574,33 @@ export function interpretarRespuestaLibre(raw: string, paso: string): RespuestaP
       if (es("no se", "no sé", "ni idea", "no tengo idea")) return { paso: "receptor_no_se" };
       return { paso: "ninguna" };
 
-    case "cliente":
+    case "cliente": {
       // La frase que la pregunta sugiere, y las que dice la gente en su lugar.
       if (es("sin identificar", "sin datos", "no tiene", "no tengo", "sin cliente", "no", "mostrador"))
         return { paso: "cliente_sin_identificar" };
       if (es("otro", "otro cliente", "no es ese")) return { paso: "cliente_otro" };
+
+      // EL RUT ESCRITO ES LA RESPUESTA ESPERADA, NO UN TEXTO CUALQUIERA.
+      //
+      // La pregunta dice "¿Cuál es el RUT de la empresa?" y no tiene ningún
+      // botón: si el número que el usuario escribe no se lee, la única salida
+      // es que el agente lo copie a `documento` — y si no lo hace, la misma
+      // pregunta rebota para siempre. Es el peor caso de un flujo: una
+      // pregunta que rechaza su propia respuesta.
+      //
+      // Se aceptan las formas en que la gente lo escribe (con puntos, guiones,
+      // espacios, o con "el rut es" adelante) y NADA MÁS: los dígitos sueltos
+      // se juntan y tienen que dar exactamente un documento uruguayo —12 de
+      // RUT, 7 u 8 de cédula—. "eran 3 no 2" da "32" y no es nada; un teléfono
+      // de 9 tampoco. La clasificación la hace `clasificarDocumento`, que ya es
+      // la que decide empresa vs. consumidor final en el resto del flujo.
+      const digitos = raw.replace(/[^0-9]/g, "");
+      if (digitos.length === 12 || digitos.length === 7 || digitos.length === 8) {
+        const doc = clasificarDocumento(digitos);
+        if (doc.tipo !== "desconocido") return { paso: "cliente", documento: doc.normalizado };
+      }
       return { paso: "ninguna" };
+    }
 
     case "moneda":
       if (es("pesos", "peso", "uyu", "en pesos", "pesos uruguayos"))
@@ -587,13 +608,38 @@ export function interpretarRespuestaLibre(raw: string, paso: string): RespuestaP
       if (es("dolares", "dolar", "usd", "en dolares")) return { paso: "moneda", moneda: "USD" };
       return { paso: "ninguna" };
 
-    case "montos_brutos":
+    // LOS TRES NOMBRES SON EL MISMO PASO PARA QUIEN CONTESTA.
+    //
+    // `siguientePaso` nunca devolvió `"montos_brutos"`: devuelve `"iva"` (la
+    // pregunta fusionada) o `"precio_incluye_iva"` (cuando la tasa ya está
+    // elegida). O sea que este `case` estaba escrito y no lo alcanzaba nadie:
+    // el usuario contestaba "sí" a "¿ya tienen el IVA adentro?" y le volvía la
+    // misma pregunta. Se dejan los tres nombres juntos para que no vuelva a
+    // pasar por un cambio de nombre.
+    case "iva":
+    case "precio_incluye_iva":
+    case "montos_brutos": {
       // La pregunta del mostrador uruguayo: ¿el precio que dijiste ya lleva IVA?
       if (es("si", "con iva", "iva incluido", "ya incluye", "incluye iva", "si ya incluye"))
         return { paso: "montos_brutos", incluye_iva: true };
-      if (es("no", "sin iva", "no incluye", "mas iva", "sin el iva"))
+      if (es("no", "sin iva", "no incluye", "mas iva", "sin el iva", "se suma aparte", "aparte"))
         return { paso: "montos_brutos", incluye_iva: false };
+
+      // LA OTRA PREGUNTA QUE TAMBIÉN SE LLAMA `iva`: "¿Qué IVA lleva?".
+      //
+      // Las dos devuelven el mismo nombre de paso, así que lo que las separa es
+      // el vocabulario: "básica" no contesta "¿ya incluye IVA?" y "sí" no
+      // contesta "¿qué tasa?". Por eso conviven en el mismo `case` sin
+      // pisarse — y por eso NO se adivina: lo que no está en ninguna de las dos
+      // listas sigue devolviendo `ninguna` y se repite la pregunta.
+      if (es("basica", "tasa basica", "22", "22%", "el 22"))
+        return { paso: "iva", indicador_facturacion: 3 };
+      if (es("minima", "tasa minima", "10", "10%", "el 10"))
+        return { paso: "iva", indicador_facturacion: 2 };
+      if (es("exento", "exenta", "sin impuesto", "0", "0%"))
+        return { paso: "iva", indicador_facturacion: 1 };
       return { paso: "ninguna" };
+    }
 
     case "item":
       if (es("listo", "nada mas", "ya esta", "eso es todo", "no mas", "terminamos"))

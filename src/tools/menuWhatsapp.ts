@@ -232,7 +232,9 @@ function siguienteAccion(r: ReturnType<typeof interpretarMensaje>): string {
     case "emision_cancelada":
       return (
         `El usuario tocó ✖️ Cancelar: NO emitas nada. Contestá corto, tipo "${r.respuesta_sugerida}". ` +
-        "No mandes el menú ni vuelvas a arrancar la emisión: cancelar significa que no quiere seguir."
+        "No mandes el menú ni vuelvas a arrancar la emisión: cancelar significa que no quiere seguir. " +
+        "El borrador quedó descartado del lado del server, así que si más tarde pide facturar de " +
+        "nuevo eso arranca de cero: no intentes recuperar lo que estaba cargado."
       );
     case "anulacion_revisada":
       return (
@@ -331,7 +333,10 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
     // `identidadDeConversacion`.
     let enFlujo = a.en_flujo ?? false;
     let flujoDerivado = false;
-    if (a.en_flujo === undefined && a.sesion !== undefined && a.sesion.trim() !== "") {
+    // La clave del borrador PROPIO, resuelta una sola vez: la usa el `en_flujo`
+    // derivado y también el descarte de ✖️ Cancelar, más abajo.
+    let claveBorrador: string | null = null;
+    if (a.sesion !== undefined && a.sesion.trim() !== "") {
       const store = ctx.getBorradorStore();
       const identidad = identidadDeConversacion(
         a.sesion,
@@ -341,8 +346,11 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
       );
       if (!identidad.ok) return rechazoSesionAjena(identidad.mensaje, ctx);
       if (identidad.identidad !== null) {
-        enFlujo = store.leer(store.clave(identidad.identidad)) !== null;
-        flujoDerivado = true;
+        claveBorrador = store.clave(identidad.identidad);
+        if (a.en_flujo === undefined) {
+          enFlujo = store.leer(claveBorrador) !== null;
+          flujoDerivado = true;
+        }
       }
     }
 
@@ -377,9 +385,29 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
         via: r.via,
         opcion: r.opcion?.id.replace("menu:", "") ?? "ninguna",
       });
+      // ✖️ CANCELAR DESCARTA LA FACTURA. NO LA DEJA ESPERANDO.
+      //
+      // Sin esto, cancelar solo le decía al agente "no emitas": el borrador
+      // seguía vivo, y el próximo "quiero facturar" —de otro cliente, media
+      // hora después— devolvía el preview de la factura cancelada con ✅ Emitir
+      // a un toque. Es el peor de los dos errores posibles: emitir algo que el
+      // usuario ya dijo que no.
+      //
+      // Solo lo dispara el BOTÓN, que es inequívoco: el usuario tocó algo que
+      // dice "Cancelar". Un "pará" escrito no borra nada —"pará, eran 3 no 2"
+      // es una corrección, no un descarte—, y para eso está `reiniciar`.
+      let borradorDescartado = false;
+      if (r.via === "emision_cancelada" && claveBorrador !== null) {
+        const store = ctx.getBorradorStore();
+        borradorDescartado = store.leer(claveBorrador) !== null;
+        store.borrar(claveBorrador);
+        enFlujo = false;
+      }
+
       interpretacion = {
         mensaje: a.mensaje,
         via: r.via,
+        borrador_descartado: borradorDescartado,
         opcion_id: r.opcion?.id ?? null,
         opcion_titulo: r.opcion?.titulo ?? null,
         tools_sugeridas: r.opcion?.tools ?? [],

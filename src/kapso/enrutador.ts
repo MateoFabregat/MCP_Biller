@@ -613,7 +613,21 @@ export function interpretarMensaje(raw: string, opciones: MenuOpciones = {}): In
         "el confirmation_token del dry-run; un 'sí' escrito no reemplaza al token.",
     };
   }
-  if (CANCELACIONES.includes(norm) || NEGACIONES_SECAS.includes(norm)) {
+  // UN "no" PELADO ADENTRO DEL FLUJO ES UNA RESPUESTA, NO UNA CANCELACIÓN.
+  //
+  // Es la asimetría espejo de `AFIRMACIONES_EN_FLUJO`, y la encontró la
+  // auditoría del flujo: la pregunta del IVA —"¿los $490 ya tienen el IVA
+  // adentro?"— se contesta que no, y ese "no" llegaba como `cancelacion`, o
+  // sea con la instrucción "NO emitas nada de lo que estaba pendiente;
+  // confirmale que quedó sin hacer". El usuario contestaba una pregunta y le
+  // frenaban la factura.
+  //
+  // Con una pregunta abierta, el que sabe qué significa "no" es el flujo, que
+  // la tiene adelante. Cancelar de verdad se sigue diciendo con todas las
+  // letras ("cancelá", "dejá", "pará"), que es `CANCELACIONES` y NO cambia:
+  // esas palabras no contestan ninguna pregunta.
+  const negacionSeca = NEGACIONES_SECAS.includes(norm);
+  if (CANCELACIONES.includes(norm) || (negacionSeca && opciones.en_flujo !== true)) {
     return {
       opcion: null,
       via: "cancelacion",
