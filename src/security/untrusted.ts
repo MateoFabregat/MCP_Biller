@@ -89,7 +89,7 @@ export const CAMPOS_NO_CONFIABLES: ReadonlySet<string> = new Set([
 export const NO_ENVUELTOS_A_PROPOSITO: ReadonlySet<string> = new Set(["nombre"]);
 
 /**
- * Claves cuyo subárbol lo escribimos NOSOTROS, y por lo tanto no se envuelve.
+ * Claves cuyo subárbol lo arma el MCP, y por lo tanto no se envuelve.
  *
  * POR QUÉ HACE FALTA UNA EXCEPCIÓN. La barrera envuelve por nombre de clave, y
  * eso es lo correcto para un `concepto` que vino de un comprobante ajeno. Pero
@@ -103,12 +103,55 @@ export const NO_ENVUELTOS_A_PROPOSITO: ReadonlySet<string> = new Set(["nombre"])
  * "⟦dato-no-confiable⟧ Servicio de consultoría ⟦/dato-no-confiable⟧" impreso.
  *
  * AGREGAR UNA CLAVE ACÁ ES UNA DECISIÓN DE SEGURIDAD, no de formato: abre un
- * subárbol entero por el que el texto de un tercero saldría sin marcar. Solo va
- * una clave cuyo contenido sea SIEMPRE un literal del repo. Si algún día un
- * `ejemplo` se arma con datos traídos de la API, esta excepción deja de valer y
- * hay que sacarla.
+ * subárbol entero por el que el texto de un tercero saldría sin marcar. Los
+ * ejemplos son literales del repo; los demás nombres son sobres estructurales
+ * de escritura/preview que el MCP arma para el modelo y que pueden volver a
+ * entrar al CFE. Si cualquiera de ellos empieza a conservar datos traídos de
+ * la API, esta excepción deja de valer y hay que sacarla o separar el campo.
  */
-export const SUBARBOLES_PROPIOS: ReadonlySet<string> = new Set(["ejemplo"]);
+export const SUBARBOLES_PROPIOS: ReadonlySet<string> = new Set([
+  "ejemplo",
+  // El cuerpo de estos campos lo arma el MCP para que vuelva a entrar en una
+  // operación de escritura o para mostrar un preview. Puede contener
+  // `concepto`, `descripcion` o `razon_social`, pero no son datos recibidos de
+  // Biller y no se deben devolver con las marcas de salida.
+  "payload_preview",
+  "query_preview",
+  "comprobante_borrador",
+  "estado_entendido",
+  "ejemplo_minimo",
+  "cuerpo_sugerido",
+  "totales_estimados",
+]);
+
+/**
+ * Claves cuyo valor conserva una respuesta upstream sin forma confiable.
+ *
+ * A diferencia de `CAMPOS_NO_CONFIABLES`, que cubre un string conocido por su
+ * nombre, estas claves abren un subárbol: el contrato dice `unknown` (o es un
+ * campo extra que Biller puede cambiar), así que TODO string debajo queda bajo
+ * la misma barrera, incluso si mañana aparece con un nombre arbitrario.
+ *
+ * La lista es deliberadamente explícita. Recorrer cualquier objeto de la
+ * respuesta envolvería también textos que escribe el MCP (`resumen`,
+ * `warnings`, previews y etiquetas), y esas marcas terminarían impresas en un
+ * CFE al hacer round-trip. Los normalizadores son quienes fijan estos nombres.
+ */
+export const SUBARBOLES_UPSTREAM_DESCONOCIDOS: ReadonlySet<string> = new Set([
+  // Comprobante emitido: campos z.unknown() o red de seguridad.
+  "campos_extra",
+  "cliente",
+  "cae",
+  "descuentos_recargos",
+  "referencia_global",
+  "retenciones_percepciones",
+  "indicador_agente_responsable",
+  // Datos DGI con forma upstream no tipada.
+  "certificado",
+  "domicilio_fiscal_principal",
+  // Respuesta de un POST: el OpenAPI no declara su forma.
+  "response",
+]);
 
 const MARCA_INICIO = "⟦dato-no-confiable⟧";
 const MARCA_FIN = "⟦/dato-no-confiable⟧";

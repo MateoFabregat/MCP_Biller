@@ -24,6 +24,7 @@ import { pretty, type ToolContext, type ToolResult } from "../tools/shared.js";
 import {
   CAMPOS_NO_CONFIABLES,
   SUBARBOLES_PROPIOS,
+  SUBARBOLES_UPSTREAM_DESCONOCIDOS,
   envolverNoConfiable,
   yaEnvuelto,
 } from "./untrusted.js";
@@ -48,6 +49,10 @@ const CAMPOS_NO_CONFIABLES_LOWER: ReadonlySet<string> = new Set(
   [...CAMPOS_NO_CONFIABLES].map((c) => c.toLowerCase()),
 );
 
+const SUBARBOLES_UPSTREAM_DESCONOCIDOS_LOWER: ReadonlySet<string> = new Set(
+  [...SUBARBOLES_UPSTREAM_DESCONOCIDOS].map((c) => c.toLowerCase()),
+);
+
 /**
  * Recorre un valor arbitrario envolviendo los strings cuya CLAVE está en
  * `CAMPOS_NO_CONFIABLES`. `claveActual` es el nombre bajo el que vino el valor.
@@ -62,6 +67,7 @@ function envolverCamposNoConfiables(
   claveActual: string | null,
   depth: number,
   propio = false,
+  upstreamDesconocido = false,
 ): unknown {
   if (depth > MAX_DEPTH) return valor;
 
@@ -69,7 +75,7 @@ function envolverCamposNoConfiables(
     if (
       !propio &&
       claveActual !== null &&
-      CAMPOS_NO_CONFIABLES_LOWER.has(claveActual.toLowerCase()) &&
+      (upstreamDesconocido || CAMPOS_NO_CONFIABLES_LOWER.has(claveActual.toLowerCase())) &&
       !yaEnvuelto(valor)
     ) {
       return envolverNoConfiable(valor);
@@ -78,15 +84,26 @@ function envolverCamposNoConfiables(
   }
 
   if (Array.isArray(valor)) {
-    // Los elementos heredan la clave del array: `items: [...]` no marca, pero
-    // `motivos: ["texto de tercero"]` sí debe marcar cada elemento.
-    return valor.map((v) => envolverCamposNoConfiables(v, claveActual, depth + 1, propio));
+    // Los elementos heredan el contexto del array. En particular,
+    // `campos_extra: [{ ... }]` y cualquier array dentro de un campo `unknown`
+    // siguen siendo upstream aunque sus objetos usen claves arbitrarias.
+    return valor.map((v) =>
+      envolverCamposNoConfiables(v, claveActual, depth + 1, propio, upstreamDesconocido),
+    );
   }
 
   if (typeof valor === "object" && valor !== null) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(valor as Record<string, unknown>)) {
-      out[k] = envolverCamposNoConfiables(v, k, depth + 1, propio || SUBARBOLES_PROPIOS.has(k));
+      // Un subárbol upstream domina a una excepción por nombre: un atacante no
+      // puede esconderse bajo `campos_extra.ejemplo` para heredar la excepción
+      // reservada a los ejemplos escritos por el MCP. Una vez dentro de un
+      // subárbol propio, en cambio, todo lo que cuelga de él sigue siendo propio.
+      const hijoPropio = propio || (!upstreamDesconocido && SUBARBOLES_PROPIOS.has(k));
+      const hijoUpstream =
+        !hijoPropio &&
+        (upstreamDesconocido || SUBARBOLES_UPSTREAM_DESCONOCIDOS_LOWER.has(k.toLowerCase()));
+      out[k] = envolverCamposNoConfiables(v, k, depth + 1, hijoPropio, hijoUpstream);
     }
     return out;
   }
