@@ -359,8 +359,30 @@ function tasaDe(indicador: number): number | null {
  *
  * Exportada para poder testearla sin construir un plan entero.
  */
+/**
+ * La serie y el número del original, como texto seguro para un CFE.
+ *
+ * `serie` la normaliza `toStringOrNull`, o sea que es texto libre de la API, y
+ * termina dentro de `concepto` — que viaja en `cuerpo_sugerido`, el único
+ * subárbol EXENTO de las marcas de dato no confiable (está en
+ * `SUBARBOLES_PROPIOS` porque es un ejemplo para copiar, y marcarlo imprimía
+ * "⟦dato-no-confiable⟧" en el CFE). Esa exención vale mientras el cuerpo no
+ * conserve texto libre de upstream: acá es donde se hace cierto.
+ *
+ * Una serie de DGI son letras y dígitos. Lo que no entra en eso no se
+ * "escapa" ni se marca: se descarta, y queda el número, que es lo que
+ * identifica al comprobante de todos modos.
+ */
+function identificacionOriginal(c: ComprobanteAAnular): string {
+  const serie = (c.serie ?? "").trim();
+  const seguro = /^[A-Za-z0-9]{1,10}$/.test(serie) ? serie : "";
+  const numero = c.numero === null || c.numero === undefined ? "" : String(c.numero);
+  if (seguro === "") return numero;
+  return numero === "" ? seguro : `${seguro}-${numero}`;
+}
+
 export function lineasNota(c: ComprobanteAAnular, razon: string): LineasNota {
-  const referencia = `${razon} ${c.serie ?? ""}-${c.numero ?? ""}`.trim();
+  const referencia = `${razon} ${identificacionOriginal(c)}`.trim();
   // Positivo: el signo lo da el TIPO de comprobante, no el importe. Una nota de
   // crédito con importe negativo se resta dos veces.
   const total = redondear2(Math.abs(c.total ?? 0));
