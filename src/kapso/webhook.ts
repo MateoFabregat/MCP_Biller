@@ -188,7 +188,9 @@ export function normalizarEvento(payload: unknown): EventoEntrante {
   const base = {
     phone_number_id: phoneNumberId,
     from: texto(mensaje.from) === null ? null : normalizarTelefono(String(mensaje.from)),
-    message_id: texto(mensaje.id),
+    // The id is normalized once at the ingress seam. Replay protection must
+    // consume this value as-is and never derive identity from the raw body.
+    message_id: texto(mensaje.id)?.trim() ?? null,
     perfil: perfilObj === null ? null : texto(perfilObj.name),
   };
 

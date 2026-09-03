@@ -88,6 +88,11 @@ function tenantsCrudos(): unknown[] {
 }
 
 /** Payload con la forma real de la Cloud API. `numero` es a QUIÉN le escribieron. */
+// Cada mensaje real de Meta trae su propio `message_id`; repetir el id es un
+// reenvío, y el webhook lo descarta por replay protection. Estas fixtures
+// simulan mensajes DISTINTOS, así que cada llamada emite un id nuevo.
+let contadorMensajes = 0;
+
 function eventoTexto(body: string, from: string, numero: string | null): Record<string, unknown> {
   return {
     object: "whatsapp_business_account",
@@ -103,7 +108,13 @@ function eventoTexto(body: string, from: string, numero: string | null): Record<
                 : { metadata: { display_phone_number: "598…", phone_number_id: numero } }),
               contacts: [{ profile: { name: "Quien sea" }, wa_id: from }],
               messages: [
-                { from, id: "wamid.HBg", timestamp: "1780000000", type: "text", text: { body } },
+                {
+                  from,
+                  id: `wamid.HBg${++contadorMensajes}`,
+                  timestamp: "1780000000",
+                  type: "text",
+                  text: { body },
+                },
               ],
             },
           },
@@ -275,10 +286,12 @@ describe("el borrador de una empresa SÍ se encuentra", () => {
     // contesta el MENÚ ENTERO a alguien que estaba corrigiendo una cantidad.
     const { handle, url, stores } = await levantarMultiEmpresa();
     try {
-      const payload = eventoTexto("para, eran 3 no 2", REMITENTE_A, NUMERO_A);
+      // Dos mensajes distintos del mismo humano: cada uno con su `message_id`,
+      // porque reusar el id sería un reenvío y lo corta el replay protection.
       const ruta = url(rutaWebhookTenant("panaderia"));
+      const texto = "para, eran 3 no 2";
 
-      const sinBorrador = await postear(ruta, payload, SECRETO_A);
+      const sinBorrador = await postear(ruta, eventoTexto(texto, REMITENTE_A, NUMERO_A), SECRETO_A);
       expect(sinBorrador.body.accion).toBe("responder");
       expect(sinBorrador.body.mostrar_menu).toBe(true);
 
@@ -286,7 +299,7 @@ describe("el borrador de una empresa SÍ se encuentra", () => {
       const store = stores.get("panaderia")!;
       store.guardar(store.clave(REMITENTE_A), { clase_receptor: "consumidor_final" });
 
-      const conBorrador = await postear(ruta, payload, SECRETO_A);
+      const conBorrador = await postear(ruta, eventoTexto(texto, REMITENTE_A, NUMERO_A), SECRETO_A);
       // Delegar = se lo pasa al agente, que tiene al humano adelante. El webhook
       // sigue sin ejecutar nada que toque plata: leyó su propio estado.
       expect(conBorrador.body.accion).toBe("delegar");

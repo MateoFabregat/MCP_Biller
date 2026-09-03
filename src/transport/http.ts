@@ -30,9 +30,15 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import {
   DEFAULT_HTTP_MAX_SESSIONS,
   DEFAULT_HTTP_SESSION_TTL_MS,
+  DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES,
+  DEFAULT_WEBHOOK_REPLAY_TTL_MS,
   type BillerConfig,
 } from "../config.js";
 import type { BorradorStore } from "../kapso/borradorStore.js";
+import {
+  createWebhookReplayStore,
+  type WebhookReplayStore,
+} from "../kapso/webhookReplay.js";
 import {
   HEADER_FIRMA,
   MAX_BODY_BYTES,
@@ -110,6 +116,8 @@ export interface AmbitoWebhook {
   tenantId: string | null;
   config: BillerConfig;
   borradores?: BorradorStore;
+  /** Store de replay de ESTA empresa. Si falta, lo crea el transporte. */
+  webhookReplay?: WebhookReplayStore;
 }
 
 /**
@@ -126,6 +134,36 @@ type RegistroTenantsVigente = RegistroTenants | FuenteRegistroTenants;
 
 function snapshotRegistro(fuente: RegistroTenantsVigente): RegistroTenants {
   return "actual" in fuente ? fuente.actual() : fuente;
+}
+
+/**
+ * Owns one replay store per tenant/config snapshot.  A SIGHUP that changes a
+ * tenant's path or limits gets a new store, so state from the previous config
+ * cannot silently bleed into the replacement tenant.  An unchanged tenant
+ * keeps its store, which is what makes in-memory dedupe survive requests.
+ */
+export class RegistroReplayWebhooks {
+  private readonly stores = new Map<
+    string,
+    { fingerprint: string; store: WebhookReplayStore }
+  >();
+
+  obtener(tenantId: string, config: BillerConfig): WebhookReplayStore {
+    const path = config.webhookReplayLogPath;
+    const ttl = config.webhookReplayTtlMs ?? DEFAULT_WEBHOOK_REPLAY_TTL_MS;
+    const maxEntries = config.webhookReplayMaxEntries ?? DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES;
+    const fingerprint = `${path ?? ""}\0${ttl}\0${maxEntries}`;
+    const previo = this.stores.get(tenantId);
+    if (previo?.fingerprint === fingerprint) return previo.store;
+    const store = createWebhookReplayStore(path, { tenantId, ttlMs: ttl, maxEntries });
+    this.stores.set(tenantId, { fingerprint, store });
+    return store;
+  }
+
+  /** Optional cleanup for removed tenants after a registry reload. */
+  quitar(tenantId: string): void {
+    this.stores.delete(tenantId); // check-readonly:allow Map.delete del registro, no es HTTP
+  }
 }
 
 export interface HttpTransportHandle {
@@ -238,6 +276,7 @@ async function atenderWebhook(
   borradores: BorradorStore | undefined,
   registro: RegistroTenants,
   resolverAmbito: ResolverAmbitoWebhook | undefined,
+  replayWebhooks: RegistroReplayWebhooks,
 ): Promise<void> {
   const multiEmpresa = registro.tenants.length > 0;
 
@@ -346,6 +385,41 @@ async function atenderWebhook(
     }
   }
 
+  // Claim BEFORE deciding or doing any response/send effect.  A retry with the
+  // same normalized message_id gets a quiet 200 and never reaches the router.
+  // This store is selected only after the path + phone_number_id selected the
+  // tenant, so the same WhatsApp id in two companies remains independent.
+  const replay = ambito.webhookReplay ?? replayWebhooks.obtener(
+    ambito.tenantId ?? ambito.config.tenantId,
+    ambito.config,
+  );
+  if (evento.message_id !== null) {
+    let reclamado: boolean;
+    try {
+      reclamado = replay.claim(evento.message_id);
+    } catch (err) {
+      logger.error("kapso.webhook.replay_no_disponible", {
+        empresa: ambito.tenantId,
+        message_id_present: true,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      responderJson(res, 503, { error: "replay_unavailable" });
+      return;
+    }
+    if (!reclamado) {
+      logger.info("kapso.webhook.replay_duplicado", {
+        empresa: ambito.tenantId,
+        message_id_present: true,
+      });
+      responderJson(res, 200, {
+        procesado: false,
+        duplicado: true,
+        motivo: "message_id_repetido",
+      });
+      return;
+    }
+  }
+
   const decision = decidirWebhook(evento, {
     capabilityMode: ambito.config.capabilityMode,
     remitentesAutorizados: remitentesAutorizados(ambito.config),
@@ -355,6 +429,8 @@ async function atenderWebhook(
     // ninguna clave de sesión de ningún tenant.
     ...(ambito.borradores === undefined ? {} : { borradores: ambito.borradores }),
   });
+
+  if (evento.message_id !== null) replay.markProcessed(evento.message_id);
 
   // El log lleva el HECHO, nunca el texto: un mensaje entrante puede tener
   // montos, nombres y —si el que escribe quiere— un intento de inyección.
@@ -664,6 +740,7 @@ export async function iniciarTransporteHttp(
   const sesiones =
     opciones?.registroSesiones ??
     new RegistroSesiones({ ttlMs: config.httpSessionTtlMs, techo: config.httpMaxSessions });
+  const replayWebhooks = new RegistroReplayWebhooks();
 
   const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
@@ -696,6 +773,7 @@ export async function iniciarTransporteHttp(
           borradores,
           registroActual,
           opciones?.resolverAmbitoWebhook,
+          replayWebhooks,
         );
         return;
       }
@@ -816,7 +894,10 @@ export async function iniciarTransporteHttp(
     port: puerto,
     cerrarSesionesTenants: (tenantIds) => {
       let cerradas = 0;
-      for (const tenantId of new Set(tenantIds)) cerradas += sesiones.cerrarTenant(tenantId);
+      for (const tenantId of new Set(tenantIds)) {
+        cerradas += sesiones.cerrarTenant(tenantId);
+        replayWebhooks.quitar(tenantId);
+      }
       return cerradas;
     },
     close: () =>
