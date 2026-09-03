@@ -76,12 +76,16 @@ Y de la revisión de seguridad:
   del tenant y autentica payload, endpoint, ambiente, tenant, empresa,
   conversación, timestamp y versión de política. El formato SHA-256 anterior se
   rechaza y obliga a repetir el dry-run.
-- [ ] **`cuerpo_sugerido` sale con las marcas `⟦dato-no-confiable⟧` adentro**
-  (preexistente). Es *exactamente* "algo pensado para volver a entrar en un
-  payload" y usa dos claves de `CAMPOS_NO_CONFIABLES` (`razon_referencia`,
-  `concepto`). `limpiarMarcasProfundo` las saca y avisa, así que no llega a un
-  CFE — pero el caso mixto pasó de 1 ítem a hasta 3, o sea tres veces más
-  superficie para ese warning.
+- [x] **`cuerpo_sugerido` sale con las marcas `⟦dato-no-confiable⟧` adentro.**
+  RESUELTO (sep-2026). La clave está en `SUBARBOLES_PROPIOS`, así que el cuerpo
+  sale limpio y no depende de que `limpiarMarcasProfundo` lo rescate. Esa
+  exención tenía una contracara que sí seguía abierta y se cerró en el mismo
+  paso: el `concepto` de la nota se armaba con la `serie` del original, que es
+  texto libre de la API, o sea texto de tercero saliendo SIN marcar por el único
+  campo pensado para volver a entrar a un CFE. `identificacionOriginal`
+  (`src/services/anulacion.ts`) la restringe a lo que una serie de DGI puede
+  ser; lo fija `tests/anulacion.test.ts` ("lo que Biller escribe no entra libre
+  al concepto de la nota").
 - [ ] **La identidad del token vale lo que valga el cliente.** Un modelo (o una
   inyección) puede afirmar ser **otro número ya autorizado** y `verificarRemitente`
   lo acepta. El binding separa a dos humanos autorizados bajo un cliente honesto;
