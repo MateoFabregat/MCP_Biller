@@ -1,7 +1,7 @@
 # Plan plug-and-play: de "un comando por empresa" a "cada empresa desde su propio Claude/ChatGPT"
 
-Estado al 28/08/2026. La Fase 1 está **implementada** (`onboard --crear`); este
-documento es el handoff de las Fases 2 y 3 para quien las ejecute. Antes de
+Estado al 03/09/2026. Las Fases 1 y 2 están **implementadas**; este documento
+es el handoff de la Fase 3 para quien la ejecute. Antes de
 tocar nada: leé `docs/HANDBOOK.md` (las barreras), `docs/ARQUITECTURA.md` (el
 mapa) y la sección "Auditoría integral" de `TODO_NEXT.md`, que lista lo
 que quedó abierto con repro.
@@ -40,57 +40,24 @@ que `services/resolver.ts`).
 Lo que NO hace, a propósito: no toca Kapso, no habilita escritura, no inventa
 allowlists. Todo eso queda impreso como "pendiente, a mano y a conciencia".
 
-## Fase 2 — Recarga en caliente del registro (est. 1–2 días)
+## Fase 2 — Recarga en caliente del registro ✅ HECHA
 
-**El problema:** `cargarTenants` corre UNA vez en `src/index.ts`. Dar de alta
-una empresa = reiniciar el proceso = corte para todas las demás. Con esto, el
-alta pasa a ser: `onboard --crear` + `kill -HUP <pid>`.
+El alta pasa a ser `onboard --crear` + `kill -HUP <pid>`, sin reiniciar el
+proceso. `HolderRegistroTenants` publica solo snapshots ya validados; el
+transporte y el webhook leen el snapshot vigente por request.
 
-**Diseño (de menor a mayor riesgo):**
+**Comportamiento entregado:**
 
-1. **`RegistroTenants` detrás de una referencia mutable con reemplazo atómico.**
-   Hoy `iniciarTransporteHttp` recibe el registro por valor. Cambiarlo a un
-   contenedor (`{ actual(): RegistroTenants }`) que el transporte consulte en
-   cada request (la resolución por token ya recorre la lista completa en tiempo
-   constante — `resolverTenant` — así que consultar la referencia no cambia el
-   perfil de timing). El reemplazo: se carga y valida el registro NUEVO entero
-   (`cargarTenants`), y **solo si valida** se publica con una asignación. Un
-   registro inválido en disco NO baja nada: se loguea el error y sigue el
-   anterior. Nunca un estado a medias.
+1. `SIGHUP` carga y valida el registro completo; ante error, conserva el
+   snapshot, contextos y sesiones anteriores.
+2. Ante una carga válida, se invalidan solo contextos y sesiones de tenants
+   eliminados, con overlay distinto o con `auth_token` rotado. Los demás objetos
+   se preservan por identidad.
+3. El modo mono-tenant ignora `SIGHUP` sin ruido. No hay watcher ni endpoint
+   HTTP de administración.
 
-2. **`SIGHUP` como disparador.** En `index.ts`, junto a los handlers de
-   SIGINT/SIGTERM. NO un endpoint HTTP de reload — eso es superficie de ataque
-   nueva para ahorrarse un ssh, y la Fase 3 lo va a hacer bien con identidad de
-   operador.
-
-3. **Invalidar `ContextosPorTenant` de los tenants cuyo `env` cambió.** ESTE ES
-   EL PUNTO DELICADO. Un contexto viejo con el `IdempotencyStore` viejo y el
-   token nuevo es exactamente el estado cruzado que el invariante 4 del HANDBOOK
-   prohíbe. Regla: comparar el `env` serializado (con `stableStringify`, ya
-   existe en utils) del tenant viejo vs. nuevo; si difiere, `contextos` descarta
-   ese contexto (los archivos de persistencia quedan; el próximo request lo
-   reconstruye). Un tenant que desaparece del registro pierde su contexto Y sus
-   sesiones HTTP (`RegistroSesiones` ya tiene el cierre por desalojo —
-   `cerrarTenant` está escrito y SIN llamador, `src/transport/http.ts`: este es
-   su llamador). Un tenant que cambia de `auth_token` también: sesión vieja con
-   credencial vieja no puede seguir viva.
-
-4. **El webhook multi-empresa** resuelve por `porPhoneNumberId` — tiene que leer
-   del contenedor, no de una captura del arranque. Revisar `resolverAmbitoWebhook`
-   en `index.ts`.
-
-**Tests que tienen que existir (la barrera es el test, no la intención):**
-- Recarga con registro inválido → el server sigue atendiendo con el anterior.
-- Tenant que cambia de `BILLER_API_TOKEN` → su contexto se reconstruye, los
-  demás contextos son EL MISMO objeto (identidad, no igualdad).
-- Tenant eliminado → sus sesiones HTTP mueren (request con su `mcp-session-id`
-  → 404) y su `auth_token` deja de autenticar.
-- Tenant agregado → atiende sin reinicio.
-- El proceso mono-tenant (sin registro) ignora SIGHUP sin ruido.
-
-**Archivos:** `src/index.ts`, `src/transport/http.ts` (recibir el contenedor),
-`src/tenants/contextos.ts` (invalidación selectiva), `tests/tenants.test.ts` /
-`tests/httpTransport.test.ts`.
+**Archivos:** `src/tenants/holder.ts`, `src/tenants/recarga.ts`,
+`src/tenants/contextos.ts`, `src/index.ts`, `src/transport/http.ts` y sus tests.
 
 **Qué NO hacer:** no recargar "por archivo watcheado" (fsevents + iCloud en
 macOS = recargas fantasma; ya nos comimos los archivos " 2" — ver

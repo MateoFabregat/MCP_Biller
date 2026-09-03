@@ -27,6 +27,7 @@ flowchart TB
     subgraph server["Servidor MCP"]
         HARDEN["hardenServer()<br/><b>barrera de salida</b>"]
         TOOLS["27 tools de lectura<br/>+ 7 tools de escritura"]
+        RES["MCP Resource<br/><i>biller://catalogos/cfe</i>"]
         PROMPTS["4 prompts<br/><i>rutinas guiadas</i>"]
     end
 
@@ -44,7 +45,8 @@ flowchart TB
     subgraph logica["Lógica de negocio (pura, testeable sin red)"]
         SERV["services/<br/><i>agregación y reglas</i>"]
         VENT["services/ventana.ts<br/><i>la costura de lectura</i>"]
-        SCHEMA["biller/<br/><i>schemas, normalizadores, cache</i>"]
+        SCHEMA["biller/<br/><i>schemas, normalizadores,<br/>caches LRU por tenant</i>"]
+        LIMITES["rate limiters por ToolContext<br/><i>normal y DGI, aislados por tenant</i>"]
     end
 
     subgraph salida["Salidas"]
@@ -61,6 +63,7 @@ flowchart TB
     WH -- "interpreta y delega,<br/>NO ejecuta" --> ENRUT
     WH --> BORR
     HARDEN --> TOOLS
+    HARDEN --> RES
     TOOLS --> PROMPTS
     TOOLS --> MENU
     MENU --> INTENC
@@ -73,7 +76,7 @@ flowchart TB
     TOOLS --> VENT
     VENT --> SERV
     SERV --> SCHEMA
-    SCHEMA --> GET
+    SCHEMA --> LIMITES --> GET
     TOOLS -- "gate de escritura" --> POST
     RENDER --> KAPSO
 
@@ -99,12 +102,30 @@ flowchart TB
    enrutador; los dos dependen del catálogo, y el catálogo no depende de nadie.
    `menu.ts` re-exporta todo, así que partir el módulo en cinco no cambió ni un
    importador. Ver §2.1.
+5. **Las Resources no son tools.** `registerAllResources` publica contenido
+   local y read-only; por eso el catálogo CFE se puede cachear del lado del
+   cliente sin llamar a Biller ni ver información de una empresa.
 
 **Y una que se ve mejor en el dibujo que en una lista:** el webhook y las tools
 **convergen en el mismo `borradorStore`**. Por eso `en_flujo` —"¿hay una emisión
 a medio cargar en esta conversación?"— dejó de ser un booleano que el modelo
 tenía que recordar y pasó a ser algo que el server *sabe*: lo lee del store, por
 los dos caminos, con la misma clave. Ver [`KAPSO.md`](KAPSO.md) §1.0.
+
+### 1.1 Estado por tenant y recarga segura
+
+Cada `ToolContext` carga la configuración efectiva de una empresa antes de
+crear sus dos rate limiters y su `CacheDetalles`. Los límites por defecto son 30
+requests/s para operaciones normales y 1 para DGI/recibidos; se pueden ajustar
+con `BILLER_RATE_LIMIT_DEFAULT_RPS` y `BILLER_RATE_LIMIT_DGI_RPS`, siempre como
+enteros positivos. El cache de detalles conserva TTL y copias defensivas, pero
+su presupuesto y política LRU pertenecen al tenant.
+
+En transporte HTTP con registro de tenants, `SIGHUP` construye y valida un
+registro completo antes de publicar un nuevo snapshot. Si cambió el overlay o
+la credencial de un tenant, se descartan solo su contexto y sus sesiones HTTP;
+los tenants intactos conservan ambos. Una recarga inválida no cambia nada. No
+hay watcher de archivos ni endpoint de recarga.
 
 ---
 

@@ -38,6 +38,8 @@ flowchart TB
         REG["4· registerAllTools<br/><i>27 lectura + 7 escritura</i>"]
     end
 
+    RES["registerAllResources<br/><i>biller://catalogos/cfe · solo lectura</i>"]
+
     subgraph tools["TOOLS — src/tools/"]
         LECTURA["27 de lectura<br/><i>resumen, cuenta corriente, rankings,<br/>vencimientos, alertas, métricas…</i>"]
         GUIA["biller_emision_guiada<br/><i>deduce el tipo de CFE,<br/>una pregunta por vez</i>"]
@@ -58,7 +60,8 @@ flowchart TB
     end
 
     subgraph datos["DATOS"]
-        CACHE["cacheVentanas<br/><i>TTL doble 120s/30min,<br/>clave incluye la credencial</i>"]
+        CACHE["caches por tenant<br/><i>ventanas + detalles LRU,<br/>TTL y presupuesto aislados</i>"]
+        LIMITES["rate limiters por contexto<br/><i>30 rps normal · 1 rps DGI,<br/>configurables por tenant</i>"]
         BILLER["API de Biller<br/><i>GET v2 · POST v3/emitir</i>"]
         KAPSO["API de Kapso<br/><i>WhatsApp: interactivos, media</i>"]
         DGI["DGI<br/><i>el destino final de todo CFE</i>"]
@@ -68,10 +71,11 @@ flowchart TB
     WA --> KAPSO --> WH
     WA -.->|Agent Node| HTTP
     STDIO & HTTP & SLS --> DIA --> MET --> SAL --> ENT --> REG
+    REG --> RES
     REG --> LECTURA & GUIA & ESCRITURA
     GUIA <--> STORE
     GUIA --> EMI
-    LECTURA --> CALC --> CACHE --> BILLER
+    LECTURA --> CALC --> CACHE --> LIMITES --> BILLER
     ESCRITURA --> GATE --> IDEM --> AUDIT --> BILLER --> DGI
     WH --> MENU
 ```
@@ -88,6 +92,11 @@ Tres cosas que el diagrama no puede decir y hay que saber:
 3. **El webhook entra ANTES del bearer auth** (viene de Meta, no de un cliente
    autenticado) y por eso su seguridad es otra: HMAC + allowlist + 404 sin
    secreto + rechazo con 200 para no confirmar nada a quien sondea.
+4. **Cada tenant es dueño de su presupuesto y de sus detalles.** Los limiters y
+   el cache LRU se construyen dentro de su `ToolContext`; una empresa no enfría
+   ni agota la capacidad de otra.
+5. **`biller://catalogos/cfe` es un MCP Resource**, no una tool: sirve el
+   catálogo CFE local, determinístico y cacheable, sin tenant, red ni escritura.
 
 ---
 
@@ -113,11 +122,18 @@ approvals/WhatsApp  → + BILLER_APPROVAL_SECRET exclusiva del tenant
 WhatsApp saliente   → + KAPSO_API_KEY + allowlist de destinatarios
 WhatsApp entrante   → + transporte HTTP público + KAPSO_WEBHOOK_SECRET + allowlist de remitentes
 multi-tenant        → + BILLER_TENANTS_JSON (overlay de env por empresa)
+recarga multi-tenant → `kill -HUP <pid>` (valida y publica un snapshot atómico)
 ```
 
 Cada flecha es opt-in: el server funciona con solo las dos primeras variables,
 y cada capa que se suma trae su barrera. `node scripts/onboard.mjs` verifica la
 cadena entera contra la API real (solo GET).
+
+En HTTP multi-tenant, `SIGHUP` recarga el registro sin watcher ni endpoint de
+administración: primero valida el archivo completo, luego descarta únicamente
+contextos y sesiones de tenants eliminados, con configuración o credencial
+cambiada, y por último publica el snapshot. Si la carga falla, sigue atendiendo
+con el snapshot anterior.
 
 ---
 

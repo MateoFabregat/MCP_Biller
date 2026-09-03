@@ -683,9 +683,12 @@ backlog histórico —observabilidad y estado persistente del borrador— ya est
 2. **Templates de WhatsApp.** El push proactivo fuera de la ventana de 24 h los
    necesita, y el sandbox de Kapso no los tiene. Bloquea el cierre de mes
    proactivo (BRAINSTORM V5.5).
-3. **Migrar los schemas a Zod v4** (BRAINSTORM V5.4): borra el parche de
-   dialecto (`transport/dialecto.ts`) y emite JSON Schema 2020-12 nativo.
-4. Resource MCP con catálogo de tipos de CFE.
+3. **Resolver el dialecto de schemas por evidencia.** Zod v4 no elimina por sí
+   solo `transport/dialecto.ts`; mantener el canario de protocolo y retirar el
+   parche únicamente cuando el SDK deje de emitir draft-07 y `$ref`.
+4. **Contrato externo con datos dedicados.** El harness GET read-only ya captura
+   evidencia saneada con `BILLER_CONTRATO_READONLY=1`; queda operar el probe POST
+   de idempotencia con sus dobles opt-ins contra TEST.
 5. Validar paginación / filtros nativos / endpoint GET de clientes cuando existan.
 
 ## Fuente

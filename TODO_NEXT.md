@@ -214,12 +214,11 @@ archivo son los backlogs previos, todavía válidos.
   eval (44/44).
 - [ ] **Ecos crudos**: `$-200` en pregunta/botón (`emision.ts:1577`), precios
   huérfanos sin formatear (`borradorEmision.ts:423`). Usar el helper `importe()`.
-- [ ] **`SKILL.md` §fechas**: dice pasar fechas concretas; debe decir usar los
-  **alias simbólicos** (`hoy`, `mes_actual`…) que el server resuelve en hora UY.
-  Si el modelo calcula la fecha, contesta cero después de las 21:00.
-- [ ] **`SKILL.md`**: cubre 16 de 27 tools; afirma "esta instalación es de solo
-  lectura" (falso en `write_enabled`) y niega `biller_plan_anulacion` (que
-  funciona en read_only); falta el matiz de monedas (nunca sumar UYU+USD).
+- [x] **`SKILL.md` §fechas**: resuelto (sep-2026); exige usar alias simbólicos
+  (`hoy`, `mes_actual`…) y deja la resolución al servidor en hora UY.
+- [x] **`SKILL.md` actualizado.** Resuelto (sep-2026): cubre las capacidades
+  vigentes, modos operativos, períodos simbólicos en hora UY, plan de anulación
+  y la separación estricta de monedas.
 - [ ] **Corpus de evals**: 29 casos nuevos propuestos (jerga de mostrador,
   "ayer", singulares, vencimientos). Meterlos JUNTO con los fixes de sinónimos o
   el gate `--min 95` frena el commit. Archivo en el scratchpad de la sesión.
@@ -229,18 +228,9 @@ archivo son los backlogs previos, todavía válidos.
 
 ### Arquitectura / deuda (CTO) — falta
 
-- [ ] **`CacheDetalles`: presupuesto compartido Y habilitación del proceso**
-  (`src/biller/traerDetalles.ts`). Reverificado ago-2026, son **dos** cosas y la
-  nota vieja solo nombraba la primera:
-  1. mapa único con techo global (1024) y desalojo **FIFO**, no LRU por empresa
-     como sí hace `cacheVentanas.ts`: una empresa que baja 500 detalles desaloja
-     las entradas calientes de las otras. No hay cruce de datos —la clave lleva
-     el `cacheId`—, es *noisy neighbor* en el cache más caro (~391 ms/miss);
-  2. `BILLER_CACHE_ENABLED` se lee de `process.env` **una vez al cargar el
-     módulo**, así que la resolución por empresa que sí tiene `CacheVentanas` no
-     aplica acá: apagar el cache para diagnosticar un total sigue sirviendo
-     detalles cacheados.
-  El arreglo del punto 1 está escrito al lado: portarlo.
+- [x] **`CacheDetalles`: ownership, habilitación y LRU por tenant.** Resuelto
+  (sep-2026): cada `ToolContext` construye su propia instancia con la config
+  efectiva; conserva TTL y copias defensivas, y toca en hit para desalojar LRU.
 - [ ] **Zod v4 NO borra `transport/dialecto.ts`** (verificado contra el SDK
   1.29.0: llama a `toJsonSchemaCompat` sin `target`), y `inlinearRefs` no depende
   del dialecto. Corregir `README.md:677`, `docs/EQUIPO.md:100,254` que prometen
@@ -250,18 +240,20 @@ archivo son los backlogs previos, todavía válidos.
   se instala con `npx biller-mcp-server`; el 404 de esta nota ya no aplica.
   Se agregó el `LICENSE` (MIT) que faltaba en el repo (`package.json` ya
   declaraba la licencia, pero no había archivo).
-- [ ] **`.env.example` dice "6 tools"** (son 27+7) y no está bajo el guard de
-  `conteosDoc`. Sumarlo. El conteo de tests en docs (1050/1376) también divergió.
-- [x] **Alta plug-and-play, fase 1**: `onboard --crear` deriva RUT/sucursal de
+- [x] **Contratos numéricos de documentación.** Resuelto (sep-2026): los conteos
+  de tools salen de las listas canónicas, `.env.example` está bajo el guard y la
+  documentación no mantiene una cifra manual de tests.
+- [x] **Alta plug-and-play y recarga, fases 1–2**: `onboard --crear` deriva RUT/sucursal de
   la API, genera la credencial, valida el registro entero antes de escribir
-  (0600) y verifica contra la API real. Fases 2 (recarga en caliente) y 3
-  (OAuth/remoto) diseñadas en detalle en `docs/PLAN_PLUG_AND_PLAY.md`.
+  (0600) y verifica contra la API real. `SIGHUP` publica snapshots atómicos e
+  invalida únicamente tenants afectados; Fase 3 (OAuth/remoto) sigue diseñada
+  en detalle en `docs/PLAN_PLUG_AND_PLAY.md`.
 - [ ] **Pista 2 (remoto + OAuth)**: Resource Server contra un IdP de tercero con
   DCR (no construir Authorization Server propio). Reusa `autenticarConTenants`
   como segunda rama. Escritura remota queda para el final (no hay `remitente`
   verificado: falta un equivalente al ancla de `identidadDeConversacion`).
-- [ ] **Extender el guard `fechaUyGuard` a `tests/`** con patrones de fixture y
-  allowlist para tokens/timestamps. Hoy solo barre `src/`.
+- [x] **Extender el guard `fechaUyGuard` a `tests/`**: resuelto (sep-2026) para
+  defaults civiles observados, con allowlist razonada para instantes técnicos.
 - [ ] **Partir `handleEmisionGuiada`** (555 líneas en una función) y sacar los 11
   `construirSubmenu*` de `emision.ts` a `render.ts`. Por diferencial contra el
   corpus.
@@ -498,11 +490,10 @@ cada uno está acá para no tener que volver a encontrarlo.
   empresa; `tests/config.test.ts` y `tests/tenants.test.ts` verifican aislamiento,
   validación y el comportamiento sin directorio base.
 
-- [ ] **Resource MCP con catálogo de tipos de CFE.** Sigue pendiente como
-  *resource*: no hay ni un `registerResource` en `src/`. Lo que sí existe son dos
-  tools que responden lo mismo sin pegarle a la API (`biller_catalogo_datos`,
-  `biller_requisitos_comprobante`), así que el valor que queda es el de la forma
-  —un resource se cachea del lado del cliente—, no el del dato.
+- [x] **Resource MCP con catálogo de tipos de CFE.** Resuelto (sep-2026):
+  `registerAllResources` publica `biller://catalogos/cfe` en ambos modos. Es
+  local, determinístico y read-only; comparte las tablas y requisitos canónicos
+  con las tools, sin red ni datos de tenant.
 
 - [ ] **Tests de integración contra `test.biller.uy`** (ci opcional).
   Un suite separado con token real y `process.env.CI_INTEGRATION=true` que
