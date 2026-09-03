@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
   aplicarAlItemEnCurso,
   borradorComprobante,
+  formatearPrecioAviso,
   normalizarItems,
   rellenarDesdePedido,
 } from "../src/kapso/borradorEmision.js";
@@ -262,6 +263,23 @@ describe("rellenarDesdePedido: la jerarquía no se invierte", () => {
     );
     expect(estado.items?.[estado.items.length - 1]).toEqual({});
     expect(puestos.join(" ")).toContain("precio sin ubicar");
+  });
+
+  it("formatea los precios huérfanos con la moneda efectiva y el formato uruguayo", () => {
+    expect(formatearPrecioAviso(6500)).toBe("$6.500");
+    expect(formatearPrecioAviso(12.5)).toBe("$12,50");
+    expect(formatearPrecioAviso(0)).toBe("$0");
+    expect(formatearPrecioAviso(-1200, "USD")).toBe("U$S-1.200");
+
+    const estado: EstadoEmision = {
+      moneda: "USD",
+      items: [
+        { concepto: "Café", cantidad: 1 },
+        { concepto: "tortas", cantidad: 3, precio: 450 },
+      ],
+    };
+    const { avisos } = rellenarDesdePedido(estado, extraerPedidoEmision("sumale 3 tortas a 450")!);
+    expect(avisos.join(" ")).toContain("U$S450");
   });
 });
 

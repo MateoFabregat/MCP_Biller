@@ -48,38 +48,39 @@ const DOCS_CON_CONTEOS = [
   "docs/HANDBOOK.md",
   "docs/ARQUITECTURA.md",
   "docs/EQUIPO.md",
+  ".env.example",
 ] as const;
 
+function afirmarConteosVigentes(texto: string, archivo: string): void {
+  // Busca "N tools de lectura" / "las N de lectura" en cualquier forma.
+  const lecturas = [...texto.matchAll(/(\d+)\s+(?:tools?\s+de\s+lectura|de\s+lectura)/gi)].map((m) =>
+    Number(m[1]),
+  );
+  for (const n of lecturas) {
+    expect(n, `${archivo}: conteo de lectura`).toBe(LECTURA);
+  }
+
+  const escrituras = [...texto.matchAll(/(\d+)\s+tools?\s+de\s+escritura/gi)].map((m) => Number(m[1]));
+  for (const n of escrituras) {
+    expect(n, `${archivo}: conteo de escritura`).toBe(ESCRITURA);
+  }
+
+  // El total incluye la opt-in de IVA cuando está habilitada.
+  const total = LECTURA + ESCRITURA;
+  const registrados = [...texto.matchAll(/(\d+)\s+tools?\s+registradas/gi)].map((m) => Number(m[1]));
+  for (const n of registrados) {
+    expect([total, total + 1], `${archivo}: total registrado`).toContain(n);
+  }
+}
+
 describe("los documentos no afirman conteos falsos", () => {
-  it.each([...DOCS_CON_CONTEOS, "src/tools/register.ts"])(
-    "%s no menciona un conteo de tools de lectura distinto del real",
-    (archivo) => {
-      const texto = leer(archivo);
-      // Busca "N tools de lectura" / "las N de lectura" en cualquier forma.
-      const encontrados = [...texto.matchAll(/(\d+)\s+(?:tools?\s+de\s+lectura|de\s+lectura)/gi)].map(
-        (m) => Number(m[1]),
-      );
-      for (const n of encontrados) expect(n).toBe(LECTURA);
-    },
-  );
+  it.each([...DOCS_CON_CONTEOS, "src/tools/register.ts"])("%s solo afirma conteos vigentes", (archivo) => {
+    afirmarConteosVigentes(leer(archivo), archivo);
+  });
 
-  it.each(DOCS_CON_CONTEOS)(
-    "%s no menciona un conteo de tools de escritura distinto del real",
-    (archivo) => {
-      const encontrados = [...leer(archivo).matchAll(/(\d+)\s+tools?\s+de\s+escritura/gi)].map((m) =>
-        Number(m[1]),
-      );
-      for (const n of encontrados) expect(n).toBe(ESCRITURA);
-    },
-  );
-
-  // El conteo total (34, o 35 con la opt-in) es el que más se copia a mano.
-  it.each(DOCS_CON_CONTEOS)("%s no afirma un total de tools registradas falso", (archivo) => {
-    const total = LECTURA + ESCRITURA;
-    const encontrados = [...leer(archivo).matchAll(/(\d+)\s+tools?\s+registradas/gi)].map((m) =>
-      Number(m[1]),
-    );
-    for (const n of encontrados) expect([total, total + 1]).toContain(n);
+  it("rechaza un conteo falso inyectado en un documento", () => {
+    const falso = `${LECTURA - 1} tools de lectura y ${ESCRITURA} tools de escritura`;
+    expect(() => afirmarConteosVigentes(falso, "fixture-inyectado")).toThrow();
   });
 
   it("READ_TOOL_NAMES y WRITE_TOOL_NAMES no se pisan", () => {

@@ -48,6 +48,7 @@ import { normalizarTelefono } from "../config.js";
 import {
   aplicarAlItemEnCurso,
   borradorComprobante,
+  formatearPrecioAviso,
   normalizarItems,
   rellenarDesdePedido,
 } from "../kapso/borradorEmision.js";
@@ -565,9 +566,12 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       // Y el flujo ya quedó con un ítem abierto (ver `rellenarDesdePedido`):
       // el aviso solo, sin la pregunta, es lo que este hallazgo vino a cerrar.
       if (pedido.precios_sin_ubicar.length > 0) {
+        const monedaAviso = estado.moneda ?? pedido.moneda;
         warnings.push(
           `⚠️ En el mensaje quedaron ${pedido.precios_sin_ubicar.length} precio(s) ` +
-            `(${pedido.precios_sin_ubicar.join(", ")}) que no pertenecen a ninguna línea leída: ` +
+            `(${pedido.precios_sin_ubicar
+              .map((precio) => formatearPrecioAviso(precio, monedaAviso))
+              .join(", ")}) que no pertenecen a ninguna línea leída: ` +
             "el usuario nombró más de lo que se pudo entender. NO emitas todavía — preguntá qué " +
             "más se vendió y cargá esa línea con su cantidad y su concepto.",
         );

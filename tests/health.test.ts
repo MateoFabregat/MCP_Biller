@@ -61,6 +61,25 @@ describe("biller_health_check", () => {
   it("warnings vacíos en modo read_only con config mínima", () => {
     const res = handleHealthCheck({}, { inspect: inspectWithToken, verificado: () => true });
     expect(res.structuredContent?.warnings).toEqual([]);
+    expect(res.structuredContent?.rate_limit_default_rps).toBe(30);
+    expect(res.structuredContent?.rate_limit_dgi_rps).toBe(1);
+  });
+
+  it("expone un warning de health para un rate limit inválido", () => {
+    const res = handleHealthCheck(
+      {},
+      {
+        inspect: () =>
+          inspectConfig({
+            BILLER_API_BASE_URL: "https://test.biller.uy",
+            BILLER_API_TOKEN: "TOKENSECRETO",
+            BILLER_RATE_LIMIT_DEFAULT_RPS: "0",
+          }),
+        verificado: () => true,
+      },
+    );
+    expect(res.structuredContent?.rate_limit_default_rps).toBe(30);
+    expect((res.structuredContent?.warnings as string[]).some((w) => w.includes("BILLER_RATE_LIMIT_DEFAULT_RPS"))).toBe(true);
   });
 
   it("warning cuando write_tools_registered=true pero write_execution_enabled=false", () => {

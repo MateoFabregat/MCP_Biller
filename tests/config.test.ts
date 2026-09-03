@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_HTTP_MAX_SESSIONS,
   DEFAULT_HTTP_SESSION_TTL_MS,
+  DEFAULT_RATE_LIMIT_DEFAULT_RPS,
+  DEFAULT_RATE_LIMIT_DGI_RPS,
+  MAX_RATE_LIMIT_RPS,
   TENANT_IMPLICITO,
   inspectConfig,
   loadConfig,
@@ -264,5 +267,37 @@ describe("parámetros del proceso en la config validada", () => {
   it("inspectConfig informa la ruta DERIVADA, que es el archivo que se va a usar de verdad, sin tocar el disco", () => {
     const i = inspectConfig({ ...MINIMA, BILLER_DATA_DIR: "/no/existe/ni/hace/falta" });
     expect(i.auditLogPath).toBe("/no/existe/ni/hace/falta/_proceso/audit.jsonl");
+  });
+
+  describe("rate limits efectivos", () => {
+    it("usa 30 req/s normales y 1 req/s DGI cuando no se configuran", () => {
+      const c = loadConfig(MINIMA);
+      const i = inspectConfig(MINIMA);
+      expect(c.rateLimitDefaultRps).toBe(DEFAULT_RATE_LIMIT_DEFAULT_RPS);
+      expect(c.rateLimitDgiRps).toBe(DEFAULT_RATE_LIMIT_DGI_RPS);
+      expect(i.rateLimitDefaultRps).toBe(DEFAULT_RATE_LIMIT_DEFAULT_RPS);
+      expect(i.rateLimitDgiRps).toBe(DEFAULT_RATE_LIMIT_DGI_RPS);
+      expect(i.configWarnings).toEqual([]);
+    });
+
+    it("acepta enteros positivos dentro del techo operativo", () => {
+      const c = loadConfig({
+        ...MINIMA,
+        BILLER_RATE_LIMIT_DEFAULT_RPS: "12",
+        BILLER_RATE_LIMIT_DGI_RPS: String(MAX_RATE_LIMIT_RPS),
+      });
+      expect(c.rateLimitDefaultRps).toBe(12);
+      expect(c.rateLimitDgiRps).toBe(MAX_RATE_LIMIT_RPS);
+    });
+
+    it.each(["0", "-1", "1.5", "texto", "Infinity", String(MAX_RATE_LIMIT_RPS + 1)])(
+      "cae al default y avisa para un valor inválido (%s)",
+      (malo) => {
+        const i = inspectConfig({ ...MINIMA, BILLER_RATE_LIMIT_DEFAULT_RPS: malo });
+        expect(i.rateLimitDefaultRps).toBe(DEFAULT_RATE_LIMIT_DEFAULT_RPS);
+        expect(i.configWarnings).toHaveLength(1);
+        expect(i.configWarnings[0]).toContain("BILLER_RATE_LIMIT_DEFAULT_RPS");
+      },
+    );
   });
 });

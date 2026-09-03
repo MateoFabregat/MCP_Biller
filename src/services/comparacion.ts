@@ -148,9 +148,12 @@ function totalizar(
     const clasificacion = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
     if (!clasificacion.suma_en_resumen) continue;
     const clase = clasificarEstado(c.estado);
+    if (c.total === null || c.moneda === null) continue;
+    // El aviso cuenta solo comprobantes que pasaron los mismos filtros de
+    // elegibilidad que el total. Si ya faltaba total o moneda, no corresponde
+    // atribuir su exclusión a la ausencia de estado.
     if (clase === "desconocido") sinEstado += 1;
     if (soloAceptados && clase !== "aceptado") continue;
-    if (c.total === null || c.moneda === null) continue;
     totales[c.moneda] = round2((totales[c.moneda] ?? 0) + c.total * clasificacion.signo);
     conteo += 1;
   }

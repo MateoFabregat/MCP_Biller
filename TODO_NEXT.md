@@ -23,7 +23,7 @@ borrarse: saber qué se resolvió y dónde vale más que una lista corta.
   `estado` (comparación exacta contra `"Aceptado DGI"`: un cambio de texto en la
   API vaciaría todos los totales **en silencio**) y `tasa_cambio` (que siga
   viniendo, y como número: una coma decimal se llevaría puesta la conversión de
-  todas las facturas en dólares). Los ~1600 tests usan fixtures y por
+  todas las facturas en dólares). La suite usa fixtures y por
   construcción no pueden ver esto.
 - [x] **El contrato mide "Envío no corresponde"** (cuántos y cuánto suman) para
   que la decisión del ticket T05 se tome con un número y no de memoria.
@@ -115,8 +115,8 @@ archivo son los backlogs previos, todavía válidos.
 
 ### Ya arreglado en esta tanda
 
-- [x] **Los fixtures de fecha se anclaban a UTC → la suite fallaba 4 tests todas
-  las noches (21:00–00:00 UY).** Anclados a `hoyComoDateUy()` en
+- [x] **Los fixtures de fecha se anclaban a UTC → la suite fallaba todas las
+  noches (21:00–00:00 UY).** Anclados a `hoyComoDateUy()` en
   `tests/{recordatorioCobro,certificadoDgi,alertas}.test.ts`. Verificado con la
   suite bajo `TZ=UTC`. (commit `fix(tests): los fixtures de fecha…`)
 - [x] **CRÍTICO fiscal: el punto de miles convertía un precio de emisión en su
@@ -171,7 +171,7 @@ archivo son los backlogs previos, todavía válidos.
   (3) si no puede saberlo —sin ítems y sin desglose, IVA a "otra tasa", o un
   desglose que no cierra contra el total— devuelve `cuerpo_sugerido: null` con
   el motivo, en vez de adivinar. `planAnulacion.ts` ahora pasa `iva` e `items`.
-  10 tests nuevos en `tests/anulacion.test.ts`.
+  Hay regresiones en `tests/anulacion.test.ts`.
 - [x] **El aviso "receptor obligatorio" no llega al resumen que aprueba el
   humano.** Hecho (sep-2026): las advertencias críticas de receptor se muestran
   arriba de los importes del preview y viajan al cuerpo real de WhatsApp.
@@ -199,18 +199,18 @@ archivo son los backlogs previos, todavía válidos.
   explícito (el prescripto) y **concepto distinto al previo**. El segundo es el
   que cierra el agujero real: la fusión es posicional, así que la marca de la
   línea 1 de la venta copiada le quedaba puesta a otro producto en esa posición,
-  y su 0 heredado pasaba por bonificación. 3 tests en `tests/borradorStore.test.ts`.
-- [ ] **Un producto queda como razón social en el paso `cliente`**
-  ("coca 2 litros" → `razon_social: "coca"`). `extraerPedido.ts` + guarda en
-  `borradorEmision.ts:308` para lectura posicional vs. explícita. Mueve un dato
-  del CFE.
+  y su 0 heredado pasaba por bonificación. Hay regresiones en
+  `tests/borradorStore.test.ts`.
+- [x] **Un producto queda como razón social en el paso `cliente`.** Resuelto
+  (ago-2026): `borradorEmision.ts` conserva la clasificación producto/cliente
+  para consumidor final y las regresiones de emisión guiada lo verifican.
 - [x] **`calidad()` del enrutador empata exacto con inclusión**: hecho
   (ago-2026). `Busqueda` lleva ahora `precision: "exacto" | "inclusion"` —
   `confianza` valía 1 para las dos y eran indistinguibles— y `calidad()` puntúa
   exacto=3, inclusión=2, empate=1.5, aproximado=1. Verificado antes/después:
   "me equivoqué con el recibo" en `read_only` pasó de `menu:anular` (una NOTA DE
   CRÉDITO por un recibo) a `menu:cancelar_recibo`. El sinónimo exacto ya existía
-  en el catálogo; lo que fallaba era el desempate. 3 tests de regresión + caso de
+  en el catálogo; lo que fallaba era el desempate. Regresiones + caso de
   eval (44/44).
 - [ ] **Ecos crudos**: `$-200` en pregunta/botón (`emision.ts:1577`), precios
   huérfanos sin formatear (`borradorEmision.ts:423`). Usar el helper `importe()`.
@@ -364,30 +364,18 @@ Salieron de la quinta revisión fiscal. Se anotan en vez de arreglarse porque
 ninguno produce un importe equivocado: trancan el flujo o ecoan feo. El repro de
 cada uno está acá para no tener que volver a encontrarlo.
 
-- [ ] **Una línea a $0 o negativa AL FINAL, mandada por el agente, tranca el
-  flujo.** Con `items: [{Venta,1,"1.000"},{Descuento,1,"-200"}]` el paso queda en
-  `precio`, sin botones, y NO sale con nada: reenviar el precio,
-  `emision:item:listo`, `items_cerrados:true`, el texto "listo", el texto "-200"
-  y `emision:item:cancelar` devuelven los siete la misma pregunta. Es
-  preexistente —`itemIncompleto` exige precio positivo—, y el escape que se
-  agregó (`precio_copiado`) cubre solo el camino de `repetir_ultima_de`. Ojo:
-  hoy está PINEADO como conducta buscada en `tests/emisionGuiada.test.ts` ("del
-  ÚLTIMO sí se sigue preguntando el precio"), así que arreglarlo es cambiar ese
-  test a propósito.
+- [x] **Una línea a $0 o negativa AL FINAL, mandada por el agente, tranca el
+  flujo.** Resuelto (sep-2026): `emisionGuiada` ofrece conservarla o quitarla
+  con acciones ligadas a posición e importe, y `tests/emisionGuiada.test.ts`
+  cubre ambos caminos.
 
-- [ ] **`precio_copiado` no se pierde con `items` explícitos, al revés de lo que
-  promete su propio contrato.** El comentario de `src/kapso/emision.ts` dice que
-  si el agente reenvía `items` la marca se pierde y el flujo vuelve a preguntar;
-  `fusionarItems` (`src/kapso/borradorStore.ts`) fusiona campo por campo y la
-  marca sobrevive. Resultado: una línea a $0 aceptada en silencio, con
-  `warnings: []`. Corrección: si `encima[i].precio !== undefined`, borrar
-  `precio_copiado`.
+- [x] **`precio_copiado` no se pierde con `items` explícitos.** Resuelto
+  (ago-2026): `fusionarItems` invalida la marca cuando cambia el precio explícito
+  o el concepto, con regresiones en `tests/borradorStore.test.ts`.
 
-- [ ] **En el paso `cliente`, un producto queda como razón social.** Con
-  `clase_receptor: "consumidor_final"`, sin `sin_receptor` y sin ítems,
-  "coca 2 litros" deja `nombre_cliente: "coca"` e `items[0].concepto: "litros"`,
-  y `completar` le ordena al agente ponerlo en `cliente.razon_social`. Es la pata
-  que quedó de la guarda de etapa; la de `sin_receptor` sí está cerrada.
+- [x] **En el paso `cliente`, un producto queda como razón social.** Resuelto
+  (ago-2026): `borradorEmision.ts` conserva la clasificación producto/cliente
+  para consumidor final y la cubren las regresiones de emisión guiada.
 
 - [ ] **`$-200` en la pregunta y en el botón de descarte.** Con una línea sin
   descripción y precio negativo sale "Me falta saber qué era la línea de $-200" y
@@ -448,7 +436,7 @@ cada uno está acá para no tener que volver a encontrarlo.
   salida temprana, `registry.ts` mantiene el índice `porPhoneNumberId`, y
   `http.ts` atiende con el contexto de esa empresa (ruta
   `/kapso/webhook/<tenant-id>`, y 404 en la ruta vieja con multi-empresa).
-  Cubierto por `tests/webhookMultiEmpresa.test.ts` (15 tests).
+  Cubierto por `tests/webhookMultiEmpresa.test.ts`.
 
 - [ ] **Filtros nativos de moneda/cliente en emitidos.**
   Confirmar si la API acepta `moneda` o `rut_receptor` como query params;
@@ -491,13 +479,10 @@ cada uno está acá para no tener que volver a encontrarlo.
   cache es por empresa (`src/biller/cacheVentanas.ts`) y la línea de log de
   métricas lleva `empresa` (`src/observabilidad/metricas.ts`).
 
-- [ ] **Llevar a `config.ts` lo que hoy se lee suelto del entorno.** Dos cosas
-  quedaron leyéndose con un helper local en `src/transport/http.ts`
-  (`BILLER_HTTP_SESSION_TTL_MS`, `BILLER_HTTP_MAX_SESSIONS`), fuera de la
-  configuración validada y por lo tanto fuera del overlay de tenants. Hoy no
-  duele —son parámetros del proceso, no de una empresa—, pero es el mismo camino
-  por el que `BILLER_CACHE_ENABLED` se volvió la única variable imposible de
-  pisar.
+- [x] **Llevar a `config.ts` lo que hoy se lee suelto del entorno.** Resuelto
+  (sep-2026): `BILLER_HTTP_SESSION_TTL_MS` y `BILLER_HTTP_MAX_SESSIONS` salen de
+  la configuración validada y `src/transport/http.ts` consume esos valores;
+  `tests/config.test.ts` cubre lectura y validación.
 
 - [x] **Enchufar la habilitación de cache por empresa**: YA ESTABA HECHO para
   `CacheVentanas` — nota desactualizada, verificada en ago-2026.
@@ -508,13 +493,10 @@ cada uno está acá para no tener que volver a encontrarlo.
   así que apagar el cache de una empresa no lo apaga ahí. Ojo también con el
   singleton de módulo: manda la ÚLTIMA instancia construida (hoy hay una sola).
 
-- [ ] **Derivar las rutas de persistencia de un `BILLER_DATA_DIR` + `tenant.id`.**
-  Hoy cada tenant tiene que declarar las tres a mano (`BILLER_AUDIT_LOG_PATH`,
-  `BILLER_IDEMPOTENCY_LOG_PATH`, `BILLER_BORRADOR_STORE_PATH`) y el registro se
-  limita a verificar que no falten ni se repitan. Con un directorio base y el id
-  del tenant, el caso correcto sale solo y la validación pasa a ser la red y no
-  la única defensa: ahora mismo, dar de alta una empresa son tres rutas que
-  alguien escribe a mano y una de ellas se puede copiar de la entrada de arriba.
+- [x] **Derivar las rutas de persistencia de un `BILLER_DATA_DIR` + `tenant.id`.**
+  Resuelto (ago-2026): `config.ts` deriva audit, idempotencia y borradores por
+  empresa; `tests/config.test.ts` y `tests/tenants.test.ts` verifican aislamiento,
+  validación y el comportamiento sin directorio base.
 
 - [ ] **Resource MCP con catálogo de tipos de CFE.** Sigue pendiente como
   *resource*: no hay ni un `registerResource` en `src/`. Lo que sí existe son dos

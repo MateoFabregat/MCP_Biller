@@ -107,12 +107,14 @@ export class ContextosPorTenant {
     if (contexto !== undefined) {
       try {
         const cacheId = contexto.getClient().cacheId;
-        if (typeof cacheId === "string" && cacheId !== "") this.habilitacionCache.delete(cacheId);
+        if (typeof cacheId === "string" && cacheId !== "") {
+          this.habilitacionCache.delete(cacheId); // check-readonly:allow Map.delete del índice de cache en memoria, no es HTTP
+        }
       } catch {
         // Un contexto con configuración incompleta puede no construir cliente.
       }
     }
-    this.cache.delete(tenantId);
+    this.cache.delete(tenantId); // check-readonly:allow Map.delete de un contexto en memoria, no es HTTP
   }
 
   /**

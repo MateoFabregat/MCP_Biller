@@ -176,6 +176,21 @@ describe("exclusiones", () => {
     ]);
     expect(r.clientes_totales).toBe(1);
   });
+
+  it("el aviso de estado cuenta solo comprobantes con total y moneda", () => {
+    const r = cohortes([
+      crudo({ id: 1, cliente: { documento: "A" }, total: 1000 }),
+      crudo({ id: 2, cliente: { documento: "B" }, estado: null, total: 500 }),
+      crudo({ id: 3, cliente: { documento: "C" }, estado: null, total: null }),
+      crudo({ id: 4, cliente: { documento: "D" }, estado: null, moneda: null }),
+    ]);
+    const warning = r.warnings.find((w) => w.includes("sin estado DGI reconocible"));
+    expect(warning).toContain("1 comprobante(s)");
+    // El comprobante aceptado mantiene exactamente sus importes y agrupación;
+    // los documentos incompletos solo dejan de inflar el aviso cosmético.
+    expect(r.clientes_totales).toBe(1);
+    expect(r.cohortes[0]!.facturado_total).toBe(1000);
+  });
 });
 
 describe("monedas", () => {

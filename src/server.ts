@@ -11,6 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SERVER_NAME, SERVER_VERSION } from "./constants.js";
 import { instrumentarTools } from "./observabilidad/instrumentar.js";
 import { registerPrompts } from "./prompts/register.js";
+import { registerAllResources } from "./resources/register.js";
 import { guardarEntrada } from "./security/entrada.js";
 import { hardenServer } from "./security/sanitize.js";
 import { SERVER_INSTRUCTIONS } from "./security/untrusted.js";
@@ -46,6 +47,7 @@ export function crearServidorMcp(
   hardenServer(server, ctx);
   guardarEntrada(server, ctx);
   registerAllTools(server, ctx, capabilityMode);
+  registerAllResources(server);
   registerPrompts(server);
   return server;
 }

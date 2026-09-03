@@ -71,7 +71,9 @@ async function cargarReferencias(
   // "¿quién me debe?", y un 500 transitorio mandaba ese recibo a FIFO sin
   // haberlo intentado de nuevo.
   const ids = aConsultar.map((r) => r.id!);
-  const { detalles, fallidos } = await traerPorId(ctx.getClient(), ids);
+  const { detalles, fallidos } = await traerPorId(ctx.getClient(), ids, {
+    cache: ctx.getDetallesCache?.(),
+  });
 
   for (const id of ids) {
     const detalle = detalles.get(id);

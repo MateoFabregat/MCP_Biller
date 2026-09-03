@@ -1,7 +1,7 @@
 # Plan V2 — De MCP de facturación a agente de datos del negocio
 
 > Estado del documento: propuesta para discusión. Escrito el 2026-07-27 sobre el
-> código en `main` (210 tests verdes, typecheck y `check:readonly` OK).
+> código en `main` (suite verde, typecheck y `check:readonly` OK).
 > Reemplaza a `PLAN.md` como norte; `PLAN.md` queda como registro del MVP read-only.
 
 ---
@@ -16,7 +16,7 @@ Lo que existe hoy y funciona:
 | Lectura | 7 tools GET (`health`, `buscar_cliente_por_rut`, `emitidos`, `recibidos`, `obtener`, `pdf`, `resumen_facturacion_periodo`) |
 | Escritura | 7 tools POST con dry-run → `confirmation_token` → confirm, doble gate de producción, idempotencia y audit log |
 | Aislamiento | `BILLER_CAPABILITY_MODE=read_only` por defecto; `scripts/check-readonly.mjs` prueba estáticamente que fuera de `src/write/` no hay POST |
-| Calidad | 210 tests, CI en GitHub Actions, evals declarativos |
+| Calidad | Suite automatizada, CI en GitHub Actions, evals declarativos |
 | Conocimiento duro | ventanas de 7 días + dedupe (la API tira 500 en rangos largos), filtro por fecha de emisión fiscal, `estado="Aceptado DGI"` como criterio de totales |
 
 Esto es una base sólida. **El MVP de "conectar Claude a Biller" está cerrado.**

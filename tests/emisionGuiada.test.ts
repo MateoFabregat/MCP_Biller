@@ -1614,7 +1614,7 @@ describe("biller_emision_guiada lee el texto del pedido por su cuenta", () => {
     );
     expect(r.listo_para_requisitos).toBe(false);
     expect(r.paso).toBe("concepto");
-    expect(r.warnings.join(" ")).toContain("6500");
+    expect(r.warnings.join(" ")).toContain("$6.500");
     expect(r.warnings.join(" ")).toContain("NO emitas todavía");
     // Y la línea que SÍ se leyó no se pierde por el camino.
     expect(r.comprobante_borrador.items).toHaveLength(1);

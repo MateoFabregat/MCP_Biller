@@ -124,6 +124,25 @@ describe("variaciones", () => {
     const r = comparar([emitido({ total: 1000 }), emitido({ total: 9999, estado: "Rechazado DGI" })], []);
     expect(r.actual.total_por_moneda["UYU"]).toBe(1000);
   });
+
+  it("el aviso de estado no cuenta documentos sin total o moneda", () => {
+    const r = comparar(
+      [
+        emitido({ id: 1, total: 1000 }),
+        emitido({ id: 2, estado: null, total: 500 }),
+        emitido({ id: 3, estado: null, total: null }),
+        emitido({ id: 4, estado: null, moneda: null }),
+      ],
+      [emitido({ id: 5, total: 500 })],
+    );
+    const warning = r.warnings.find((w) => w.includes("estado DGI reconocible"));
+    expect(warning).toContain("1 comprobante(s) del período actual");
+    expect(warning).toContain("0 del anterior");
+    // La regresión no cambia los importes ni el conteo que sí son válidos.
+    expect(r.actual.total_por_moneda).toEqual({ UYU: 1000 });
+    expect(r.anterior.total_por_moneda).toEqual({ UYU: 500 });
+    expect(r.actual.comprobantes).toBe(1);
+  });
 });
 
 describe("proyección de cierre", () => {

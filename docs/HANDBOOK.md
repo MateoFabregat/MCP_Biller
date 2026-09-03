@@ -34,7 +34,8 @@ Esa última parte es la tesis del proyecto. Todo lo demás se deriva de ahí.
 npm install && npm test
 ```
 
-Más de mil tests, sin red, en pocos segundos. Si eso pasa, el proyecto está sano.
+La suite automatizada corre sin red y termina en pocos segundos. Si eso pasa, el
+proyecto está sano.
 
 ```bash
 cp .env.example .env    # completá BILLER_API_BASE_URL y BILLER_API_TOKEN de TEST
@@ -72,7 +73,7 @@ WhatsApps: lo que escribe se lista y se saltea.
 y dicen que NUESTRO código hace lo que dice; `contrato` llama a la API real y
 dice si la REALIDAD contra la que se escribió sigue siendo esa. Hay siete
 comportamientos de Biller que se descubrieron llamándola de verdad y **cuatro
-contradicen al OpenAPI**: si Biller cambia uno, los 1376 tests siguen pasando y
+contradicen al OpenAPI**: si Biller cambia uno, la suite local puede seguir pasando y
 lo que se rompe es un número en el teléfono de alguien, semanas después. Solo
 hace GET.
 

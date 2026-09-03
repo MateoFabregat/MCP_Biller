@@ -157,7 +157,9 @@ async function cargarItems(
   // antes, sin gastar una request en averiguarlo.
   const sinId = seleccionados.length - ids.length;
 
-  const { detalles, fallidos } = await traerPorId(ctx.getClient(), ids);
+  const { detalles, fallidos } = await traerPorId(ctx.getClient(), ids, {
+    cache: ctx.getDetallesCache?.(),
+  });
 
   // El orden es el de `seleccionados` (total descendente), no el de llegada:
   // dos corridas idénticas tienen que devolver el mismo ranking.

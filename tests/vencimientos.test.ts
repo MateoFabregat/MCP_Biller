@@ -228,7 +228,7 @@ describe("analizarVencimientos", () => {
 
 describe("tool biller_vencimientos", () => {
   it("devuelve el aging y marca cobranzas_imputadas=false", async () => {
-    const hoyReal = new Date();
+    const hoyReal = new Date(); // fecha-uy:allow el fixture genera fechas relativas al reloj real
     const diaReal = (offset: number): string =>
       new Date(hoyReal.getTime() + offset * 86_400_000).toISOString().slice(0, 10);
 

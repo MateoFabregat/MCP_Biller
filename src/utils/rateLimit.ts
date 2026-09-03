@@ -13,6 +13,35 @@ export interface RateLimiter {
   acquire(): Promise<void>;
 }
 
+/** Defaults published by Biller for the two request classes. */
+export const DEFAULT_RATE_LIMIT_DEFAULT_RPS = 30;
+export const DEFAULT_RATE_LIMIT_DGI_RPS = 1;
+
+/**
+ * A limiter configured above this ceiling is almost certainly a typo (and
+ * would make the client ignore the upstream contract).  `config.ts` enforces
+ * the same ceiling for values coming from the environment.
+ */
+export const MAX_RATE_LIMIT_RPS = 1_000;
+
+/** Effective requests-per-second values used to build a context's limiters. */
+export interface EffectiveRateLimits {
+  defaultRps?: number;
+  dgiRps?: number;
+  // Accept the config-shaped names too.  This keeps the factory convenient for
+  // callers that already have a BillerConfig without importing that type here.
+  rateLimitDefaultRps?: number;
+  rateLimitDgiRps?: number;
+}
+
+export interface RateLimiterFactoryDeps {
+  /** Fake clock and wait function for deterministic tests. */
+  now?: () => number;
+  sleepFn?: (ms: number) => Promise<void>;
+  /** Alias useful to callers that describe this hook as `sleep`. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -62,11 +91,32 @@ export interface RateLimiters {
   dgi: RateLimiter;
 }
 
-export function createDefaultRateLimiters(): RateLimiters {
+export function createDefaultRateLimiters(
+  limits: EffectiveRateLimits = {},
+  deps: RateLimiterFactoryDeps = {},
+): RateLimiters {
+  const configuredDefault = limits.defaultRps ?? limits.rateLimitDefaultRps;
+  const configuredDgi = limits.dgiRps ?? limits.rateLimitDgiRps;
+  const validRps = (value: number | undefined, fallback: number): number =>
+    value !== undefined && Number.isSafeInteger(value) && value > 0 && value <= MAX_RATE_LIMIT_RPS
+      ? value
+      : fallback;
+  const defaultRps = validRps(configuredDefault, DEFAULT_RATE_LIMIT_DEFAULT_RPS);
+  const dgiRps = validRps(configuredDgi, DEFAULT_RATE_LIMIT_DGI_RPS);
+  const now = deps.now ?? (() => Date.now());
+  const sleepFn = deps.sleepFn ?? deps.sleep ?? sleep;
   return {
-    // 30 req/seg -> ~34 ms entre requests.
-    default: new IntervalRateLimiter(Math.ceil(1000 / 30)),
-    // 1 req/seg para DGI y recibidos.
-    dgi: new IntervalRateLimiter(1000),
+    // 30 req/seg -> ~34 ms entre requests by default.
+    default: new IntervalRateLimiter(Math.ceil(1000 / defaultRps), now, sleepFn),
+    // 1 req/seg para DGI y recibidos by default.
+    dgi: new IntervalRateLimiter(Math.ceil(1000 / dgiRps), now, sleepFn),
   };
+}
+
+/** Explicit name for new callers; the old factory remains source-compatible. */
+export function createRateLimiters(
+  limits: EffectiveRateLimits = {},
+  deps: RateLimiterFactoryDeps = {},
+): RateLimiters {
+  return createDefaultRateLimiters(limits, deps);
 }

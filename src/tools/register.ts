@@ -14,6 +14,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BillerClient } from "../biller/client.js";
+import { CacheDetalles } from "../biller/traerDetalles.js";
 import {
   inspectConfig,
   loadConfig,
@@ -173,7 +174,19 @@ export function createToolContext(
   let cachedClient: BillerClient | undefined;
   let cachedWriteClient: BillerWriteClient | undefined;
   let cachedAuditor: Auditor | undefined;
-  const rateLimiters = createDefaultRateLimiters();
+  // El presupuesto pertenece a este contexto (y por lo tanto a este tenant).
+  // Además se construye DESPUÉS de cargar la config efectiva: en multi-tenant,
+  // cada overlay puede elegir sus propios límites sin compartir estado con las
+  // demás empresas. Si la config es inválida, `getConfig` falla antes de crear
+  // ningún cliente ni limiter.
+  let rateLimiters: ReturnType<typeof createDefaultRateLimiters> | undefined;
+  const getRateLimiters = () => {
+    rateLimiters ??= createDefaultRateLimiters({
+      defaultRps: getConfig().rateLimitDefaultRps,
+      dgiRps: getConfig().rateLimitDgiRps,
+    });
+    return rateLimiters;
+  };
   // La persistencia se resuelve perezosamente: la ruta vive en la config, que
   // puede no estar disponible al construir el contexto.
   let cachedIdempotency: IdempotencyStore | undefined;
@@ -182,18 +195,19 @@ export function createToolContext(
   // disponible al construir el contexto. Si la config no carga, memoria — un
   // flujo de emisión sin store funciona (peor), pero sin store NO funciona.
   let cachedBorradores: BorradorStore | undefined;
+  let cachedDetalles: CacheDetalles | undefined;
 
   const getConfig = (): BillerConfig => {
     cachedConfig ??= loadConfig(env);
     return cachedConfig;
   };
   const getClient = (): BillerClient => {
-    cachedClient ??= new BillerClient(getConfig(), { rateLimiters });
+    cachedClient ??= new BillerClient(getConfig(), { rateLimiters: getRateLimiters() });
     return cachedClient;
   };
   const getWriteContext = (): WriteExecContext => {
     const config = getConfig();
-    cachedWriteClient ??= new BillerWriteClient(config, { rateLimiters });
+    cachedWriteClient ??= new BillerWriteClient(config, { rateLimiters: getRateLimiters() });
     cachedAuditor ??= new Auditor(config.auditLogPath);
     cachedIdempotency ??= crearIdempotencyStore(config.idempotencyLogPath);
     return {
@@ -248,6 +262,14 @@ export function createToolContext(
     return cachedBorradores;
   };
 
+  const getDetallesCache = (): CacheDetalles => {
+    // La habilitación es la de la config efectiva del tenant. Se crea de
+    // forma perezosa, igual que el cliente, para que un contexto incompleto
+    // siga pudiendo registrarse y reportar su error de configuración.
+    cachedDetalles ??= new CacheDetalles(getConfig().cacheEnabled);
+    return cachedDetalles;
+  };
+
   // `inspeccionar` cierra sobre el MISMO `env` que `getConfig`, y ese es todo el
   // punto: no hay forma de construir un contexto cuya config diga una cosa y
   // cuyo diagnóstico diga otra. No se memoiza —a diferencia de la config y el
@@ -260,6 +282,7 @@ export function createToolContext(
     getApprovalCycle,
     metricas,
     getBorradorStore,
+    getDetallesCache,
     inspeccionar: () => inspectConfig(env),
   };
 }

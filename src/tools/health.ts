@@ -80,11 +80,18 @@ const outputShape = {
   }),
   warnings: z.array(z.string()),
   missing: z.array(z.string()),
+  rate_limit_default_rps: z.number(),
+  rate_limit_dgi_rps: z.number(),
 };
 
 function buildWarnings(c: ConfigInspection): string[] {
   const warnings: string[] = [];
   const writeToolsRegistered = c.capabilityMode === "write_enabled";
+
+  // Los valores inválidos vuelven a su default, pero el operador tiene que
+  // enterarse: de lo contrario health diría "30" sin explicar por qué su
+  // configuración de "0" no tuvo efecto.
+  warnings.push(...c.configWarnings);
 
   if (writeToolsRegistered && !c.writeEnabled) {
     warnings.push(
@@ -174,6 +181,8 @@ export function buildHealthStructured(
     tiene_audit_log: c.auditLogPath !== null,
     timeout_ms: c.timeoutMs,
     log_level: c.logLevel,
+    rate_limit_default_rps: c.rateLimitDefaultRps,
+    rate_limit_dgi_rps: c.rateLimitDgiRps,
     acceso: {
       remitente_exigido: c.remitentes.exigido,
       remitentes_autorizados: c.remitentes.autorizados,
@@ -220,6 +229,8 @@ function toMarkdown(s: Record<string, unknown>): string {
     }`,
     `- **timeout_ms**: ${s.timeout_ms}`,
     `- **log_level**: ${s.log_level}`,
+    `- **rate_limit_default_rps**: ${s.rate_limit_default_rps}`,
+    `- **rate_limit_dgi_rps**: ${s.rate_limit_dgi_rps}`,
     ...(() => {
       const a = s.acceso as {
         remitente_exigido: boolean;

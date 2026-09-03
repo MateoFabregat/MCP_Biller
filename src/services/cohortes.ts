@@ -167,9 +167,12 @@ export function calcularCohortes(
     const clasificacion = classifyCfe(c.tipo_comprobante, c.indicador_cobranza_propia);
     if (!clasificacion.suma_en_resumen) continue;
     const claseEstado = clasificarEstado(c.estado);
+    if (c.total === null || c.moneda === null) continue;
+    // Contar el aviso después de los mismos filtros de elegibilidad que dejan
+    // entrar al comprobante al cálculo. Un documento sin total o moneda no es
+    // una venta relevante cuyo estado falte: ya quedó afuera por otro motivo.
     if (claseEstado === "desconocido") sinEstado += 1;
     if (soloAceptados && claseEstado !== "aceptado") continue;
-    if (c.total === null || c.moneda === null) continue;
     analizados += 1;
 
     const rut = extractClienteRut(c.cliente);

@@ -1,6 +1,6 @@
 # Brainstorming V3 — Catálogo de funcionalidades
 
-> Escrito el 2026-07-27 sobre `main` (260 tests verdes, 17 tools registradas).
+> Escrito el 2026-07-27 sobre `main` (estado de la suite y del registro documentado).
 > Complementa a [`PLAN_V2.md`](PLAN_V2.md): aquel define el **norte arquitectónico**,
 > este define el **inventario de qué se puede construir** y en qué orden.
 >
@@ -675,7 +675,7 @@ pregunta al lado, y es más urgente porque bloquea a la primera:
 
 > **¿Cómo sabemos que anda?**
 
-Hay 828 tests y ninguna métrica. No se sabe cuántos mensajes caen en
+Había una suite de pruebas y ninguna métrica. No se sabe cuántos mensajes caen en
 `desconocido` en producción, ni qué proporción de emisiones se abandona a mitad
 de flujo, ni cuántas veces el resolvedor contesta "ambiguo". El corpus de 155
 mensajes tuvo que escribirlo un auditor **imaginando** cómo escribe un

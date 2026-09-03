@@ -38,6 +38,8 @@ export function makeConfig(overrides: Partial<BillerConfig> = {}): BillerConfig 
     cacheEnabled: true,
     httpSessionTtlMs: DEFAULT_HTTP_SESSION_TTL_MS,
     httpMaxSessions: DEFAULT_HTTP_MAX_SESSIONS,
+    rateLimitDefaultRps: 30,
+    rateLimitDgiRps: 1,
     ...overrides,
   };
   return {

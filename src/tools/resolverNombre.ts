@@ -255,7 +255,9 @@ export async function handleResolverNombre(args: unknown, ctx: ToolContext): Pro
       // descendente), no el de llegada.
       const ids = seleccion.filter((c) => c.id !== null).map((c) => c.id!);
       const sinId = seleccion.length - ids.length;
-      const traidos = await traerPorId(ctx.getClient(), ids);
+      const traidos = await traerPorId(ctx.getClient(), ids, {
+        cache: ctx.getDetallesCache?.(),
+      });
       const detalle = ids
         .map((id) => traidos.detalles.get(id))
         .filter((c): c is ComprobanteEmitido => c !== undefined);

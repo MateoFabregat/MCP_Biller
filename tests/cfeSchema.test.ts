@@ -272,7 +272,7 @@ describe("ComprobanteBodySchema — fechas dd/mm/aaaa", () => {
   });
 
   it("rechaza una fecha_emision a más de dos meses a futuro", () => {
-    const lejos = new Date();
+    const lejos = new Date(); // fecha-uy:allow el fixture necesita el instante actual para probar el techo DGI
     lejos.setUTCMonth(lejos.getUTCMonth() + 6);
     expect(errores({ ...E_TICKET, fecha_emision: formatFechaDgi(lejos) }).join()).toMatch(/dos meses/);
   });

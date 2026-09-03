@@ -98,7 +98,7 @@ Tres cosas que el diagrama no puede decir y hay que saber:
 | Lenguaje | TypeScript (strict) + Node ≥ 18 | El tipo cerrado es una barrera más: `NombreMetrica`, `Estrategia`, `PasoEmision` son uniones que no dejan inventar valores. |
 | Protocolo | `@modelcontextprotocol/sdk` ^1.12 | MCP es lo que habla Claude (Desktop/Code) y el Agent Node de Kapso. |
 | Validación | Zod v3 (3.25, trae `zod/v4` adentro) | Todo input de tool y toda respuesta de la API pasan por schema. **Deuda conocida:** el conversor v3 emite JSON Schema draft-07; el parche `transport/dialecto.ts` lo limpia del wire hasta migrar a `zod/v4` (V5.4). |
-| Tests | Vitest | 1050+ tests, sin red: la API se fake-ea en `tests/helpers.ts`. |
+| Tests | Vitest | Suite automatizada sin red: la API se fake-ea en `tests/helpers.ts`. |
 | WhatsApp | API de Kapso | Interactivos (botones/listas), media, webhook. El sandbox NO tiene templates: el push fuera de la ventana de 24 h espera eso. |
 | Persistencia | Archivos JSONL append-only | Idempotencia (opt-out), audit, borradores (opt-in). No hay base de datos A PROPÓSITO: el volumen de una PyME (miles de CFE/año) no la justifica y cada dependencia de infra es una cosa más que se cae. |
 | Deploy | proceso Node (stdio/HTTP) o Vercel (`api/`) | Serverless degrada a solo-lectura: la idempotencia en memoria no sobrevive entre invocaciones y un retry duplicaría una factura. |
@@ -126,7 +126,7 @@ cadena entera contra la API real (solo GET).
 **Local / un solo tenant (Claude Desktop):**
 
 ```bash
-npm install && npm test            # 1050+ tests sin red: si pasa, está sano
+npm install && npm test            # suite sin red: si pasa, está sano
 cp .env.example .env               # completar URL y token de TEST
 node scripts/onboard.mjs           # verifica contra la API real, solo GET
 # apuntar claude_desktop_config a dist/index.js (ver claude_desktop_config.example.json)

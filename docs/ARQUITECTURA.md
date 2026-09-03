@@ -89,8 +89,8 @@ flowchart TB
    o futura— pasa su resultado por el sanitizador sin que nadie tenga que
    acordarse.
 2. **La lógica de negocio no toca la red.** `services/` recibe comprobantes ya
-   normalizados y devuelve números. Por eso los tests corren en segundos sin un
-   solo mock de HTTP en la capa de cálculo.
+   normalizados y devuelve números. Por eso la suite de cálculo corre en segundos
+   sin un solo mock de HTTP en esa capa.
 3. **Hay dos salidas peligrosas y tienen barreras opuestas.** El POST a Biller
    necesita autenticar la *intención* (dry-run → token → confirm). El POST a Kapso
    necesita restringir el *destino* (allowlist). Ver §5.

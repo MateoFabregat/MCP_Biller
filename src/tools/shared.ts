@@ -4,6 +4,7 @@
 
 import { z, type ZodError } from "zod";
 import type { BillerClient } from "../biller/client.js";
+import type { CacheDetalles } from "../biller/traerDetalles.js";
 import type { BillerConfig, ConfigInspection } from "../config.js";
 import type { BorradorStore } from "../kapso/borradorStore.js";
 import type { Metricas } from "../observabilidad/metricas.js";
@@ -53,6 +54,8 @@ export interface ToolContext {
    * quién. Es el dato comercial más sensible que maneja el server.
    */
   getBorradorStore: () => BorradorStore;
+  /** Cache de detalles propiedad de ESTA empresa, no del proceso. */
+  getDetallesCache?: () => CacheDetalles;
   /**
    * Diagnóstico de la configuración DE ESTA EMPRESA, ya sin secretos.
    *

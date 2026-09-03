@@ -19,12 +19,15 @@
 // LA REGLA
 //
 // Fuera de `src/services/fechaUy.ts`, un `new Date()` crudo NO puede usarse como
-// "qué día es hoy". Se persiguen tres formas, que son las que aparecieron de
-// verdad en el repo:
+// "qué día es hoy". La regla cubre producción y los fixtures representativos
+// de `tests/`, y persigue estas formas, que son las que aparecieron de verdad
+// en el repo:
 //
 //   1. `?? new Date()`            — un `hoy` inyectable cuyo default es UTC-now.
 //   2. `const hoy = new Date();`  — el instante crudo atado a una variable.
 //   3. `hoy: Date = new Date()`   — lo mismo, como parámetro con default.
+//   4. `helper(new Date())`       — el instante crudo entra directo a una
+//                                  función que espera un día civil.
 //
 // LAS DOS SALIDAS
 //
@@ -57,9 +60,12 @@ import { describe, expect, it } from "vitest";
 
 const RAIZ = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC_DIR = join(RAIZ, "src");
+const TESTS_DIR = join(RAIZ, "tests");
 
 /** El único archivo que puede preguntarle la hora al sistema. */
 const MODULO_FECHA = join("src", "services", "fechaUy.ts");
+/** Este guard contiene ejemplos de los patrones y no puede denunciarse solo. */
+const ARCHIVO_GUARD = join("tests", "fechaUyGuard.test.ts");
 
 /** Excepción por línea, con motivo escrito. */
 const ALLOW_MARKER = /\/\/\s*fecha-uy:allow\b(.*)$/;
@@ -88,7 +94,7 @@ const PATRONES: Patron[] = [
   { re: /\?\?\s*new Date\(\)/, label: "?? new Date()", redimible: false },
   // 2. Binding crudo: `const hoy = new Date();`, `this.hoy = new Date();`.
   {
-    re: new RegExp(`(?:const|let|var|this\\.)\\s*(${IDENT})\\s*=\\s*new Date\\(\\)\\s*;`),
+    re: new RegExp(`(?:const|let|var|this\\.)\\s*(${IDENT})\\s*=\\s*new Date\\(\\)\\s*;?`),
     label: "= new Date();",
     redimible: true,
   },
@@ -124,31 +130,59 @@ function seConvierte(lineas: string[], desde: number, ident: string): boolean {
   return CONVERSORES.some((c) => new RegExp(`\\b${c}\\s*\\(\\s*${ident}\\s*[,)]`).test(ventana));
 }
 
+function rutasGuardadas(): string[] {
+  return [...walk(SRC_DIR), ...walk(TESTS_DIR)];
+}
+
+function rutaRelativa(file: string): string {
+  return relative(RAIZ, file).split(sep).join("/");
+}
+
+function esArchivoExceptuado(file: string): boolean {
+  const ruta = rutaRelativa(file);
+  return ruta === MODULO_FECHA.split(sep).join("/") || ruta === ARCHIVO_GUARD.split(sep).join("/");
+}
+
+function violacionesDeFuente(fuente: string, archivo = "fixture.ts"): string[] {
+  const lineas = fuente.split("\n");
+  const out: string[] = [];
+  lineas.forEach((linea, i) => {
+    // Las líneas de comentario quedan afuera: este archivo se explica a sí
+    // mismo citando los patrones que persigue, y un guard que se marca la
+    // propia prosa enseña a la gente a escribir los comentarios raro.
+    if (ES_COMENTARIO.test(linea)) return;
+    if (ALLOW_MARKER.test(linea)) return;
+    for (const { re, label, redimible } of PATRONES) {
+      const m = re.exec(linea);
+      if (m === null) continue;
+      if (redimible && m[1] !== undefined && seConvierte(lineas, i, m[1])) continue;
+      out.push(`${archivo}:${i + 1} [${label}] ${linea.trim()}`);
+      return;
+    }
+  });
+  return out;
+}
+
 function violaciones(): string[] {
   const out: string[] = [];
-  for (const file of walk(SRC_DIR)) {
-    if (relative(RAIZ, file) === MODULO_FECHA.split("/").join(sep)) continue;
-    const lineas = readFileSync(file, "utf8").split("\n");
-    lineas.forEach((linea, i) => {
-      // Las líneas de comentario quedan afuera: este archivo se explica a sí
-      // mismo citando los patrones que persigue, y un guard que se marca la
-      // propia prosa enseña a la gente a escribir los comentarios raro.
-      if (ES_COMENTARIO.test(linea)) return;
-      if (ALLOW_MARKER.test(linea)) return;
-      for (const { re, label, redimible } of PATRONES) {
-        const m = re.exec(linea);
-        if (m === null) continue;
-        if (redimible && m[1] !== undefined && seConvierte(lineas, i, m[1])) continue;
-        out.push(`${relative(RAIZ, file)}:${i + 1} [${label}] ${linea.trim()}`);
-        return;
-      }
-    });
+  for (const file of rutasGuardadas()) {
+    if (esArchivoExceptuado(file)) continue;
+    out.push(...violacionesDeFuente(readFileSync(file, "utf8"), rutaRelativa(file)));
   }
   return out;
 }
 
+function motivosFaltantes(fuente: string, archivo = "fixture.ts"): string[] {
+  return fuente
+    .split("\n")
+    .flatMap((linea, i) => {
+      const m = ALLOW_MARKER.exec(linea);
+      return m !== null && m[1]!.trim().length === 0 ? [`${archivo}:${i + 1}`] : [];
+    });
+}
+
 describe('guard estático: "hoy" en hora uruguaya', () => {
-  it("ningún archivo de src/ usa new Date() como el día de hoy", () => {
+  it("ningún archivo de src/ ni fixture representativo usa new Date() como día civil", () => {
     expect(violaciones()).toEqual([]);
   });
 
@@ -157,12 +191,13 @@ describe('guard estático: "hoy" en hora uruguaya', () => {
     // guard las tolera; este test las obliga a explicarse. Mismo criterio que
     // `check-readonly:allow` en readonly.test.ts.
     const sinMotivo: string[] = [];
-    for (const file of walk(SRC_DIR)) {
+    for (const file of rutasGuardadas()) {
+      if (esArchivoExceptuado(file)) continue;
       readFileSync(file, "utf8")
         .split("\n")
         .forEach((linea, i) => {
           const m = ALLOW_MARKER.exec(linea);
-          if (m !== null && m[1]!.trim().length < 10) {
+          if (m !== null && m[1]!.trim().length === 0) {
             sinMotivo.push(`${relative(RAIZ, file)}:${i + 1}`);
           }
         });
@@ -170,7 +205,7 @@ describe('guard estático: "hoy" en hora uruguaya', () => {
     expect(sinMotivo).toEqual([]);
   });
 
-  it("el guard detecta de verdad las tres formas (si esto falla, el patrón se aflojó)", () => {
+  it("el guard detecta fixtures civiles y redime instantes técnicos", () => {
     // Un guard estático que dejó de matchear es un guard verde y vacío: el
     // caso más caro de todos, porque nadie lo mira. Las muestras son las
     // líneas REALES que este guard vino a sacar del repo.
@@ -200,6 +235,15 @@ describe('guard estático: "hoy" en hora uruguaya', () => {
         caso,
       ).toBe(false);
     }
+
+    expect(violacionesDeFuente("const hoy = new Date();")).toEqual([
+      "fixture.ts:1 [= new Date();] const hoy = new Date();",
+    ]);
+    expect(violacionesDeFuente("const ahora = new Date();\nhoyIsoUy(ahora);")).toEqual([]);
+    expect(
+      violacionesDeFuente("const ahora = new Date(); // fecha-uy:allow TTL de fixture técnico"),
+    ).toEqual([]);
+    expect(motivosFaltantes("const ahora = new Date(); // fecha-uy:allow")).toEqual(["fixture.ts:1"]);
   });
 
   it("fechaUy.ts sigue siendo el único que le pregunta la hora al sistema", () => {

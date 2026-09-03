@@ -11,6 +11,16 @@ import { mkdirSync } from "node:fs";
 import { join as unirRuta } from "node:path";
 import { logger } from "./logger.js";
 import { BillerConfigError } from "./utils/errors.js";
+import {
+  DEFAULT_RATE_LIMIT_DEFAULT_RPS,
+  DEFAULT_RATE_LIMIT_DGI_RPS,
+  MAX_RATE_LIMIT_RPS,
+} from "./utils/rateLimit.js";
+export {
+  DEFAULT_RATE_LIMIT_DEFAULT_RPS,
+  DEFAULT_RATE_LIMIT_DGI_RPS,
+  MAX_RATE_LIMIT_RPS,
+} from "./utils/rateLimit.js";
 import { parseLimitesMonto, type LimitesMonto } from "./write/limiteMonto.js";
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -215,6 +225,10 @@ export interface BillerConfig {
   httpSessionTtlMs: number;
   /** Techo de sesiones HTTP simultáneas. */
   httpMaxSessions: number;
+  /** Requests por segundo para operaciones normales (default 30). */
+  rateLimitDefaultRps: number;
+  /** Requests por segundo para DGI/recibidos (default 1). */
+  rateLimitDgiRps: number;
 }
 
 /** Configuración del canal de salida por WhatsApp (Kapso). */
@@ -409,6 +423,34 @@ function parseEnteroPositivo(raw: string | undefined, porDefecto: number, nombre
 }
 
 /**
+ * Lee un límite de requests por segundo de forma conservadora.
+ *
+ * Estos son límites operativos, no cantidades donde tenga sentido redondear:
+ * un decimal o una notación exponencial se considera un valor mal tipeado.
+ * Un valor inválido vuelve al default y deja un warning tanto en logs como en
+ * la inspección que consume `biller_health_check`.
+ */
+function parseRateLimitRps(
+  raw: string | undefined,
+  porDefecto: number,
+  nombre: string,
+  warnings?: string[],
+): number {
+  const t = (raw ?? "").trim();
+  if (t === "") return porDefecto;
+  const n = Number(t);
+  const valido = /^[0-9]+$/.test(t) && Number.isSafeInteger(n) && n > 0 && n <= MAX_RATE_LIMIT_RPS;
+  if (valido) return n;
+
+  const warning =
+    `${nombre}="${raw}" no es un entero positivo entre 1 y ${MAX_RATE_LIMIT_RPS}: ` +
+    `se ignora y se usa el default (${porDefecto}).`;
+  logger.warn(warning);
+  warnings?.push(warning);
+  return porDefecto;
+}
+
+/**
  * Las tres rutas de persistencia, derivadas de `BILLER_DATA_DIR` + el id de la
  * empresa.
  *
@@ -596,6 +638,12 @@ export interface ConfigInspection {
   cacheEnabled: boolean;
   httpSessionTtlMs: number;
   httpMaxSessions: number;
+  /** Requests por segundo para operaciones normales (default 30). */
+  rateLimitDefaultRps: number;
+  /** Requests por segundo para DGI/recibidos (default 1). */
+  rateLimitDgiRps: number;
+  /** Advertencias de parseo de límites operativos. No contiene secretos. */
+  configWarnings: string[];
   /** Nombres de variables requeridas que faltan. */
   missing: string[];
 }
@@ -664,6 +712,16 @@ export function loadConfig(env: Env = process.env): BillerConfig {
   const dataDir = trimOrUndefined(env.BILLER_DATA_DIR);
   const tenantId = tenantIdDe(env);
   const rutas = derivarRutas(env);
+  const rateLimitDefaultRps = parseRateLimitRps(
+    env.BILLER_RATE_LIMIT_DEFAULT_RPS,
+    DEFAULT_RATE_LIMIT_DEFAULT_RPS,
+    "BILLER_RATE_LIMIT_DEFAULT_RPS",
+  );
+  const rateLimitDgiRps = parseRateLimitRps(
+    env.BILLER_RATE_LIMIT_DGI_RPS,
+    DEFAULT_RATE_LIMIT_DGI_RPS,
+    "BILLER_RATE_LIMIT_DGI_RPS",
+  );
   // El directorio se crea solo si hay algo derivado que vaya a caer adentro: con
   // las tres rutas declaradas a mano, `BILLER_DATA_DIR` no manda nada y crear un
   // directorio vacío sería ruido en el disco de alguien.
@@ -716,6 +774,8 @@ export function loadConfig(env: Env = process.env): BillerConfig {
       DEFAULT_HTTP_MAX_SESSIONS,
       "BILLER_HTTP_MAX_SESSIONS",
     ),
+    rateLimitDefaultRps,
+    rateLimitDgiRps,
   };
 }
 
@@ -761,6 +821,19 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
   // escribió—, pero acá no se crea ningún directorio: `inspectConfig` no toca
   // el disco ni lanza, por definición.
   const rutas = derivarRutas(env);
+  const configWarnings: string[] = [];
+  const rateLimitDefaultRps = parseRateLimitRps(
+    env.BILLER_RATE_LIMIT_DEFAULT_RPS,
+    DEFAULT_RATE_LIMIT_DEFAULT_RPS,
+    "BILLER_RATE_LIMIT_DEFAULT_RPS",
+    configWarnings,
+  );
+  const rateLimitDgiRps = parseRateLimitRps(
+    env.BILLER_RATE_LIMIT_DGI_RPS,
+    DEFAULT_RATE_LIMIT_DGI_RPS,
+    "BILLER_RATE_LIMIT_DGI_RPS",
+    configWarnings,
+  );
   return {
     tenantId: tenantIdDe(env),
     dataDir: trimOrUndefined(env.BILLER_DATA_DIR) ?? null,
@@ -820,6 +893,9 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
       DEFAULT_HTTP_MAX_SESSIONS,
       "BILLER_HTTP_MAX_SESSIONS",
     ),
+    rateLimitDefaultRps,
+    rateLimitDgiRps,
+    configWarnings,
     missing,
   };
 }

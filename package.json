@@ -27,6 +27,7 @@
     "diagnostico": "npm run build && node --env-file=.env scripts/simular-whatsapp.mjs",
     "conversar": "npm run build && node --env-file=.env scripts/conversar.mjs",
     "contrato": "node --env-file=.env scripts/contrato.mjs",
+    "contrato:readonly": "node --env-file=.env scripts/contrato-readonly.mjs",
     "prepack": "npm run build && npm run check:readonly && node scripts/check-empaque.mjs",
     "prebuild": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\""
   },

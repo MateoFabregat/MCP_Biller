@@ -492,7 +492,7 @@ que aparezcan las tools de escritura. Después llamá `biller_emitir_comprobante
 
 ## Métricas: cómo sabemos que anda
 
-Hasta acá había 900+ tests y **ninguna** métrica: no se sabía cuántos mensajes
+Hasta acá había una suite de pruebas y **ninguna** métrica: no se sabía cuántos mensajes
 caían en "no entendí" ni en qué paso se abandonaban las emisiones. La prueba de
 que eso no alcanzaba es concreta — una prueba a mano encontró que **siete de
 siete frases reales** caían en "no entendí", con la suite entera en verde.

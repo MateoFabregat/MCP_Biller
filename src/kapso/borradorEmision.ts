@@ -41,11 +41,26 @@ import {
   siguientePaso,
   itemPuedeViajar,
   itemsVigentes,
+  simboloMoneda,
   type EstadoEmision,
   type ItemEnCurso,
 } from "./emision.js";
 import { esPedidoDeEmision, type PedidoEmision } from "./extraerPedido.js";
 import { formatearUy, parsearCantidad, parsearImporte } from "../services/importe.js";
+
+/**
+ * Muestra un precio que quedó sin línea en el mismo formato que el resto del
+ * flujo. Los strings vienen del texto del usuario y se vuelven a leer acá para
+ * que "6500" no termine en el aviso como un número crudo; los números ya
+ * normalizados conservan exactamente el mismo camino de formato.
+ *
+ * Si el texto no es legible, se conserva tal cual: el aviso no debe inventar
+ * una lectura ni esconder el dato que todavía hay que preguntar.
+ */
+export function formatearPrecioAviso(precio: number | string, moneda?: string): string {
+  const valor = typeof precio === "number" ? precio : parsearImporte(precio).valor;
+  return valor === null ? String(precio) : `${simboloMoneda(moneda)}${formatearUy(valor)}`;
+}
 
 /**
  * Aplica un dato al ítem que se está cargando.
@@ -418,9 +433,11 @@ export function rellenarDesdePedido(
     }
     delete estado.items_cerrados;
     if (descartados.length > 0) {
+      const monedaAviso = estado.moneda ?? pedido.moneda;
       avisos.push(
         `⚠️ Quedaron sin línea ${descartados.length} precio(s) del mensaje ` +
-          `(${descartados.join(", ")}): se abrió un ítem para preguntarlos. NO emitas hasta ` +
+          `(${descartados.map((precio) => formatearPrecioAviso(precio, monedaAviso)).join(", ")}): ` +
+          `se abrió un ítem para preguntarlos. NO emitas hasta ` +
           "cargarlos o descartarlos con el usuario.",
       );
     }
