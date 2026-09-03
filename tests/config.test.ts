@@ -41,6 +41,20 @@ describe("config", () => {
     expect(c.apiToken).toBe("tok-12345");
   });
 
+  it.each([
+    "http://test.biller.uy",
+    "https://evil.example",
+    "https://test.biller.uy.evil.example",
+    "https://test.biller.uy:444",
+    "https://test.biller.uy/proxy",
+    "https://user:pass@test.biller.uy",
+  ])("rechaza una base que podría filtrar el bearer: %s", (apiBaseUrl) => {
+    expect(() => loadConfig({ BILLER_API_BASE_URL: apiBaseUrl, BILLER_API_TOKEN: "tok-12345" }))
+      .toThrow(/exactamente https:\/\/test\.biller\.uy/);
+    expect(inspectConfig({ BILLER_API_BASE_URL: apiBaseUrl, BILLER_API_TOKEN: "tok-12345" }).missing)
+      .toEqual(expect.arrayContaining([expect.stringContaining("BILLER_API_BASE_URL debe ser exactamente")]));
+  });
+
   it("loadConfig acepta opcionales y timeout custom (con clamp)", () => {
     const c = loadConfig({
       BILLER_API_BASE_URL: "https://biller.uy",

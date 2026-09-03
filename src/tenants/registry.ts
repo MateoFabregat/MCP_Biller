@@ -182,6 +182,8 @@ export const RUTAS_DE_PERSISTENCIA: readonly string[] = [
   "BILLER_AUDIT_LOG_PATH",
   "BILLER_IDEMPOTENCY_LOG_PATH",
   "BILLER_BORRADOR_STORE_PATH",
+  "KAPSO_IDEMPOTENCY_LOG_PATH",
+  "BILLER_WEBHOOK_REPLAY_LOG_PATH",
 ];
 
 /** Los topes de monto son `BILLER_MAX_MONTO_<MONEDA>`: la lista no se puede fijar de antemano. */

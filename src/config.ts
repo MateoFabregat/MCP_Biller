@@ -41,6 +41,10 @@ const MAX_TIMEOUT_MS = 120_000;
  */
 export const DEFAULT_HTTP_SESSION_TTL_MS = 30 * 60 * 1000;
 export const DEFAULT_HTTP_MAX_SESSIONS = 200;
+/** Retención máxima de ids de mensajes entrantes para evitar replays. */
+export const DEFAULT_WEBHOOK_REPLAY_TTL_MS = 24 * 60 * 60 * 1000;
+/** Techo por tenant del estado de replay en memoria y disco. */
+export const DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES = 10_000;
 
 /**
  * El id que se le da a "la única empresa" cuando no hay registro de tenants.
@@ -59,6 +63,8 @@ export const TENANT_IMPLICITO = "_proceso";
 const ARCHIVO_AUDIT = "audit.jsonl";
 const ARCHIVO_IDEMPOTENCIA = "idempotencia.jsonl";
 const ARCHIVO_BORRADORES = "borradores.jsonl";
+/** Namespace separado: nunca mezclar salidas Kapso con operaciones fiscales. */
+const ARCHIVO_KAPSO_IDEMPOTENCIA = "kapso-idempotencia.jsonl";
 
 export type BillerEnvironment = "test" | "production";
 
@@ -179,6 +185,12 @@ export interface BillerConfig {
    * — que es como se duplica un comprobante ante DGI.
    */
   idempotencyLogPath?: string;
+  /** Ruta del journal persistente de deduplicación de webhooks entrantes. */
+  webhookReplayLogPath?: string;
+  /** TTL del journal de replay, en milisegundos. */
+  webhookReplayTtlMs?: number;
+  /** Máximo de ids retenidos por tenant. */
+  webhookReplayMaxEntries?: number;
   /**
    * Ruta del store PERSISTENTE de borradores de emisión.
    *
@@ -260,6 +272,12 @@ export interface KapsoConfig {
    * allowlist convierte ese error de "fuga de datos" en "error de validación".
    */
   destinatariosPermitidos: string[];
+  /** Tenant que posee el canal. Solo se usa para saltear claves entre empresas. */
+  tenantId?: string;
+  /** Journal propio de salidas Kapso (null/undefined = store en memoria). */
+  idempotencyLogPath?: string;
+  /** Marca interna del handler serverless: el filesystem efímero no alcanza. */
+  serverless?: boolean;
 }
 
 export const DEFAULT_KAPSO_BASE_URL = "https://api.kapso.ai";
@@ -315,7 +333,7 @@ export function advertenciasDestinatarios(destinatarios: string[]): string[] {
   return out;
 }
 
-function parseKapso(env: Env): KapsoConfig | undefined {
+function parseKapso(env: Env, idempotencyLogPath?: string): KapsoConfig | undefined {
   const apiKey = trimOrUndefined(env.KAPSO_API_KEY);
   if (apiKey === undefined) return undefined;
   return {
@@ -324,6 +342,8 @@ function parseKapso(env: Env): KapsoConfig | undefined {
     phoneNumberId: trimOrUndefined(env.KAPSO_PHONE_NUMBER_ID),
     destinatariosPermitidos: parseDestinatarios(env.KAPSO_DESTINATARIOS_PERMITIDOS),
     webhookSecret: trimOrUndefined(env.KAPSO_WEBHOOK_SECRET),
+    tenantId: tenantIdDe(env),
+    idempotencyLogPath,
   };
 }
 
@@ -451,10 +471,10 @@ function parseRateLimitRps(
 }
 
 /**
- * Las tres rutas de persistencia, derivadas de `BILLER_DATA_DIR` + el id de la
+ * Las cinco rutas de persistencia, derivadas de `BILLER_DATA_DIR` + el id de la
  * empresa.
  *
- * EL PROBLEMA QUE RESUELVE. Declararlas a mano son tres rutas por empresa, y la
+ * EL PROBLEMA QUE RESUELVE. Declararlas a mano son varias rutas por empresa, y la
  * de más arriba está a un copy-paste de distancia: dar de alta la vigésima
  * empresa copiando la entrada de la decimonovena deja a las dos escribiendo el
  * audit fiscal en el mismo archivo. Hasta acá la única defensa era la validación
@@ -476,11 +496,15 @@ function derivarRutas(env: Env): {
   auditLogPath?: string;
   idempotencyLogPath?: string;
   borradorStorePath?: string;
+  kapsoIdempotencyLogPath?: string;
+  webhookReplayLogPath?: string;
 } {
   const explicitas = {
     auditLogPath: trimOrUndefined(env.BILLER_AUDIT_LOG_PATH),
     idempotencyLogPath: trimOrUndefined(env.BILLER_IDEMPOTENCY_LOG_PATH),
     borradorStorePath: trimOrUndefined(env.BILLER_BORRADOR_STORE_PATH),
+    kapsoIdempotencyLogPath: trimOrUndefined(env.KAPSO_IDEMPOTENCY_LOG_PATH),
+    webhookReplayLogPath: trimOrUndefined(env.BILLER_WEBHOOK_REPLAY_LOG_PATH),
   };
   const dataDir = trimOrUndefined(env.BILLER_DATA_DIR);
   if (dataDir === undefined) return explicitas;
@@ -490,11 +514,15 @@ function derivarRutas(env: Env): {
     auditLogPath: explicitas.auditLogPath ?? derivadas.BILLER_AUDIT_LOG_PATH,
     idempotencyLogPath: explicitas.idempotencyLogPath ?? derivadas.BILLER_IDEMPOTENCY_LOG_PATH,
     borradorStorePath: explicitas.borradorStorePath ?? derivadas.BILLER_BORRADOR_STORE_PATH,
+    kapsoIdempotencyLogPath:
+      explicitas.kapsoIdempotencyLogPath ?? derivadas.KAPSO_IDEMPOTENCY_LOG_PATH,
+    webhookReplayLogPath:
+      explicitas.webhookReplayLogPath ?? derivadas.BILLER_WEBHOOK_REPLAY_LOG_PATH,
   };
 }
 
 /**
- * Las tres rutas derivadas, indexadas por el NOMBRE DE LA VARIABLE que cada una
+ * Las cinco rutas derivadas, indexadas por el NOMBRE DE LA VARIABLE que cada una
  * reemplaza.
  *
  * Se indexa así —y no por el campo de la config— porque el otro consumidor es
@@ -508,6 +536,8 @@ export function rutasDerivadasDe(dataDir: string, tenantId: string): Record<stri
     BILLER_AUDIT_LOG_PATH: unirRuta(dir, ARCHIVO_AUDIT),
     BILLER_IDEMPOTENCY_LOG_PATH: unirRuta(dir, ARCHIVO_IDEMPOTENCIA),
     BILLER_BORRADOR_STORE_PATH: unirRuta(dir, ARCHIVO_BORRADORES),
+    KAPSO_IDEMPOTENCY_LOG_PATH: unirRuta(dir, ARCHIVO_KAPSO_IDEMPOTENCIA),
+    BILLER_WEBHOOK_REPLAY_LOG_PATH: unirRuta(dir, "webhook-replay.jsonl"),
   };
 }
 
@@ -598,9 +628,13 @@ export interface ConfigInspection {
   /** Estado de Kapso, SIN exponer la API key. */
   kapso: {
     configurado: boolean;
+    /** Alias legible para health: true si el canal está configurado. */
+    habilitado: boolean;
     baseUrl: string | null;
     phoneNumberIdConfigurado: boolean;
     destinatariosPermitidos: number;
+    /** El journal de salidas sobrevive reinicios (solo booleano; no expone ruta). */
+    idempotenciaPersistente: boolean;
     /** true si hay secreto de webhook (no expone el valor). Sin esto la ruta no existe. */
     webhookHabilitado: boolean;
     /** Problemas de formato en la allowlist (números enmascarados). */
@@ -624,6 +658,10 @@ export interface ConfigInspection {
   enableIvaEstimado: boolean;
   /** Ruta del registro persistente de idempotencia (null = solo memoria). */
   idempotencyLogPath: string | null;
+  /** Ruta del journal persistente de replay de webhooks (null = solo memoria). */
+  webhookReplayLogPath: string | null;
+  webhookReplayTtlMs: number;
+  webhookReplayMaxEntries: number;
   /** Ruta del store persistente de borradores de emisión (null = solo memoria). */
   borradorStorePath: string | null;
   /** true = tools/list sale sin outputSchema (para clientes que se ahogan con la lista completa). */
@@ -652,6 +690,38 @@ type Env = Record<string, string | undefined>;
 
 function normalizeBaseUrl(raw: string): string {
   return raw.trim().replace(/\/+$/, "");
+}
+
+const BILLER_API_HOSTS = new Set(["biller.uy", "test.biller.uy"]);
+
+/**
+ * El bearer de Biller solo puede salir hacia los dos hosts oficiales conocidos.
+ * También se prohíben credenciales, puertos, query, fragmentos y subpaths: una
+ * base ambigua no debe convertirse en un canal para filtrar el token.
+ */
+function normalizeBillerBaseUrl(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    throw new BillerConfigError("BILLER_API_BASE_URL no es una URL válida.");
+  }
+  const pathValido = url.pathname === "" || url.pathname === "/";
+  if (
+    url.protocol !== "https:" ||
+    !BILLER_API_HOSTS.has(url.hostname.toLowerCase()) ||
+    url.port !== "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    !pathValido ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new BillerConfigError(
+      "BILLER_API_BASE_URL debe ser exactamente https://test.biller.uy o https://biller.uy.",
+    );
+  }
+  return `https://${url.hostname.toLowerCase()}`;
 }
 
 function trimOrUndefined(value: string | undefined): string | undefined {
@@ -708,7 +778,7 @@ export function loadConfig(env: Env = process.env): BillerConfig {
   }
 
   // En este punto baseUrlRaw y token están definidos.
-  const apiBaseUrl = normalizeBaseUrl(baseUrlRaw!);
+  const apiBaseUrl = normalizeBillerBaseUrl(baseUrlRaw!);
   const dataDir = trimOrUndefined(env.BILLER_DATA_DIR);
   const tenantId = tenantIdDe(env);
   const rutas = derivarRutas(env);
@@ -723,13 +793,15 @@ export function loadConfig(env: Env = process.env): BillerConfig {
     "BILLER_RATE_LIMIT_DGI_RPS",
   );
   // El directorio se crea solo si hay algo derivado que vaya a caer adentro: con
-  // las tres rutas declaradas a mano, `BILLER_DATA_DIR` no manda nada y crear un
+  // todas las rutas declaradas a mano, `BILLER_DATA_DIR` no manda nada y crear un
   // directorio vacío sería ruido en el disco de alguien.
   if (
     dataDir !== undefined &&
     (rutas.auditLogPath !== trimOrUndefined(env.BILLER_AUDIT_LOG_PATH) ||
       rutas.idempotencyLogPath !== trimOrUndefined(env.BILLER_IDEMPOTENCY_LOG_PATH) ||
-      rutas.borradorStorePath !== trimOrUndefined(env.BILLER_BORRADOR_STORE_PATH))
+      rutas.borradorStorePath !== trimOrUndefined(env.BILLER_BORRADOR_STORE_PATH) ||
+      rutas.kapsoIdempotencyLogPath !== trimOrUndefined(env.KAPSO_IDEMPOTENCY_LOG_PATH) ||
+      rutas.webhookReplayLogPath !== trimOrUndefined(env.BILLER_WEBHOOK_REPLAY_LOG_PATH))
   ) {
     asegurarDirectorio(directorioDeDatos(dataDir, tenantId));
   }
@@ -753,10 +825,21 @@ export function loadConfig(env: Env = process.env): BillerConfig {
     httpPort: parsePort(env.BILLER_HTTP_PORT, DEFAULT_HTTP_PORT),
     httpHost: trimOrUndefined(env.BILLER_HTTP_HOST) ?? "127.0.0.1",
     httpAllowedHosts: parseAllowedHosts(env.BILLER_HTTP_ALLOWED_HOSTS),
-    kapso: parseKapso(env),
+    kapso: parseKapso(env, rutas.kapsoIdempotencyLogPath),
     remitentesAutorizados: parseDestinatarios(env.BILLER_REMITENTES_AUTORIZADOS),
     enableIvaEstimado: parseBool(env.BILLER_ENABLE_IVA_ESTIMADO),
     idempotencyLogPath: rutas.idempotencyLogPath,
+    webhookReplayLogPath: rutas.webhookReplayLogPath,
+    webhookReplayTtlMs: parseEnteroPositivo(
+      env.BILLER_WEBHOOK_REPLAY_TTL_MS,
+      DEFAULT_WEBHOOK_REPLAY_TTL_MS,
+      "BILLER_WEBHOOK_REPLAY_TTL_MS",
+    ),
+    webhookReplayMaxEntries: parseEnteroPositivo(
+      env.BILLER_WEBHOOK_REPLAY_MAX_ENTRIES,
+      DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES,
+      "BILLER_WEBHOOK_REPLAY_MAX_ENTRIES",
+    ),
     borradorStorePath: rutas.borradorStorePath,
     wireLiviano: parseBool(env.BILLER_WIRE_LIVIANO),
     maxMontos: parseLimitesMonto(env),
@@ -814,13 +897,22 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     timeoutMs = DEFAULT_TIMEOUT_MS;
   }
 
-  const apiBaseUrl = baseUrlRaw ? normalizeBaseUrl(baseUrlRaw) : null;
-  const kapso = parseKapso(env);
+  let apiBaseUrl: string | null = null;
+  if (baseUrlRaw) {
+    try {
+      apiBaseUrl = normalizeBillerBaseUrl(baseUrlRaw);
+    } catch {
+      missing.push(
+        "BILLER_API_BASE_URL debe ser exactamente https://test.biller.uy o https://biller.uy",
+      );
+    }
+  }
+  const rutas = derivarRutas(env);
+  const kapso = parseKapso(env, rutas.kapsoIdempotencyLogPath);
   // Las rutas se DERIVAN igual que en `loadConfig` —el diagnóstico tiene que
   // decir el archivo que se va a usar de verdad, no la variable que alguien
   // escribió—, pero acá no se crea ningún directorio: `inspectConfig` no toca
   // el disco ni lanza, por definición.
-  const rutas = derivarRutas(env);
   const configWarnings: string[] = [];
   const rateLimitDefaultRps = parseRateLimitRps(
     env.BILLER_RATE_LIMIT_DEFAULT_RPS,
@@ -857,9 +949,11 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     httpAllowedHosts: parseAllowedHosts(env.BILLER_HTTP_ALLOWED_HOSTS),
     kapso: {
       configurado: kapso !== undefined,
+      habilitado: kapso !== undefined,
       baseUrl: kapso?.baseUrl ?? null,
       phoneNumberIdConfigurado: kapso?.phoneNumberId !== undefined,
       destinatariosPermitidos: kapso?.destinatariosPermitidos.length ?? 0,
+      idempotenciaPersistente: kapso?.idempotencyLogPath !== undefined,
       webhookHabilitado: kapso?.webhookSecret !== undefined,
       advertencias: advertenciasDestinatarios(kapso?.destinatariosPermitidos ?? []),
     },
@@ -876,6 +970,17 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     })(),
     enableIvaEstimado: parseBool(env.BILLER_ENABLE_IVA_ESTIMADO),
     idempotencyLogPath: rutas.idempotencyLogPath ?? null,
+    webhookReplayLogPath: rutas.webhookReplayLogPath ?? null,
+    webhookReplayTtlMs: parseEnteroPositivo(
+      env.BILLER_WEBHOOK_REPLAY_TTL_MS,
+      DEFAULT_WEBHOOK_REPLAY_TTL_MS,
+      "BILLER_WEBHOOK_REPLAY_TTL_MS",
+    ),
+    webhookReplayMaxEntries: parseEnteroPositivo(
+      env.BILLER_WEBHOOK_REPLAY_MAX_ENTRIES,
+      DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES,
+      "BILLER_WEBHOOK_REPLAY_MAX_ENTRIES",
+    ),
     borradorStorePath: rutas.borradorStorePath ?? null,
     wireLiviano: parseBool(env.BILLER_WIRE_LIVIANO),
     maxMontos: parseLimitesMonto(env),
