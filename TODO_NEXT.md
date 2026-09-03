@@ -453,9 +453,11 @@ cada uno está acá para no tener que volver a encontrarlo.
   (`BILLER_AUDIT_LOG_PATH`). El archivo guarda key + timestamp, nunca el payload.
   Ojo: en serverless el disco no sobrevive — ver `src/transport/serverless.ts`.
 
-- [ ] **Rate-limit configurable por env.**
-  Los límites actuales (1 req/seg DGI, 30 req/seg resto) están hardcodeados en
-  `src/utils/rateLimit.ts`. Podrían exponerse como variables opcionales.
+- [x] **Rate-limit configurable por env.** Ya estaba resuelto y la entrada quedó
+  sin marcar (ola A): `BILLER_RATE_LIMIT_DEFAULT_RPS` y `BILLER_RATE_LIMIT_DGI_RPS`
+  se validan en `config.ts` y `createToolContext` los inyecta en los limiters de
+  los tres clientes —lectura, escritura y detalles—, uno por empresa. Los valores
+  de `rateLimit.ts` quedaron como default, no como techo. Verificado en sep-2026.
 
 - [x] **Transporte Streamable HTTP** (además de stdio). Hecho:
   `src/transport/http.ts` (sesiones + Bearer propio `BILLER_HTTP_AUTH_TOKEN`,
@@ -522,7 +524,7 @@ cada uno está acá para no tener que volver a encontrarlo.
   en `src/biller/normalize.ts` tolera las dos formas (`[]` y objeto), así que el
   filtro `cliente_rut` ya no depende de cuál mande la API.
 
-- [ ] **`defaultSucursalId` en tools de escritura** — aplicado en `emitirComprobante`,
-  pendiente de evaluar si aplica también a `crearRecibo`. (Verificado: en las
-  tools de lectura el fallback `a.sucursal ?? config.defaultSucursalId` está en
-  todas; en `src/tools/write/` no.)
+- [x] **`defaultSucursalId` en tools de escritura** — cerrado (verificado sep-2026):
+  `aplicarSucursalPorDefecto` está en `emitirComprobante` Y en `crearRecibo`, que
+  son las dos únicas escrituras cuyo cuerpo lleva `sucursal`. Pago, cliente y
+  producto no tienen el campo en su schema, así que ahí no hay nada que aplicar.
