@@ -111,6 +111,15 @@ Si el journal está corrupto o no se puede reservar, el webhook falla cerrado
 con `503` y no interpreta el evento. Cada tenant conserva su propio store; una
 recarga de configuración no reutiliza el store de otra configuración.
 
+**La deduplicación es por proceso y por archivo.** Dos réplicas detrás de un
+balanceador, cada una con su journal, deduplican por separado: el mismo reenvío
+de Meta puede caer en la otra réplica y ejecutarse igual. Mientras no haya un
+store compartido, el WhatsApp se atiende con **una sola instancia** (o con las
+réplicas apuntando al mismo directorio en un filesystem compartido, que
+coordina por locks `O_EXCL`). Si esto se vuelve una restricción molesta, lo que
+cambia es la implementación del store —la interfaz `WebhookReplayStore` ya
+existe—, no el resto del webhook.
+
 ### 1.0.2. Idempotencia de salidas
 
 Cada salida a Kapso se reserva antes de tocar la red con una clave opaca que
@@ -119,6 +128,23 @@ estado incierto y no se reintenta automáticamente. El journal es distinto del
 fiscal y del replay entrante: `KAPSO_IDEMPOTENCY_LOG_PATH`, o la ruta derivada
 `<data_dir>/<tenant>/kapso-idempotencia.jsonl` al configurar `BILLER_DATA_DIR`.
 En serverless, las salidas se bloquean si no existe persistencia durable.
+
+**La reserva es una VENTANA, y la ventana la decide la operación.** Sin eso, la
+reserva no deduplica un reintento: condena al mensaje. La primera versión no
+tenía noción de tiempo, así que el segundo mensaje byte a byte idéntico quedaba
+bloqueado para siempre — y el segundo menú, o el primer paso de la segunda
+factura del día, son idénticos al primero.
+
+| Operación | Ventana | Por qué |
+|---|---|---|
+| `menu`, `resolucion`, `paso_emision` | sin reserva | Repetirlo no cuesta nada; bloquearlo deja el chat mudo. El reenvío de Meta ya lo corta el replay entrante. |
+| `documento`, `media`, `reporte_diario`, `confirmacion_*`, `texto`, `interactivo` | 15 min (más el tramo anterior) | Un reintento por respuesta perdida ocurre en segundos; pasado eso, un mensaje idéntico es un pedido nuevo. |
+| `recordatorio` | el día uruguayo | Dos mensajes de cobranza el mismo día empeoran la cobranza. El reenvío deliberado viaja como otra operación. |
+
+Una salida que no sale por la reserva se loguea como
+`kapso.salida.bloqueada_por_reserva`, con la operación y el motivo. Si ese
+evento aparece seguido para operaciones conversacionales, la ventana está mal
+calibrada: es la señal temprana de que alguien no está recibiendo respuesta.
 
 ### 1.1. El bloqueante y cómo se resolvió
 
