@@ -260,9 +260,15 @@ archivo son los backlogs previos, todavía válidos.
   verificado: falta un equivalente al ancla de `identidadDeConversacion`).
 - [x] **Extender el guard `fechaUyGuard` a `tests/`**: resuelto (sep-2026) para
   defaults civiles observados, con allowlist razonada para instantes técnicos.
-- [ ] **Partir `handleEmisionGuiada`** (555 líneas en una función) y sacar los 11
-  `construirSubmenu*` de `emision.ts` a `render.ts`. Por diferencial contra el
-  corpus.
+- [x] **Partir `handleEmisionGuiada` y sacar los `construirSubmenu*` a
+  `render.ts`.** HECHO (sep-2026), por diferencial contra el corpus (44/44) más
+  la suite completa y `check:readonly`. Los 13 constructores de mensajes viven
+  en `render.ts`; el movimiento exigió mudar `PREFIJO_PASO` a `protocolo.ts`
+  —tenerlo en `emision.ts` cerraba un ciclo entre los dos módulos— y
+  `simboloMoneda`/`montoConSigno` a `services/importe.ts`. `emision.ts` bajó de
+  1758 a 1424 líneas. `handleEmisionGuiada` pasó de 555 a 309 con dos funciones
+  con nombre: `estadoDesdeArgumentos` (los argumentos convertidos en tipos) y
+  `aplicarRespuestaDelUsuario` (lo único que muta el estado con texto libre).
 
 ## P0 — Antes de poner en producción
 
