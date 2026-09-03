@@ -339,8 +339,14 @@ equivocado en un documento fiscal.
   el reporte diario válido, mientras sigue excluyendo pendientes, rechazados y
   estados desconocidos. El diferencial está cubierto transversalmente en
   `tests/estadoDgi.test.ts`: en un comercio de tickets chicos puede mover el
-  total de casi toda la facturación, y
-  hay que confirmar contra el panel de Biller si Biller los cuenta o no.
+  total de casi toda la facturación.
+
+  **DECIDIDO POR EL DUEÑO (03/09/2026)**, con el cambio ya en la rama y el
+  impacto sobre la mesa: "Envío no corresponde" CUENTA. Reemplaza al criterio
+  anterior ("solo Aceptado DGI, para coincidir con lo que muestra Biller"). Si
+  alguna vez el panel de Biller muestra un total distinto al del asistente, esta
+  es la primera diferencia que hay que mirar — y es una diferencia esperada, no
+  un bug.
 
 - [x] **Un ítem incompleto en el MEDIO le corría los conceptos a las demás
   líneas.** Resuelto en agosto de 2026. `siguientePaso` miraba solo el ÚLTIMO
