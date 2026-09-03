@@ -373,20 +373,23 @@ cada uno está acá para no tener que volver a encontrarlo.
   (ago-2026): `borradorEmision.ts` conserva la clasificación producto/cliente
   para consumidor final y la cubren las regresiones de emisión guiada.
 
-- [ ] **`$-200` en la pregunta y en el botón de descarte.** Con una línea sin
-  descripción y precio negativo sale "Me falta saber qué era la línea de $-200" y
-  `🗑️ Sacar $-200`. Es la convención que la misma entrega prohibió y testeó en
-  `calcularTotales` (`not.toContain("$-")`). Usar el mismo helper.
+- [x] **`$-200` en la pregunta y en el botón de descarte.** RESUELTO (sep-2026):
+  `montoConSigno` (`src/kapso/emision.ts`) es el único lugar donde se decide que
+  el signo va antes del símbolo, y lo usan los cinco ecos de importe del flujo
+  más el aviso de precios sin ubicar. Lo fijan `tests/emisionGuiada.test.ts`
+  ("una línea de precio negativo se nombra con la convención uruguaya") y el
+  test de `formatearPrecioAviso` en `tests/borradorEmision.test.ts`.
 
-- [ ] **Los precios huérfanos se ecoan crudos.** `src/kapso/borradorEmision.ts`
-  arma el aviso con `descartados.join(", ")`, así que $6.500 sale como "(6500)".
-  El mismo changeset escribió que "un eco escrito '5000' en un país que escribe
-  '5.000' es un eco que el usuario no puede verificar".
+- [x] **Los precios huérfanos se ecoan crudos.** Ya estaba resuelto y la entrada
+  quedó sin marcar: el aviso usa `formatearPrecioAviso` con la moneda efectiva
+  (`src/kapso/borradorEmision.ts:439`), cubierto en `tests/emisionGuiada.test.ts`
+  ("$6.500" en los warnings) y en `tests/borradorEmision.test.ts`. Verificado en
+  sep-2026 al retomar el backlog.
 
-- [ ] **Sobreconteo cosmético en los avisos de estado.** `cohortes.ts` y
-  `comparacion.ts` incrementan `sinEstado` ANTES del filtro de `total`/`moneda`
-  nulos, así que el aviso puede nombrar comprobantes que igual quedaban afuera
-  por otro motivo. No mueve ningún total.
+- [x] **Sobreconteo cosmético en los avisos de estado.** Ya estaba resuelto y la
+  entrada quedó sin marcar: en `cohortes.ts` y `comparacion.ts` el `sinEstado`
+  se incrementa DESPUÉS del filtro de `total`/`moneda` nulos, con el porqué
+  escrito al lado. Verificado en sep-2026 al retomar el backlog.
 
 ## P1 — Mejoras prioritarias
 
