@@ -20,6 +20,8 @@ import { inspectConfig, loadConfig } from "./config.js";
 import { logger, setLogLevel, type LogLevel } from "./logger.js";
 import { crearServidorMcp } from "./server.js";
 import { ContextosPorTenant } from "./tenants/contextos.js";
+import { HolderRegistroTenants } from "./tenants/holder.js";
+import { crearManejadorRecargaTenants } from "./tenants/recarga.js";
 import { cargarTenants, entornoDe } from "./tenants/registry.js";
 import { MCP_PATH, iniciarTransporteHttp, rutaWebhookTenant } from "./transport/http.js";
 import { validarTokenDeArranque } from "./transport/httpAuth.js";
@@ -94,6 +96,7 @@ async function main(): Promise<void> {
     }
 
     const config = loadConfig();
+    const holderRegistro = new HolderRegistroTenants(registro);
     // Un contexto por empresa, cacheado: comparten proceso pero no el store de
     // idempotencia ni el cliente de Biller. Ver `tenants/contextos.ts`.
     const contextos = new ContextosPorTenant(process.env);
@@ -104,7 +107,7 @@ async function main(): Promise<void> {
         const configTenant = loadConfig(entornoDe(tenant, process.env));
         return crearServidorMcp(contextos.para(tenant), configTenant.capabilityMode);
       },
-      registro,
+      holderRegistro,
       // El webhook lee este store para saber si la conversación tiene una
       // emisión a medio cargar. Es el MISMO que usan las tools en modo de una
       // sola empresa, que es lo que hace que el dato sea el de verdad y no una
@@ -194,8 +197,19 @@ async function main(): Promise<void> {
     const apagar = (): void => {
       void handle.close().then(() => process.exit(0));
     };
+    const recargarTenants = crearManejadorRecargaTenants({
+      env: process.env,
+      holder: holderRegistro,
+      contextos,
+      cerrarSesiones: (tenantIds) => handle.cerrarSesionesTenants(tenantIds),
+    });
     process.on("SIGINT", apagar);
     process.on("SIGTERM", apagar);
+    // Incluso sin fuente de tenants se instala: la acción por defecto de
+    // SIGHUP termina el proceso. El handler devuelve `sin_fuente` en silencio.
+    process.on("SIGHUP", () => {
+      recargarTenants();
+    });
     return;
   }
 

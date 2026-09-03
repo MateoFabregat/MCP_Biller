@@ -4,6 +4,7 @@ import { loadConfig } from "../src/config.js";
 import { firmar } from "../src/kapso/webhook.js";
 import { HolderRegistroTenants } from "../src/tenants/holder.js";
 import { ContextosPorTenant } from "../src/tenants/contextos.js";
+import { crearManejadorRecargaTenants } from "../src/tenants/recarga.js";
 import { construirRegistro, entornoDe } from "../src/tenants/registry.js";
 import {
   MCP_PATH,
@@ -200,5 +201,74 @@ describe("invalidación de sesiones por tenant", () => {
     } finally {
       await handle.close();
     }
+  });
+});
+
+describe("recarga atómica del registro", () => {
+  it("una carga válida invalida estado afectado y recién después publica", () => {
+    const anterior = registroDos();
+    const siguiente = registroDos(TOKEN_A, "api-panaderia-nueva");
+    const holder = new HolderRegistroTenants(anterior);
+    const contextos = new ContextosPorTenant(BASE);
+    const contextoAnterior = contextos.para(anterior.tenants[0]!);
+    const cerrados: string[][] = [];
+    const recargar = crearManejadorRecargaTenants({
+      env: { ...BASE, BILLER_TENANTS_PATH: "/config/tenants.json" },
+      holder,
+      contextos,
+      cerrarSesiones: (ids) => {
+        expect(holder.actual()).toBe(anterior);
+        cerrados.push([...ids]);
+        return ids.length;
+      },
+      cargar: () => siguiente,
+    });
+
+    expect(recargar()).toEqual({ estado: "recargado", afectados: ["panaderia"], sesionesCerradas: 1 });
+    expect(holder.actual()).toBe(siguiente);
+    expect(cerrados).toEqual([["panaderia"]]);
+    expect(contextos.para(siguiente.tenants[0]!)).not.toBe(contextoAnterior);
+  });
+
+  it("una carga inválida conserva snapshot, contextos y sesiones", () => {
+    const anterior = registroDos();
+    const holder = new HolderRegistroTenants(anterior);
+    const contextos = new ContextosPorTenant(BASE);
+    const contextoAnterior = contextos.para(anterior.tenants[0]!);
+    let cierres = 0;
+    const recargar = crearManejadorRecargaTenants({
+      env: { ...BASE, BILLER_TENANTS_PATH: "/config/tenants.json" },
+      holder,
+      contextos,
+      cerrarSesiones: () => {
+        cierres += 1;
+        return 0;
+      },
+      cargar: () => { throw new Error("registro inválido"); },
+    });
+
+    expect(recargar()).toMatchObject({ estado: "error" });
+    expect(holder.actual()).toBe(anterior);
+    expect(contextos.para(anterior.tenants[0]!)).toBe(contextoAnterior);
+    expect(cierres).toBe(0);
+  });
+
+  it("sin fuente de tenants es un no-op y ni siquiera intenta cargar", () => {
+    const anterior = construirRegistro([], BASE);
+    const holder = new HolderRegistroTenants(anterior);
+    let cargas = 0;
+    const recargar = crearManejadorRecargaTenants({
+      env: BASE,
+      holder,
+      contextos: new ContextosPorTenant(BASE),
+      cerrarSesiones: () => 0,
+      cargar: () => {
+        cargas += 1;
+        return anterior;
+      },
+    });
+
+    expect(recargar()).toEqual({ estado: "sin_fuente" });
+    expect(cargas).toBe(0);
   });
 });
