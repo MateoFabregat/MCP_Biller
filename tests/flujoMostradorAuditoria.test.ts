@@ -582,3 +582,91 @@ describe("una exportación no sale como e-Factura local", () => {
     expect(r.warnings.join(" ")).not.toMatch(/exportaci/i);
   });
 });
+
+// =============================================================================
+// "Lo de siempre" del mostrador: repetir sin tener a quién nombrar
+// =============================================================================
+
+describe("el kiosco también tiene lo de siempre", () => {
+  // `repetir_ultima_de` pedía RUT o CI, así que el negocio que factura a
+  // consumidor final —kiosco, peluquería, panadería de mostrador: el que MÁS
+  // veces por día usa esto— no tenía atajo. Y un catálogo de productos como
+  // botones no es la salida: el listado de la API NO trae los ítems, así que
+  // armarlo cuesta una llamada HTTP por comprobante (ver rankingProductos).
+  // Repetir la última venta cuesta UNA.
+  const diasAtras = (n: number): string =>
+    `${new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10)} 10:00:00`; // fecha-uy:allow fixture
+
+  const mostrador = {
+    id: 900,
+    tipo_comprobante: 101,
+    moneda: "UYU",
+    total: 340,
+    estado: "Aceptado DGI",
+    fecha_emision: diasAtras(1),
+    montos_brutos: 1,
+    forma_pago: 1,
+    cliente: null,
+    items: [{ cantidad: 2, concepto: "agua 600", precio: 170, indicador_facturacion: 3 }],
+  };
+
+  const conRut = {
+    ...mostrador,
+    id: 901,
+    tipo_comprobante: 111,
+    fecha_emision: diasAtras(0),
+    cliente: { documento: "210000000011", razon_social: "PEREZ SA" },
+    items: [{ cantidad: 1, concepto: "portland", precio: 6500, indicador_facturacion: 3 }],
+  };
+
+  const api = (opts: any): unknown[] => {
+    const id = opts?.query?.id;
+    const todos = [conRut, mostrador];
+    if (id !== undefined) return todos.filter((c) => String(c.id) === String(id));
+    return todos;
+  };
+
+  it('"repetir_ultima_de: mostrador" copia la última venta SIN receptor', async () => {
+    const { ctx } = makeCtx({ impl: api, config: { capabilityMode: "write_enabled" } });
+    const r = j(
+      await handleEmisionGuiada(
+        { sesion: "59891115555", repetir_ultima_de: "mostrador" },
+        ctx,
+      ),
+    );
+    // La más reciente es la de Pérez, pero para mostrador se copia la de
+    // mostrador: copiar la del cliente le pondría un receptor a una venta que
+    // no lo tiene.
+    expect(r.estado_entendido?.sin_receptor).toBe(true);
+    expect(r.estado_entendido?.documento).toBeUndefined();
+    expect(r.estado_entendido?.items?.[0]).toMatchObject({ cantidad: 2, precio: 170 });
+    expect(r.paso).toBe("confirmar");
+  });
+
+  it("si nunca hubo una venta de mostrador, lo dice y arranca de cero", async () => {
+    const { ctx } = makeCtx({
+      impl: (opts: any) => (opts?.query?.id !== undefined ? [conRut] : [conRut]),
+      config: { capabilityMode: "write_enabled" },
+    });
+    const r = j(
+      await handleEmisionGuiada(
+        { sesion: "59891115556", repetir_ultima_de: "mostrador" },
+        ctx,
+      ),
+    );
+    expect(r.warnings.join(" ")).toMatch(/mostrador/i);
+    expect(r.paso).toBe("receptor");
+  });
+
+  it("con un RUT sigue funcionando igual que siempre", async () => {
+    const { ctx } = makeCtx({ impl: api, config: { capabilityMode: "write_enabled" } });
+    const r = j(
+      await handleEmisionGuiada(
+        { sesion: "59891115557", repetir_ultima_de: "210000000011" },
+        ctx,
+      ),
+    );
+    expect(r.estado_entendido?.documento).toBe("210000000011");
+    expect(r.estado_entendido?.items?.[0]).toMatchObject({ cantidad: 1, precio: 6500 });
+  });
+});

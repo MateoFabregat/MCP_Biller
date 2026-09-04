@@ -120,8 +120,14 @@ todo y va derecho al preview — tres toques.
 **Hoy funciona a medias.** e-Ticket sin receptor, precio con IVA incluido
 (el precio de mostrador SIEMPRE lo lleva adentro). Pero el kiosquero factura
 **decenas de ventas por día** y cada una son cuatro o cinco mensajes.
-**Falta:** el atajo de §4.1 (productos frecuentes como botones) y el default de
-"consumidor final sin identificar" para un negocio marcado como mostrador.
+**Ya tiene su atajo (sep-2026):** `repetir_ultima_de: "mostrador"` copia la
+última venta SIN receptor —la de mostrador, no la del último cliente con RUT— y
+va derecho al preview. Dos toques.
+**Lo que NO se hizo, y por qué:** un catálogo de productos como botones. El
+listado de la API no trae los ítems, así que armarlo cuesta **una llamada HTTP
+por comprobante** (`rankingProductos` lo documenta: es un N+1 por diseño de la
+API). Pagarlo en cada conversación para ofrecer una lista es caro; repetir la
+última venta cuesta UNA consulta y resuelve el mismo caso.
 
 ### 3.3. Ferretería que vende a empresas y a mostrador
 > *"Ponele a la constructora 20 bolsas de portland a 610 c/u, a 30 días"*
@@ -141,8 +147,8 @@ la moneda de las últimas facturas.
 ### 3.5. Peluquería
 > *"corte y barba 900"*
 
-**Hoy funciona.** e-Ticket, IVA incluido.
-**Falta:** lo mismo que el kiosco: repetición rápida.
+**Hoy funciona**, y con `repetir_ultima_de: "mostrador"` el corte de siempre son
+dos toques.
 
 ### 3.6. Panadería con reparto a comercios
 > *"a la rotisería 30 panes a 25 y 10 facturas a 40"*

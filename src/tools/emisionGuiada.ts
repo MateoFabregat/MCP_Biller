@@ -258,7 +258,9 @@ const inputShape = {
     .string()
     .optional()
     .describe(
-      'Para "facturale lo de siempre a Pérez": RUT o CI del cliente. El server busca su última ' +
+      'Para "facturale lo de siempre a Pérez": RUT o CI del cliente. Para el mostrador —kiosco, ' +
+        'peluquería, venta al público sin receptor— pasá "mostrador" y copia la última venta SIN ' +
+        'receptor identificado. El server busca su última ' +
         "venta aceptada, copia ítems, precios, IVA y forma de pago al borrador, y el flujo va DERECHO " +
         "al preview: la fecha es de hoy por default (nunca se copia la vieja) y sale escrita ahí. Si " +
         "la venta copiada era a crédito, se pregunta el vencimiento, que sí es de hoy en adelante. " +
@@ -1430,9 +1432,20 @@ async function prellenarDesdeUltimaVenta(
   const hasta = hoyIsoUy(hoy);
 
   const consulta = await consultarPorPeriodo(client, { desde, hasta }, {});
+
+  // "mostrador": el kiosco, la peluquería, la panadería que vende al público.
+  // Son los que MÁS veces por día usan esto, y hasta acá no tenían atajo porque
+  // no hay a quién nombrar: `repetir_ultima_de` pedía un RUT.
+  //
+  // Se copia la última venta SIN receptor identificado, no la última venta a
+  // secas: si la más reciente fue a una empresa, copiarla le pondría un
+  // receptor —y un tipo de comprobante— a una venta que no los tiene.
+  const esMostrador = MOSTRADOR.has(documento.trim().toLowerCase());
   const rut = documento.replace(/\D/g, "");
-  const delCliente = consulta.comprobantes.filter((c) => extractClienteRut(c.cliente) === rut);
-  const elegido = elegirComprobanteARepetir(delCliente);
+  const candidatos = esMostrador
+    ? consulta.comprobantes.filter((c) => extractClienteRut(c.cliente) === null)
+    : consulta.comprobantes.filter((c) => extractClienteRut(c.cliente) === rut);
+  const elegido = elegirComprobanteARepetir(candidatos);
   if (elegido === null || elegido.id === null) {
     return {
       estado: {},
@@ -1440,8 +1453,11 @@ async function prellenarDesdeUltimaVenta(
       copiado_de_fecha: null,
       items_copiados: 0,
       advertencias: [
-        `No encontré ninguna venta aceptada de ese cliente en los últimos 180 días: no hay "lo de ` +
-          'siempre" que copiar. El flujo arranca de cero.',
+        esMostrador
+          ? 'No encontré ninguna venta de MOSTRADOR (sin receptor) aceptada en los últimos 180 ' +
+            'días: no hay "lo de siempre" que copiar. El flujo arranca de cero.'
+          : `No encontré ninguna venta aceptada de ese cliente en los últimos 180 días: no hay "lo de ` +
+            'siempre" que copiar. El flujo arranca de cero.',
       ],
     };
   }
@@ -1487,6 +1503,9 @@ async function prellenarDesdeUltimaVenta(
  * `services/ventana.ts`). Más corto se queda sin muestra en una empresa que
  * factura poco; más largo empieza a describir una costumbre que ya cambió.
  */
+/** Lo que se escribe en `repetir_ultima_de` para decir "la última de mostrador". */
+const MOSTRADOR: ReadonlySet<string> = new Set(["mostrador", "consumidor final", "sin cliente"]);
+
 export const DIAS_PERFIL = 90;
 
 /** Nueve clientes y la fila de "➕ Otro cliente": el tope de 10 filas de WhatsApp. */
