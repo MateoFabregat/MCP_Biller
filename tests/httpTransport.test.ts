@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import { request, type IncomingMessage } from "node:http";
+import { connect } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   MIN_HTTP_TOKEN_LENGTH,
@@ -278,6 +279,80 @@ describe("server HTTP end-to-end", () => {
     try {
       const res = await fetch(`${base}${HEALTH_PATH}`);
       expect(res.headers.get("cache-control")).toBe("no-store");
+    } finally {
+      await handle.close();
+    }
+  });
+});
+
+// =============================================================================
+// Un `Host` que no parsea no puede tumbar el proceso.
+//
+// `new URL(req.url, \`http://${host}\`)` tira `TypeError: Invalid URL` con un
+// `Host` como `[` o vacío. Eso corría antes del único `try` del callback de
+// `createServer`, así que nadie lo atajaba: Node mata el proceso entero por
+// unhandled rejection con una request SIN AUTENTICAR, sin bearer ni firma. El
+// WhatsApp de todas las empresas queda mudo.
+//
+// Se manda con un socket crudo (`net.connect`) y no con `fetch`, porque
+// `fetch`/`node:http` normalizan o rechazan un `Host` malformado antes de que
+// salga por la red: para reproducir el ataque hay que escribir los bytes tal
+// cual llegarían de un cliente hostil.
+// =============================================================================
+
+describe("un Host inválido no tumba el proceso", () => {
+  async function arrancar() {
+    const config = makeConfig({
+      httpAuthToken: TOKEN_VALIDO,
+      httpPort: 0,
+      httpHost: "127.0.0.1",
+    });
+    const handle = await iniciarTransporteHttp(config, () => new McpServer({ name: "t", version: "0" }));
+    return handle;
+  }
+
+  /** Manda bytes crudos por un socket y devuelve la respuesta completa como texto. */
+  function mandarCrudo(puerto: number, bytes: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const socket = connect(puerto, "127.0.0.1", () => socket.write(bytes));
+      let datos = "";
+      socket.setEncoding("utf8");
+      socket.on("data", (c) => (datos += c));
+      socket.on("end", () => resolve(datos));
+      socket.on("close", () => resolve(datos));
+      socket.on("error", reject);
+    });
+  }
+
+  it("Host que no parsea (`[`) da 400 y el proceso sigue vivo", async () => {
+    const handle = await arrancar();
+    try {
+      const respuesta = await mandarCrudo(
+        handle.port,
+        "GET /healthz HTTP/1.1\r\nHost: [\r\nConnection: close\r\n\r\n",
+      );
+      expect(respuesta).toMatch(/^HTTP\/1\.1 400/);
+
+      // El proceso sigue vivo: el /healthz siguiente, con un Host válido,
+      // contesta 200 como si nada hubiera pasado.
+      const res = await fetch(`http://127.0.0.1:${handle.port}${HEALTH_PATH}`);
+      expect(res.status).toBe(200);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("Host vacío también da 400 sin tumbar el proceso", async () => {
+    const handle = await arrancar();
+    try {
+      const respuesta = await mandarCrudo(
+        handle.port,
+        "GET /healthz HTTP/1.1\r\nHost:\r\nConnection: close\r\n\r\n",
+      );
+      expect(respuesta).toMatch(/^HTTP\/1\.1 400/);
+
+      const res = await fetch(`http://127.0.0.1:${handle.port}${HEALTH_PATH}`);
+      expect(res.status).toBe(200);
     } finally {
       await handle.close();
     }

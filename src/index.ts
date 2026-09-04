@@ -64,6 +64,21 @@ async function main(): Promise<void> {
   const ctx = createToolContext();
 
   if (transporte === "http") {
+    // RED DE ÚLTIMA INSTANCIA CONTRA PROMESAS SUELTAS.
+    //
+    // Sin esto, cualquier `await` sin `catch` en el camino de una request —el
+    // de `new URL(...)` con un `Host` inválido fue el que se encontró, pero no
+    // tiene por qué ser el único— termina en un unhandled rejection, y la
+    // acción por defecto de Node ante eso es terminar el proceso con código 1.
+    // Un server de facturación no se cae por una promesa suelta: se loguea y
+    // se sigue. Va ANTES de arrancar el transporte para cubrir también
+    // cualquier rechazo que ocurra durante el arranque mismo.
+    process.on("unhandledRejection", (reason) => {
+      logger.error("proceso.unhandled_rejection", {
+        message: reason instanceof Error ? reason.message : String(reason),
+      });
+    });
+
     // El registro de empresas se lee ANTES que nada: si está mal, el server no
     // tiene que arrancar "a medias" atendiendo con la config del proceso — eso
     // sería servirle a todas las empresas los datos de una.

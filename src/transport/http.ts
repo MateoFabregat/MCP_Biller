@@ -40,10 +40,9 @@ import {
   type WebhookReplayStore,
 } from "../kapso/webhookReplay.js";
 import {
-  HEADER_FIRMA,
   MAX_BODY_BYTES,
+  algunaFirmaValida,
   decidirWebhook,
-  firmaValida,
   normalizarEvento,
 } from "../kapso/webhook.js";
 import { logger } from "../logger.js";
@@ -189,6 +188,25 @@ export interface HttpTransportHandle {
   /** Revoca las sesiones ya abiertas de tenants removidos o modificados. */
   cerrarSesionesTenants(tenantIds: readonly string[]): number;
   close: () => Promise<void>;
+}
+
+/**
+ * Extrae el pathname de la request, o `null` si no se puede.
+ *
+ * POR QUÉ EXISTE: `new URL` con un `Host` que no parsea (`Host: [`, `Host: a
+ * b`, un puerto fuera de rango, vacío) tira `TypeError: Invalid URL`. Eso
+ * corría antes del único `try` del callback de `createServer`, así que nadie
+ * lo atajaba: Node mata el proceso por unhandled rejection y el WhatsApp de
+ * TODAS las empresas queda mudo con una sola request sin autenticar, sin
+ * bearer ni firma. El `catch` de acá convierte esa excepción en un `null` que
+ * el llamador responde con 400, en vez de en un proceso muerto.
+ */
+function rutaDe(req: IncomingMessage): string | null {
+  try {
+    return new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`).pathname;
+  } catch {
+    return null;
+  }
 }
 
 function responderJson(res: ServerResponse, status: number, body: unknown): void {
@@ -352,8 +370,10 @@ async function atenderWebhook(
     return;
   }
 
-  const firma = req.headers[HEADER_FIRMA];
-  if (!firmaValida(crudo, Array.isArray(firma) ? firma[0] : firma, secreto)) {
+  // Se miran los dos headers de firma posibles: el de Meta y el de Kapso. Ver
+  // `HEADERS_FIRMA` — leer solo uno dejaba el chat mudo según por qué camino
+  // estuviera registrado el webhook.
+  if (!algunaFirmaValida(crudo, req.headers, secreto)) {
     // Acá también cae el cuerpo firmado con el secreto de OTRA empresa contra
     // esta ruta, y cae sin ningún chequeo especial: el único secreto que esta
     // ruta conoce es el suyo. Ver `rutaWebhookTenant`.
@@ -762,67 +782,76 @@ export async function iniciarTransporteHttp(
 
   const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
-      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-
-      // Liveness: sin auth y sin ningún dato del negocio.
-      if (url.pathname === HEALTH_PATH) {
-        responderJson(res, 200, { status: "ok", transport: "http" });
-        return;
-      }
-
-      if (url.pathname === READY_PATH) {
-        // Solo pesa cuando el gate puede bloquear de verdad: en `test`, o sin
-        // escrituras habilitadas, no hay POST real que trancar.
-        const faltan =
-          config.environment === "production" && config.writeEnabled
-            ? faltantesParaProduccion(preparacionDeConfig(config))
-            : [];
-        if (faltan.length > 0) responderJson(res, 503, { status: "no_listo", faltan });
-        else responderJson(res, 200, { status: "listo" });
-        return;
-      }
-
-      // Una request conserva UN snapshot coherente de principio a fin. La
-      // siguiente asignación del holder no puede mezclar auth de un registro
-      // con el webhook o el tenant de otro.
-      const registroActual = snapshotRegistro(registro);
-
-      // El webhook va ANTES de la autenticación bearer: su credencial es otra
-      // (la firma HMAC del cuerpo) porque quien llama es Kapso, no un cliente
-      // MCP. Meterlo detrás del bearer significaría ponerle nuestro token a un
-      // tercero, que es exactamente lo que la firma evita.
-      if (url.pathname === WEBHOOK_PATH || url.pathname.startsWith(`${WEBHOOK_PATH}/`)) {
-        // El id de empresa sale del PATH, que es lo que selecciona el secreto.
-        // Un path vacío (`/kapso/webhook` o `/kapso/webhook/`) es la ruta vieja.
-        const resto = url.pathname.slice(WEBHOOK_PATH.length + 1);
-        await atenderWebhook(
-          req,
-          res,
-          resto === "" ? null : resto,
-          config,
-          borradores,
-          registroActual,
-          opciones?.resolverAmbitoWebhook,
-          replayWebhooks,
-        );
-        return;
-      }
-
-      if (url.pathname !== MCP_PATH) {
-        responderErrorRpc(res, 404, `Ruta no encontrada. El endpoint MCP es ${MCP_PATH}.`);
-        return;
-      }
-
-      const auth = autenticarConTenants(req, config.httpAuthToken, registroActual);
-      if (!auth.ok) {
-        // No se loguea el token presentado, ni siquiera un prefijo.
-        logger.warn("http.auth.rechazado", { status: auth.status, path: url.pathname });
-        res.setHeader("www-authenticate", 'Bearer realm="biller-mcp"');
-        responderErrorRpc(res, auth.status, auth.message);
-        return;
-      }
-
+      // TODO el cuerpo del IIFE va adentro del try, incluida la construcción de
+      // la URL. Antes `new URL(...)` corría afuera: un `Host` inválido tiraba
+      // antes de llegar acá y el `catch` de abajo nunca lo veía. Ver `rutaDe`.
       try {
+        const pathname = rutaDe(req);
+        if (pathname === null) {
+          // Sin diagnóstico: un `Host` que no parsea no lo merece. Ver la
+          // decisión de la issue — no dice POR QUÉ es inválido.
+          responderJson(res, 400, { error: "bad_request" });
+          return;
+        }
+
+        // Liveness: sin auth y sin ningún dato del negocio.
+        if (pathname === HEALTH_PATH) {
+          responderJson(res, 200, { status: "ok", transport: "http" });
+          return;
+        }
+
+        if (pathname === READY_PATH) {
+          // Solo pesa cuando el gate puede bloquear de verdad: en `test`, o sin
+          // escrituras habilitadas, no hay POST real que trancar.
+          const faltan =
+            config.environment === "production" && config.writeEnabled
+              ? faltantesParaProduccion(preparacionDeConfig(config))
+              : [];
+          if (faltan.length > 0) responderJson(res, 503, { status: "no_listo", faltan });
+          else responderJson(res, 200, { status: "listo" });
+          return;
+        }
+
+        // Una request conserva UN snapshot coherente de principio a fin. La
+        // siguiente asignación del holder no puede mezclar auth de un registro
+        // con el webhook o el tenant de otro.
+        const registroActual = snapshotRegistro(registro);
+
+        // El webhook va ANTES de la autenticación bearer: su credencial es otra
+        // (la firma HMAC del cuerpo) porque quien llama es Kapso, no un cliente
+        // MCP. Meterlo detrás del bearer significaría ponerle nuestro token a un
+        // tercero, que es exactamente lo que la firma evita.
+        if (pathname === WEBHOOK_PATH || pathname.startsWith(`${WEBHOOK_PATH}/`)) {
+          // El id de empresa sale del PATH, que es lo que selecciona el secreto.
+          // Un path vacío (`/kapso/webhook` o `/kapso/webhook/`) es la ruta vieja.
+          const resto = pathname.slice(WEBHOOK_PATH.length + 1);
+          await atenderWebhook(
+            req,
+            res,
+            resto === "" ? null : resto,
+            config,
+            borradores,
+            registroActual,
+            opciones?.resolverAmbitoWebhook,
+            replayWebhooks,
+          );
+          return;
+        }
+
+        if (pathname !== MCP_PATH) {
+          responderErrorRpc(res, 404, `Ruta no encontrada. El endpoint MCP es ${MCP_PATH}.`);
+          return;
+        }
+
+        const auth = autenticarConTenants(req, config.httpAuthToken, registroActual);
+        if (!auth.ok) {
+          // No se loguea el token presentado, ni siquiera un prefijo.
+          logger.warn("http.auth.rechazado", { status: auth.status, path: pathname });
+          res.setHeader("www-authenticate", 'Bearer realm="biller-mcp"');
+          responderErrorRpc(res, auth.status, auth.message);
+          return;
+        }
+
         const sessionId = req.headers["mcp-session-id"];
         const sessionIdRaw = Array.isArray(sessionId) ? sessionId[0] : sessionId;
 
