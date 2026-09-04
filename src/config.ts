@@ -350,9 +350,20 @@ function parseKapso(env: Env, idempotencyLogPath?: string): KapsoConfig | undefi
   };
 }
 
+/**
+ * El puerto, con el CERO como valor válido.
+ *
+ * `0` no es un error: es "elegí cualquiera que esté libre", que es como se
+ * levantan dos instancias sin pisarse y como corren los tests de integración.
+ * Rechazarlo hacía que cayeran al default 8848 y explotaran con EADDRINUSE
+ * contra el server que uno tiene corriendo mientras desarrolla — verdes en una
+ * máquina limpia, rojos en la de quien está trabajando.
+ */
 function parsePort(raw: string | undefined, fallback: number): number {
-  const n = Number((raw ?? "").trim());
-  return Number.isInteger(n) && n > 0 && n < 65_536 ? n : fallback;
+  const crudo = (raw ?? "").trim();
+  if (crudo === "") return fallback;
+  const n = Number(crudo);
+  return Number.isInteger(n) && n >= 0 && n < 65_536 ? n : fallback;
 }
 
 /**

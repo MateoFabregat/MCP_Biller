@@ -199,7 +199,15 @@ const outputShape = {
       }),
     ),
   }),
-  cae: z.array(caeSerieSchema),
+  // `numeracion_cae` y no `cae`: adentro de un comprobante, `cae` es un
+  // subárbol UPSTREAM de forma no tipada, y está en
+  // `SUBARBOLES_UPSTREAM_DESCONOCIDOS` para que todo lo que cuelgue salga
+  // marcado. Este análisis es NUESTRO —la severidad y los motivos los calcula
+  // `services/alertas.ts`— y compartir el nombre hacía que la marca lo
+  // envolviera también: la severidad salía como
+  // "⟦dato-no-confiable⟧ info ⟦/dato-no-confiable⟧" y el enum de salida
+  // rechazaba la respuesta entera. La tool devolvía isError SIEMPRE.
+  numeracion_cae: z.array(caeSerieSchema),
   emision_tardia: emisionTardiaSchema,
   racha_sin_facturar: rachaSinFacturarSchema,
   certificado_dgi: certificadoDgiSchema,
@@ -432,7 +440,7 @@ export async function handleAlertas(args: unknown, ctx: ToolContext): Promise<To
       alertas,
       conteo_por_severidad: conteoPorSeveridad,
       rechazos: resultado.rechazos,
-      cae: resultado.cae,
+      numeracion_cae: resultado.cae,
       emision_tardia: resultado.emision_tardia,
       racha_sin_facturar: resultado.racha_sin_facturar,
       certificado_dgi: certificado,

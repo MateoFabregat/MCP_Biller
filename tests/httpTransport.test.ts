@@ -585,3 +585,42 @@ describe("/readyz — preparación, no latido", () => {
     }
   });
 });
+
+describe("con puerto 0, el guard de Host mira el puerto REAL", () => {
+  it("un initialize contra el puerto que el SO eligió no se rechaza", async () => {
+    // `BILLER_HTTP_PORT=0` es "elegí uno libre", que es como se levantan dos
+    // instancias sin pisarse y como corren los tests de integración. La
+    // protección contra DNS rebinding armaba su lista con el puerto
+    // CONFIGURADO, así que esperaba "127.0.0.1:0" y el Host real
+    // —"127.0.0.1:54321"— no matcheaba: 403 antes de ejecutar nada. El síntoma
+    // era ilegible, porque el server arrancaba y contestaba /healthz igual.
+    const handle = await iniciarTransporteHttp(
+      makeConfig({ httpPort: 0, httpHost: "127.0.0.1", httpAuthToken: TOKEN_VALIDO }),
+      () => new McpServer({ name: "t", version: "0" }),
+    );
+    try {
+      expect(handle.port).toBeGreaterThan(0);
+      const res = await fetch(`http://127.0.0.1:${handle.port}${MCP_PATH}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${TOKEN_VALIDO}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "t", version: "1" },
+          },
+        }),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      await handle.close();
+    }
+  });
+});

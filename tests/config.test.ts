@@ -349,3 +349,26 @@ describe("parámetros del proceso en la config validada", () => {
     });
   });
 });
+
+describe("el puerto 0 es una opción, no un valor inválido", () => {
+  // Lo encontró tener un server corriendo en 8848 mientras corría la suite:
+  // `tests/sighupIntegracion` pide BILLER_HTTP_PORT=0 —"cualquiera libre", que
+  // es como se corren dos instancias sin pisarse— y `parsePort` lo rechazaba
+  // por `n > 0`, cayendo al default 8848. Los tres tests fallaban con
+  // EADDRINUSE, pero solo cuando había algo escuchando ahí: verdes en una
+  // máquina limpia, rojos en la del que está desarrollando.
+  const base = {
+    BILLER_API_BASE_URL: "https://test.biller.uy",
+    BILLER_API_TOKEN: "tok",
+  };
+
+  it("BILLER_HTTP_PORT=0 se respeta: es 'elegí uno libre'", () => {
+    expect(inspectConfig({ ...base, BILLER_HTTP_PORT: "0" }).httpPort).toBe(0);
+  });
+
+  it("un puerto inválido sigue cayendo al default", () => {
+    for (const malo of ["-1", "70000", "ocho mil", ""]) {
+      expect(inspectConfig({ ...base, BILLER_HTTP_PORT: malo }).httpPort, malo).toBe(8848);
+    }
+  });
+});

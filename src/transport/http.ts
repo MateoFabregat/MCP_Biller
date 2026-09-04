@@ -783,6 +783,10 @@ export async function iniciarTransporteHttp(
     opciones?.registroSesiones ??
     new RegistroSesiones({ ttlMs: config.httpSessionTtlMs, techo: config.httpMaxSessions });
   const replayWebhooks = new RegistroReplayWebhooks();
+  // El puerto que el server termina escuchando. Arranca con el configurado y se
+  // corrige después del `listen`, que es cuando el SO ya eligió si venía 0. Lo
+  // lee el guard de Host, que corre por request —siempre después del listen—.
+  let puertoReal = config.httpPort;
 
   const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
@@ -917,11 +921,18 @@ export async function iniciarTransporteHttp(
             // declara el nombre en vez de apagar la protección — apagarla vale
             // para cualquier atacante; declarar un nombre vale para ese nombre.
             // El host público puede venir con o sin puerto según el proxy.
+            //
+            // Y el puerto es el REAL, no el configurado: con
+            // `BILLER_HTTP_PORT=0` —"elegí uno libre", que es como se levantan
+            // dos instancias sin pisarse— el server escucha en uno que elige el
+            // SO, y esta lista esperaba "127.0.0.1:0". El Host verdadero no
+            // matcheaba y todo initialize se iba en 403, con el server
+            // arrancado y contestando /healthz igual: ilegible.
             allowedHosts: [
-              `${config.httpHost}:${config.httpPort}`,
-              `localhost:${config.httpPort}`,
-              `127.0.0.1:${config.httpPort}`,
-              ...config.httpAllowedHosts.flatMap((h) => [h, `${h}:443`, `${h}:${config.httpPort}`]),
+              `${config.httpHost}:${puertoReal}`,
+              `localhost:${puertoReal}`,
+              `127.0.0.1:${puertoReal}`,
+              ...config.httpAllowedHosts.flatMap((h) => [h, `${h}:443`, `${h}:${puertoReal}`]),
             ],
           });
 
@@ -952,6 +963,7 @@ export async function iniciarTransporteHttp(
 
   const direccion = httpServer.address();
   const puerto = typeof direccion === "object" && direccion !== null ? direccion.port : config.httpPort;
+  puertoReal = puerto;
 
   return {
     port: puerto,

@@ -572,7 +572,7 @@ export function generarAlertas(
         `serie ${envolverEnLinea(s.serie, "?")}`,
       detalle: s.motivos.join(" "),
       cantidad: 1,
-      datos: { cae: s },
+      datos: { numeracion_cae: s },
     });
   }
 
