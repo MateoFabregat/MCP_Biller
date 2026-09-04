@@ -549,5 +549,15 @@ Anotado porque la tentación de reimplementar es real:
 - **Inbox, logs de mensajes, plantillas y WhatsApp Flows.**
 - **CLI, SDKs y un MCP propio** para operar el proyecto de Kapso desde un agente.
 - **Transcripción automática de audio**, incluida desde el plan Free. Es
-  relevante para el mostrador: el almacenero dicta en vez de escribir, y el
-  texto transcripto entra por el mismo `interpretarMensaje` de siempre.
+  relevante para el mostrador: el almacenero dicta en vez de escribir.
+
+  **OJO, y es lo único de esta lista que NO está verificado:** que el texto
+  transcripto entre por el mismo `interpretarMensaje` de siempre depende de
+  CÓMO lo entregue Kapso. Si el webhook recibe el mensaje con `type: "text"` y
+  el transcripto en el body, funciona sin tocar nada. Si lo entrega con
+  `type: "audio"` y el transcripto en otro campo, `normalizarEvento` lo lee como
+  no soportado y el flujo no lo aprovecha. Es una de las primeras cosas que hay
+  que mirar al conectar el Agent Node: mandar un audio y ver qué llega.
+
+  Mientras tanto, un audio de un remitente autorizado **se contesta** pidiendo
+  que escriba (`TEXTO_TIPO_NO_SOPORTADO`), en vez de terminar en silencio.

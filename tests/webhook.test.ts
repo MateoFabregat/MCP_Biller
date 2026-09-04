@@ -267,15 +267,21 @@ describe("decisión de ruteo", () => {
     expect(d.accion).toBe("ignorar");
   });
 
-  it("un audio se ignora con un motivo legible, no con un error", () => {
+  it("un audio de alguien autorizado se CONTESTA, no se ignora", () => {
+    // Cambió en sep-2026: antes se ignoraba con un motivo legible… en un log
+    // que el usuario no lee. Del otro lado eso es silencio, y el que dictó un
+    // audio no tiene forma de saber si el sistema está roto o no lo escuchó.
     const d = decidirWebhook(
       normalizarEvento({
         entry: [{ changes: [{ value: { messages: [{ from: AUTORIZADO, type: "audio" }] } }] }],
       }),
       opciones,
     );
-    expect(d.accion).toBe("ignorar");
-    if (d.accion === "ignorar") expect(d.motivo).toContain("audio");
+    expect(d.accion).toBe("responder");
+    if (d.accion === "responder") {
+      expect(d.interpretacion).toBeNull();
+      expect(d.respuesta).toMatch(/audios/i);
+    }
   });
 });
 
@@ -543,5 +549,51 @@ describe("el endpoint", () => {
     } finally {
       await handle.close();
     }
+  });
+});
+
+describe("un audio o una foto no pueden terminar en silencio", () => {
+  // El almacenero dicta en vez de escribir: es la forma MÁS común de mandar un
+  // mensaje en Uruguay. Hoy el evento llega como `no_soportado`, se ignora, y
+  // el usuario no recibe absolutamente nada — el peor modo de falla de este
+  // proyecto, y encima el que más se parece a "está roto".
+  const AUTORIZADO = "59895923567";
+  const opciones = {
+    capabilityMode: "read_only" as const,
+    remitentesAutorizados: [AUTORIZADO],
+  };
+
+  const evento = (tipo: string) => ({
+    tipo: "no_soportado" as const,
+    from: AUTORIZADO,
+    texto: null,
+    numero_receptor: null,
+    message_id: `wamid.${tipo}`,
+    perfil: null,
+  });
+
+  it("a un remitente AUTORIZADO se le contesta que escriba", () => {
+    const d = decidirWebhook(evento("audio"), opciones);
+    expect(d.accion).toBe("responder");
+    expect(d.respuesta).toMatch(/escrib/i);
+  });
+
+  it("a un desconocido se le sigue sin contestar NADA", () => {
+    // Contestar "no puedo leer audios" ya confirma que este número atiende a
+    // esta empresa. La allowlist se chequea ANTES que el tipo de mensaje.
+    const d = decidirWebhook(evento("audio"), {
+      ...opciones,
+      remitentesAutorizados: ["59899000111"],
+    });
+    expect(d.accion).toBe("rechazar");
+    expect(d.motivo).toBe("no_autorizado");
+  });
+
+  it("un acuse de entrega se sigue ignorando en silencio", () => {
+    const d = decidirWebhook(
+      { ...evento("estado"), tipo: "estado" as const },
+      opciones,
+    );
+    expect(d.accion).toBe("ignorar");
   });
 });

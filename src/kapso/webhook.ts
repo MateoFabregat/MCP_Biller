@@ -327,6 +327,16 @@ export function normalizarEvento(payload: unknown): EventoEntrante {
  * respuesta de la emisión guiada) se devuelve SIN contestar, para que lo maneje
  * el agente con el humano adelante. Un webhook no tiene con quién confirmar.
  */
+/**
+ * Lo que se contesta ante un audio, una foto, un sticker o una ubicación.
+ *
+ * Corto y con la salida adelante: el que dictó un audio quiere resolver algo,
+ * no leer una explicación de por qué no se puede.
+ */
+export const TEXTO_TIPO_NO_SOPORTADO =
+  "Todavía no puedo escuchar audios ni leer imágenes 🙈 Escribime en un mensaje qué necesitás " +
+  '—por ejemplo "facturale 2 bolsas a 610 a Pérez" o "¿quién me debe?"— y lo hago.';
+
 const VIAS_AUTORESPONDIBLES: ReadonlySet<Interpretacion["via"]> = new Set([
   "saludo",
   "cortesia",
@@ -350,7 +360,11 @@ export type DecisionWebhook =
   | {
       accion: "responder";
       from: string;
-      interpretacion: Interpretacion;
+      /**
+       * Cómo se leyó el mensaje. `null` cuando no había nada que leer —un audio,
+       * una foto— y se contesta igual para no dejar al usuario en silencio.
+       */
+      interpretacion: Interpretacion | null;
       /** Texto listo para mandar. El menú va como lista interactiva aparte. */
       respuesta: string | null;
       mostrar_menu: boolean;
@@ -397,13 +411,9 @@ export function decidirWebhook(evento: EventoEntrante, opciones: DecidirOpciones
   if (evento.tipo === "estado") {
     return { accion: "ignorar", motivo: "Es un acuse de entrega/lectura, no un mensaje." };
   }
-  if (evento.texto === null || evento.from === null) {
-    return {
-      accion: "ignorar",
-      motivo:
-        "El evento no trae texto interpretable o no dice quién escribió (audio, imagen, ubicación " +
-        "o un tipo que todavía no leemos).",
-    };
+  // Sin `from` no hay a quién contestarle ni contra qué chequear la allowlist.
+  if (evento.from === null) {
+    return { accion: "ignorar", motivo: "El evento no dice quién escribió." };
   }
 
   if (opciones.remitentesAutorizados.length === 0) {
@@ -424,6 +434,26 @@ export function decidirWebhook(evento: EventoEntrante, opciones: DecidirOpciones
         "El número que escribió no está en la allowlist de remitentes. El mensaje se descarta sin " +
         "contestar: contestar cualquier cosa —incluso 'no estás autorizado'— ya confirma que este " +
         "número atiende a esta empresa.",
+    };
+  }
+
+  // UN AUDIO O UNA FOTO NO PUEDEN TERMINAR EN SILENCIO.
+  //
+  // Va DESPUÉS de la allowlist a propósito: contestarle "no puedo leer audios"
+  // a un desconocido ya confirma que este número atiende a esta empresa, que es
+  // exactamente lo que la barrera de entrada evita. A un autorizado, en cambio,
+  // el silencio es el peor modo de falla del proyecto: dicta un mensaje —que en
+  // Uruguay es la forma más común de escribir— y no recibe nada, que es
+  // indistinguible de "está roto".
+  //
+  // No intentamos adivinar el contenido: se dice qué se puede hacer y se sigue.
+  if (evento.texto === null) {
+    return {
+      accion: "responder",
+      from: evento.from,
+      interpretacion: null,
+      respuesta: TEXTO_TIPO_NO_SOPORTADO,
+      mostrar_menu: false,
     };
   }
 

@@ -477,7 +477,7 @@ async function atenderWebhook(
     tipo: evento.tipo,
     accion: decision.accion,
     remitente: evento.from === null ? null : enmascararTelefono(evento.from),
-    via: "interpretacion" in decision ? decision.interpretacion.via : undefined,
+    via: "interpretacion" in decision ? (decision.interpretacion?.via ?? "sin_texto") : undefined,
   });
 
   responderJson(res, 200, {
@@ -485,13 +485,17 @@ async function atenderWebhook(
     accion: decision.accion,
     ...(decision.accion === "rechazar" ? { motivo: decision.motivo } : {}),
     ...(decision.accion === "ignorar" ? { motivo: decision.motivo } : {}),
+    // `interpretacion` puede ser null: un audio o una foto se contestan igual
+    // —para no dejar al usuario en silencio— y ahí no hubo texto que leer.
     ...("interpretacion" in decision
       ? {
-          via: decision.interpretacion.via,
-          opcion: decision.interpretacion.opcion?.id ?? null,
+          via: decision.interpretacion?.via ?? "sin_texto",
+          opcion: decision.interpretacion?.opcion?.id ?? null,
           tools: "tools" in decision ? decision.tools : [],
-          mostrar_menu: decision.interpretacion.mostrar_menu,
-          respuesta_sugerida: decision.interpretacion.respuesta_sugerida ?? null,
+          mostrar_menu: decision.interpretacion?.mostrar_menu ?? false,
+          respuesta_sugerida:
+            decision.interpretacion?.respuesta_sugerida ??
+            ("respuesta" in decision ? decision.respuesta : null),
         }
       : {}),
   });
