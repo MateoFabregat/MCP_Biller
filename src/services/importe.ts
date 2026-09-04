@@ -45,6 +45,8 @@
 // una persona.
 // =============================================================================
 
+import { round2 } from "../biller/coerce.js";
+
 /** El resultado de leer un importe. `valor` null significa "no se pudo". */
 export interface ImporteLeido {
   valor: number | null;
@@ -167,7 +169,13 @@ function interpretarNumero(n: string): { valor: number | null; ambiguo: boolean;
 
   // 2. Solo comas: la coma es decimal salvo que separe grupos de tres.
   if (comas > 0) {
-    if (comas === 1 && /^\d{1,3}(,\d{3})$/.test(n)) {
+    // EXCEPTO si el grupo entero es un cero solo. Mismo caso que el "0.500"
+    // de la rama del punto, con la coma: "0,500" no es ninguna forma de
+    // escribir quinientos —nadie escribe medio kilo así—, y leerlo como miles
+    // multiplicaba por mil una cantidad de medio kilo. El arreglo del punto
+    // puso `[1-9]` al principio del patrón; este es el mismo criterio acá,
+    // que se había quedado sin replicar.
+    if (comas === 1 && /^[1-9]\d{0,2}(,\d{3})$/.test(n)) {
       // "6,500" con formato de miles importado. Es ambiguo de verdad: también
       // puede ser seis coma cinco. Gana miles porque un precio de mostrador con
       // tres decimales no existe.
@@ -198,7 +206,12 @@ function interpretarNumero(n: string): { valor: number | null; ambiguo: boolean;
     const decimales = n.length - n.indexOf(".") - 1;
     //    Tres decimales exactos y hasta tres enteros: es miles, sin duda.
     //    "6.500" = seis mil quinientos. Éste es EL caso que motiva el módulo.
-    if (decimales === 3 && /^\d{1,3}\.\d{3}$/.test(n)) {
+    //
+    //    EXCEPTO si el grupo entero es un cero solo. "0.500" no es ningún
+    //    número escrito con punto de miles —nadie escribe quinientos así— y
+    //    leerlo como 500 multiplicaba por mil una cantidad de medio kilo.
+    //    Cae al caso general de abajo y da 0,5, que es lo que quiso decir.
+    if (decimales === 3 && /^[1-9]\d{0,2}\.\d{3}$/.test(n)) {
       const valor = Number(n.replace(".", ""));
       return {
         valor,
@@ -272,6 +285,15 @@ export function montoConSigno(moneda: string | undefined, valor: number): string
 export interface CantidadLeida {
   valor: number | null;
   detalle: string;
+  /**
+   * true si el texto admite otra lectura razonable.
+   *
+   * Existe porque `parsearImporte` ya lo calculaba y `parsearCantidad` lo
+   * tiraba: "0,500" quedaba como 500 unidades sin una sola advertencia. La
+   * cantidad multiplica al precio, así que una cantidad mal leída mueve el
+   * total exactamente igual que un precio mal leído.
+   */
+  ambiguo?: boolean;
 }
 
 /**
@@ -296,11 +318,71 @@ export function parsearCantidad(raw: string): CantidadLeida {
   const texto = (raw ?? "").trim().toLowerCase();
   if (texto === "") return { valor: null, detalle: "Llegó vacía: no hay cantidad que leer." };
 
-  const palabras = texto
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .split(/[^a-z0-9.,]+/)
-    .filter((p) => p !== "");
+  const sinTildes = texto.normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+  // FRACCIONES CON BARRA, ANTES QUE NADA.
+  //
+  // "1/2 kg" es como se pide medio kilo en un mostrador. El split de abajo se
+  // come la barra igual que se come el guión, así que "1/2" quedaba como
+  // ["1","2"] y ganaba el primero: media bolsa se facturaba como una bolsa
+  // entera. Con "2 1/2" era peor —dos y medio se leía dos— porque el error
+  // sobrevive callado hasta que el CFE está emitido.
+  //
+  // Se acepta "1/2", "3/4" y la forma mixta "2 1/2". El corte al final NO exige
+  // espacio: "1/2kg" es la misma media bolsa que "1/2 kg", y hacer que el
+  // precio dependa de si el usuario apretó la barra espaciadora es inaceptable
+  // en un número que va a un comprobante fiscal. Lo único que se prohíbe justo
+  // después del denominador es OTRO dígito o una barra: eso es lo que evita que
+  // "10/10/2026" —una fecha— se lea como fracción.
+  const fraccion = /(?:^|\s)(?:(\d{1,4})\s+)?(\d{1,3})\s*\/\s*(\d{1,3})(?=[^\d/]|$)/.exec(sinTildes);
+  if (fraccion !== null) {
+    const entero = fraccion[1] === undefined ? 0 : Number(fraccion[1]);
+    const num = Number(fraccion[2]);
+    const den = Number(fraccion[3]);
+    const escrita = fraccion[1] === undefined ? `${num}/${den}` : `${entero} ${num}/${den}`;
+
+    // DENOMINADOR DE MOSTRADOR, O SE RECHAZA.
+    //
+    // Un talle ("38/40"), un lote o una fecha corta también se escriben
+    // num/den, y "doceavos" no es una fracción que pida nadie. Aceptar solo
+    // los denominadores de mostrador (medios, tercios, cuartos, quintos,
+    // octavos, décimos) es lo que distingue "1/2 kg" de "3/12" o "12/24": ante
+    // la duda no se elige, se pregunta.
+    const DENOMINADORES_DE_MOSTRADOR: ReadonlySet<number> = new Set([2, 3, 4, 5, 8, 10]);
+    if (!DENOMINADORES_DE_MOSTRADOR.has(den)) {
+      return {
+        valor: null,
+        detalle:
+          `"${escrita}" tiene forma de fracción, pero ${den} no es un denominador de mostrador ` +
+          "(medios, tercios, cuartos, quintos, octavos o décimos). Puede ser un código, un talle o " +
+          "una fecha: volvé a preguntar la cantidad.",
+      };
+    }
+
+    // NUMERADOR >= DENOMINADOR, SALVO LA FORMA MIXTA, TAMBIÉN SE RECHAZA.
+    //
+    // Nadie pide "doce medios" de algo; sí pide medio, un cuarto o tres
+    // cuartos. "12/03" no es una fracción: es un código (o una fecha) que se
+    // parece a una. La forma mixta ("2 1/2") es la excepción: ahí el numerador
+    // de la parte fraccionaria puede ser lo que sea respecto del denominador,
+    // porque el número completo es el entero más la fracción.
+    if (entero === 0 && num >= den) {
+      return {
+        valor: null,
+        detalle:
+          `"${escrita}" tiene forma de fracción, pero el numerador no es menor que el denominador: ` +
+          "no es una fracción de mostrador. Puede ser un código: volvé a preguntar la cantidad.",
+      };
+    }
+
+    const valor = round2(entero + num / den);
+    if (valor <= 0) {
+      return { valor: null, detalle: `La cantidad tiene que ser mayor que cero (llegó ${valor}).` };
+    }
+    return { valor, detalle: `"${escrita}" se leyó como ${formatearUy(valor)}.` };
+  }
+
+  const palabras = sinTildes.split(/[^a-z0-9.,]+/).filter((p) => p !== "");
 
   // Un negativo no es una cantidad, y va antes que todo lo demás: el split se
   // come el "-", así que hay que mirarlo en el texto original. Devolver 3 para
@@ -331,7 +413,9 @@ export function parsearCantidad(raw: string): CantidadLeida {
           detalle: `La cantidad tiene que ser mayor que cero (llegó ${leido.valor}).`,
         };
       }
-      return { valor: leido.valor, detalle: leido.detalle };
+      // `ambiguo` viaja: la cantidad multiplica al precio, así que "0,500"
+      // leído como 500 mueve el total tanto como un precio cien veces mayor.
+      return { valor: leido.valor, detalle: leido.detalle, ambiguo: leido.ambiguo };
     }
   }
 

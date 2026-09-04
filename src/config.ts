@@ -9,7 +9,7 @@
 
 import { mkdirSync } from "node:fs";
 import { join as unirRuta } from "node:path";
-import { logger } from "./logger.js";
+import { logger, registrarSecretosParaLogs } from "./logger.js";
 import { BillerConfigError } from "./utils/errors.js";
 import {
   DEFAULT_RATE_LIMIT_DEFAULT_RPS,
@@ -54,8 +54,9 @@ export const DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES = 10_000;
  * rutas para un despliegue de una sola empresa.
  *
  * Empieza con `_` a propósito: `construirRegistro` rechaza los ids que no sean
- * `[A-Za-z0-9-]`, así que ningún tenant real puede llamarse así y quedarse con
- * el directorio del proceso. La colisión no se detecta, no se puede cometer.
+ * `[a-z0-9-]` en minúsculas y de hasta 48 caracteres, así que ningún tenant
+ * real puede llamarse así y quedarse con el directorio del proceso. La
+ * colisión no se detecta, no se puede cometer.
  */
 export const TENANT_IMPLICITO = "_proceso";
 
@@ -338,7 +339,7 @@ function parseKapso(env: Env, idempotencyLogPath?: string): KapsoConfig | undefi
   if (apiKey === undefined) return undefined;
   return {
     apiKey,
-    baseUrl: normalizeBaseUrl(trimOrUndefined(env.KAPSO_API_BASE_URL) ?? DEFAULT_KAPSO_BASE_URL),
+    baseUrl: normalizeKapsoBaseUrl(trimOrUndefined(env.KAPSO_API_BASE_URL) ?? DEFAULT_KAPSO_BASE_URL),
     phoneNumberId: trimOrUndefined(env.KAPSO_PHONE_NUMBER_ID),
     destinatariosPermitidos: parseDestinatarios(env.KAPSO_DESTINATARIOS_PERMITIDOS),
     webhookSecret: trimOrUndefined(env.KAPSO_WEBHOOK_SECRET),
@@ -389,12 +390,56 @@ export function detectEnvironment(baseUrl: string): BillerEnvironment {
   }
 }
 
-/** Número positivo o undefined. Tolerante: un valor basura no rompe el arranque. */
-function parseNumeroPositivo(raw: string | undefined): number | undefined {
+/**
+ * Número positivo o undefined. Tolerante: un valor basura no rompe el
+ * arranque, cae a "no configurado" — pero, a diferencia de antes, YA NO EN
+ * SILENCIO cuando se le pasan `nombre`/`warnings`: un tipeo en una variable
+ * como `BILLER_VALOR_UI` no puede pasar inadvertido, porque lo que decide
+ * mal, río abajo, es si un e-Ticket exige receptor ante DGI (ver
+ * `biller/requisitos.ts`). "Basura" acá es solo lo que ni siquiera parsea
+ * como número positivo; un número sintácticamente válido pero fuera de rango
+ * plausible (una coma corrida) lo valida `resolverUmbralReceptor`, que es
+ * quien conoce la banda razonable para CADA variable — este parser es
+ * genérico y no la conoce.
+ */
+function parseNumeroPositivo(
+  raw: string | undefined,
+  nombre?: string,
+  warnings?: string[],
+): number | undefined {
   const t = (raw ?? "").trim().replace(",", ".");
   if (t === "") return undefined;
   const n = Number(t);
-  return Number.isFinite(n) && n > 0 ? n : undefined;
+  if (Number.isFinite(n) && n > 0) return n;
+  if (nombre !== undefined) {
+    const warning = `${nombre}="${raw}" no es un número positivo: se ignora.`;
+    logger.warn(warning);
+    warnings?.push(warning);
+  }
+  return undefined;
+}
+
+/**
+ * `BILLER_VALOR_UI_FECHA` tiene que ser aaaa-mm-dd: es lo único que
+ * `resolverUmbralReceptor` sabe leer para calcular si el valor de UI está
+ * vencido. Una fecha con otro formato (o basura) no se corrige a mano —está
+ * en el mismo espíritu que `advertenciasDestinatarios`: tocarle el formato a
+ * un dato que alimenta una decisión fiscal es una mala idea— se descarta y se
+ * avisa, y el chequeo de vencimiento queda igual de "no puedo saberlo" que si
+ * la fecha faltara.
+ */
+const FORMATO_FECHA_UI_ENV = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseFechaUi(raw: string | undefined, warnings?: string[]): string | undefined {
+  const t = (raw ?? "").trim();
+  if (t === "") return undefined;
+  if (FORMATO_FECHA_UI_ENV.test(t)) return t;
+  const warning =
+    `BILLER_VALOR_UI_FECHA="${raw}" no tiene el formato aaaa-mm-dd: se ignora. Sin fecha confiable ` +
+    "no se puede saber si BILLER_VALOR_UI está vencido.";
+  logger.warn(warning);
+  warnings?.push(warning);
+  return undefined;
 }
 
 function parseBool(raw: string | undefined): boolean {
@@ -693,6 +738,57 @@ function normalizeBaseUrl(raw: string): string {
 const BILLER_API_HOSTS = new Set(["biller.uy", "test.biller.uy"]);
 
 /**
+ * Hosts a los que puede salir la API key de Kapso.
+ *
+ * SIMETRÍA CON BILLER, Y POR EL MISMO MOTIVO. La base de Biller estaba
+ * encerrada en dos hosts porque el bearer viaja en el header y una base
+ * arbitraria lo entrega. La de Kapso pasaba por `normalizeBaseUrl`, que solo
+ * saca la barra final: un typo o una variable de entorno mal puesta mandaba la
+ * API key de Kapso —y con ella la capacidad de escribirle a los clientes de la
+ * empresa por WhatsApp— a cualquier host que aceptara el POST.
+ *
+ * Se permite `localhost` porque el desarrollo contra un mock es un caso real y
+ * un host local no filtra nada afuera de la máquina.
+ */
+const KAPSO_API_HOSTS = new Set(["api.kapso.ai", "kapso.ai", "localhost", "127.0.0.1"]);
+
+/**
+ * Misma regla que `normalizeBillerBaseUrl`, sobre la lista de Kapso.
+ *
+ * `localhost` puede llevar puerto y http: sin eso no hay forma de apuntar a un
+ * mock local. Los hosts remotos exigen https y nada más que el host.
+ */
+function normalizeKapsoBaseUrl(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    throw new BillerConfigError("KAPSO_API_BASE_URL no es una URL válida.");
+  }
+  const host = url.hostname.toLowerCase();
+  const local = host === "localhost" || host === "127.0.0.1";
+  const pathValido = url.pathname === "" || url.pathname === "/";
+  if (
+    !KAPSO_API_HOSTS.has(host) ||
+    (!local && url.protocol !== "https:") ||
+    (local && url.protocol !== "http:" && url.protocol !== "https:") ||
+    (!local && url.port !== "") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    !pathValido ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new BillerConfigError(
+      "KAPSO_API_BASE_URL debe ser https://api.kapso.ai (o un http://localhost:PUERTO para " +
+        "desarrollo), sin path, query, credenciales ni fragmento. La API key de Kapso viaja en el " +
+        "header: una base arbitraria la entrega.",
+    );
+  }
+  return `${url.protocol}//${url.host}`;
+}
+
+/**
  * El bearer de Biller solo puede salir hacia los dos hosts oficiales conocidos.
  * También se prohíben credenciales, puertos, query, fragmentos y subpaths: una
  * base ambigua no debe convertirse en un canal para filtrar el token.
@@ -803,6 +899,17 @@ export function loadConfig(env: Env = process.env): BillerConfig {
   ) {
     asegurarDirectorio(directorioDeDatos(dataDir, tenantId));
   }
+  // Los secretos del proceso, en el logger, ANTES de devolver la config: a
+  // partir de acá ninguna línea de log puede imprimirlos aunque un caller le
+  // pase el mensaje crudo de un error. Ver `registrarSecretosParaLogs`.
+  registrarSecretosParaLogs([
+    token,
+    approvalSecret,
+    trimOrUndefined(env.BILLER_HTTP_AUTH_TOKEN),
+    trimOrUndefined(env.KAPSO_API_KEY),
+    trimOrUndefined(env.KAPSO_WEBHOOK_SECRET),
+  ]);
+
   return {
     tenantId,
     dataDir,
@@ -841,9 +948,9 @@ export function loadConfig(env: Env = process.env): BillerConfig {
     borradorStorePath: rutas.borradorStorePath,
     wireLiviano: parseBool(env.BILLER_WIRE_LIVIANO),
     maxMontos: parseLimitesMonto(env),
-    valorUi: parseNumeroPositivo(env.BILLER_VALOR_UI),
-    valorUiFecha: trimOrUndefined(env.BILLER_VALOR_UI_FECHA),
-    umbralUiReceptor: parseNumeroPositivo(env.BILLER_UMBRAL_UI_RECEPTOR),
+    valorUi: parseNumeroPositivo(env.BILLER_VALOR_UI, "BILLER_VALOR_UI"),
+    valorUiFecha: parseFechaUi(env.BILLER_VALOR_UI_FECHA),
+    umbralUiReceptor: parseNumeroPositivo(env.BILLER_UMBRAL_UI_RECEPTOR, "BILLER_UMBRAL_UI_RECEPTOR"),
     cacheEnabled: parseBoolPrendido(env.BILLER_CACHE_ENABLED, "BILLER_CACHE_ENABLED"),
     httpSessionTtlMs: parseEnteroPositivo(
       env.BILLER_HTTP_SESSION_TTL_MS,
@@ -981,9 +1088,10 @@ export function inspectConfig(env: Env = process.env): ConfigInspection {
     borradorStorePath: rutas.borradorStorePath ?? null,
     wireLiviano: parseBool(env.BILLER_WIRE_LIVIANO),
     maxMontos: parseLimitesMonto(env),
-    valorUi: parseNumeroPositivo(env.BILLER_VALOR_UI) ?? null,
-    valorUiFecha: trimOrUndefined(env.BILLER_VALOR_UI_FECHA) ?? null,
-    umbralUiReceptor: parseNumeroPositivo(env.BILLER_UMBRAL_UI_RECEPTOR) ?? null,
+    valorUi: parseNumeroPositivo(env.BILLER_VALOR_UI, "BILLER_VALOR_UI", configWarnings) ?? null,
+    valorUiFecha: parseFechaUi(env.BILLER_VALOR_UI_FECHA, configWarnings) ?? null,
+    umbralUiReceptor:
+      parseNumeroPositivo(env.BILLER_UMBRAL_UI_RECEPTOR, "BILLER_UMBRAL_UI_RECEPTOR", configWarnings) ?? null,
     cacheEnabled: parseBoolPrendido(env.BILLER_CACHE_ENABLED, "BILLER_CACHE_ENABLED"),
     httpSessionTtlMs: parseEnteroPositivo(
       env.BILLER_HTTP_SESSION_TTL_MS,

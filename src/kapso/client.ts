@@ -49,6 +49,8 @@ import {
 } from "./idempotency.js";
 import type { IdempotencyStore } from "../write/idempotency.js";
 import { readTextBounded } from "../utils/boundedResponse.js";
+import { recortarSeguro } from "../utils/texto.js";
+import { limpiarMarcasSalida } from "../security/untrusted.js";
 
 export { KapsoIdempotencyError, KapsoPersistenciaRequeridaError } from "./idempotency.js";
 
@@ -195,8 +197,7 @@ export type Interactivo = InteractivoBotones | InteractivoLista;
  * contenido se degrada, no se corrompe.
  */
 export function construirPayloadInteractivo(i: Interactivo): Record<string, unknown> {
-  const recortar = (s: string, max: number): string =>
-    s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+  const recortar = (s: string, max: number): string => recortarSeguro(s, max, "…");
 
   const exigir = (valor: string, max: number, campo: string): string => {
     if (valor.trim() === "") {
@@ -295,6 +296,13 @@ export interface KapsoSendOptions {
   actorIdentity?: string;
   /** Clasificación explícita de la salida externa. */
   operation?: KapsoOutgoingOperation;
+  /**
+   * A QUIÉN/QUÉ se refiere la salida, para las operaciones con ventana de día.
+   *
+   * Sin esto, "uno por día" significaba "un TEXTO por día". Ver
+   * `KapsoKeyInput.sujeto`.
+   */
+  sujeto?: string;
 }
 
 interface ReservaKapso {
@@ -372,6 +380,7 @@ export class KapsoClient {
         destinatario,
         operation,
         payload,
+        ...(options.sujeto === undefined ? {} : { sujeto: options.sujeto }),
       },
       this.ahora(),
     );
@@ -573,7 +582,7 @@ export class KapsoClient {
     texto: string,
     options: KapsoSendOptions = {},
   ): Promise<EnvioResultado> {
-    const cuerpo = texto.slice(0, MAX_MENSAJE_CHARS);
+    const cuerpo = recortarSeguro(limpiarMarcasSalida(texto), MAX_MENSAJE_CHARS);
     const messageId = await this.postMensaje(
       destinatario,
       { type: "text", text: { body: cuerpo } },
@@ -596,7 +605,10 @@ export class KapsoClient {
     interactivo: Interactivo,
     options: KapsoSendOptions = {},
   ): Promise<EnvioResultado> {
-    const payload = construirPayloadInteractivo(interactivo);
+    // Las marcas se sacan ANTES de validar los largos: una marca que sobrevive
+    // hasta acá se comería 40 caracteres del tope de un botón y haría fallar un
+    // mensaje que en realidad entraba.
+    const payload = construirPayloadInteractivo(limpiarMarcasSalida(interactivo));
     const messageId = await this.postMensaje(
       destinatario,
       { type: "interactive", interactive: payload },
@@ -719,7 +731,10 @@ export class KapsoClient {
           "para documentos.",
       );
     }
-    const caption = archivo.caption?.slice(0, MAX_CAPTION_CHARS);
+    const caption =
+      archivo.caption === undefined
+        ? undefined
+        : recortarSeguro(limpiarMarcasSalida(archivo.caption), MAX_CAPTION_CHARS);
     const reserva = this.reservar(
       destinatario,
       options.operation ?? "documento",

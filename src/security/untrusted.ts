@@ -302,3 +302,83 @@ OTRAS REGLAS
   receptor identificado siempre, y el e-Ticket lo exige por encima de 5.000 UI.
 - Los totales de facturación usan solo comprobantes en estado "Aceptado DGI":
   es el criterio que hace coincidir los números con los que muestra Biller.`;
+
+// =============================================================================
+// Texto de un tercero DENTRO de una frase nuestra.
+//
+// EL AGUJERO QUE CIERRA. La barrera de salida envuelve POR NOMBRE DE CLAVE, y
+// eso alcanza mientras el dato del tercero viaje en su propia clave. Deja de
+// alcanzar en el momento en que lo interpolamos: `riesgoPlata` arma
+// `titulo: "${razon social} facturó 40% menos"`, y `titulo` no está —ni puede
+// estar— en `CAMPOS_NO_CONFIABLES`, porque el resto de esa frase la escribimos
+// nosotros. Los mismos bytes que salían marcados bajo `cliente_nombre` salían
+// crudos adentro del título.
+//
+// Es la tercera versión del mismo lavado: primero fue el renombre a
+// `cliente_nombre`, después el casing de `RazonSocial`, ahora la interpolación.
+// La regla que las tres comparten: cuando un dato no confiable CAMBIA DE ENVASE,
+// la barrera lo pierde de vista. Por eso la marca se pone acá, en el punto de
+// interpolación, y no se espera a que el filtro de salida la adivine.
+//
+// POR QUÉ NO ENSUCIA EL WHATSAPP. Las marcas se sacan en el único lugar por
+// donde el texto sale hacia una persona (`KapsoClient`, ver `limpiarMarcas`).
+// El modelo ve el texto marcado; el almacenero lee la frase limpia. La marca
+// viaja por adentro del sistema y se cae en los bordes: al entrar a un CFE y al
+// salir a un teléfono.
+// =============================================================================
+
+/**
+ * Largo máximo de un dato de tercero interpolado en una frase.
+ *
+ * Más corto que `MAX_UNTRUSTED_CHARS` a propósito: acá el valor va adentro de
+ * un renglón que una persona lee en un teléfono. La razón social más larga que
+ * admite DGI son 150 caracteres, así que ningún nombre real se recorta; lo que
+ * se recorta es un payload que necesitaba lugar.
+ */
+export const MAX_TERCERO_EN_LINEA = 150;
+
+/**
+ * Envuelve un dato de tercero que va a quedar EN MEDIO de una frase nuestra.
+ *
+ * Diferencias con `envolverNoConfiable`, todas por el mismo motivo (esto se
+ * lee en un renglón):
+ *   - colapsa saltos de línea y caracteres de control: un nombre con `\n` puede
+ *     dibujar lo que parece un bloque nuevo de instrucciones,
+ *   - trunca más corto, sin la coletilla de "[truncado: N caracteres]",
+ *   - devuelve un placeholder si el valor quedó vacío, para no dejar la frase
+ *     empezando con un espacio.
+ */
+export function envolverEnLinea(valor: string | null | undefined, alternativa = "(sin identificar)"): string {
+  const crudo = (valor ?? "").replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/g, " ").trim();
+  if (crudo === "") return alternativa;
+
+  const limpio = neutralizarDelimitadores(crudo);
+  const truncado = limpio.length > MAX_TERCERO_EN_LINEA ? `${limpio.slice(0, MAX_TERCERO_EN_LINEA)}…` : limpio;
+  // SIN ESPACIOS ADENTRO DE LAS MARCAS, a diferencia de `envolverNoConfiable`.
+  //
+  // Acá el valor va pegado a la puntuación de la frase ("Hola X,"), y las marcas
+  // se sacan antes de llegar al teléfono: si tuvieran espacios de relleno, al
+  // sacarlas quedaría "Hola  ACME SA ," — dos espacios y una coma suelta. El
+  // texto que lee la persona tiene que quedar exactamente como si la marca
+  // nunca hubiera existido.
+  return `${MARCA_INICIO}${truncado}${MARCA_FIN}`;
+}
+
+/**
+ * Saca las marcas de TODO string de una estructura que SALE hacia una persona.
+ *
+ * La contracara de `limpiarMarcasProfundo` (que limpia lo que entra a un
+ * documento fiscal). Acá el destino es un teléfono: la marca cumplió su función
+ * —viajó marcada mientras el modelo la podía leer— y a partir de este punto solo
+ * sería ruido para quien lee el mensaje.
+ */
+export function limpiarMarcasSalida<T>(valor: T): T {
+  if (typeof valor === "string") return limpiarMarcas(valor) as unknown as T;
+  if (Array.isArray(valor)) return valor.map((v) => limpiarMarcasSalida(v)) as unknown as T;
+  if (typeof valor === "object" && valor !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(valor as Record<string, unknown>)) out[k] = limpiarMarcasSalida(v);
+    return out as unknown as T;
+  }
+  return valor;
+}

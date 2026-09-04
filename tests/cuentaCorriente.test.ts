@@ -6,6 +6,9 @@ import {
   referenciasDeCobranza,
   referenciasDesdeItems,
 } from "../src/services/cuentaCorriente.js";
+import { hoyComoDateUy } from "../src/services/fechaUy.js";
+import { handleCuentaCorriente } from "../src/tools/cuentaCorriente.js";
+import { makeCtx } from "./helpers.js";
 
 const HOY = new Date("2026-07-27T12:00:00Z");
 
@@ -103,7 +106,14 @@ describe("referenciasDesdeItems — la imputación viaja en el concepto del íte
       reciboConItems([{ concepto: "e-Factura D-1236497", precio: 1500 }]),
     );
     expect(r).toEqual([
-      { padre: null, total: 1500, serie: "D", numero: 1236497, origen_texto: "e-Factura D-1236497" },
+      {
+        padre: null,
+        total: 1500,
+        serie: "D",
+        numero: 1236497,
+        // Marcado: el concepto de un recibo lo escribe la contraparte.
+        origen_texto: "⟦dato-no-confiable⟧e-Factura D-1236497⟦/dato-no-confiable⟧",
+      },
     ]);
   });
 
@@ -324,5 +334,139 @@ describe("calcularCuentaCorriente", () => {
 
     expect(r.saldo_por_moneda.UYU!.total).toBe(1000);
     expect(r.excluidos.no_aceptados).toBe(1);
+  });
+});
+
+// =============================================================================
+// Tool `biller_cuenta_corriente` — issue 17: filtrar por cliente/moneda tiene
+// que filtrar TAMBIÉN los agregados, no solo `documentos` y `por_cliente`.
+//
+// El cálculo (arriba, `calcularCuentaCorriente`) siempre corre sobre la
+// cartera completa: imputar un cobro necesita ver las facturas de todos los
+// clientes. Lo que se prueba acá es la CAPA DE LA TOOL, que es la que decide
+// qué se publica cuando el pedido viene con `cliente_rut` o `moneda`.
+//
+// El reloj de `correrCuentaCorriente` es el real (`hoyComoDateUy`), así que
+// las fechas de los fixtures se arman relativas a `new Date()`, igual que en
+// `tests/vencimientos.test.ts`.
+// =============================================================================
+
+describe("tool biller_cuenta_corriente — agregados filtrados de verdad", () => {
+  const RUT_A = "210000000011";
+  const RUT_B = "219999999992";
+
+  // El reloj de `correrCuentaCorriente` es el real: `hoyComoDateUy()`, no un
+  // `new Date()` crudo (el "día civil" es el uruguayo, ver `services/fechaUy.ts`).
+  const hoyReal = hoyComoDateUy();
+  const diaReal = (offset: number): string =>
+    new Date(hoyReal.getTime() + offset * 86_400_000).toISOString().slice(0, 10);
+
+  /** Factura a crédito (vence en el futuro), pendiente de cobro. */
+  function factura(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: 1,
+      tipo_comprobante: 111,
+      serie: "A",
+      numero: 1,
+      moneda: "UYU",
+      total: 1000,
+      estado: "Aceptado DGI",
+      fecha_emision: diaReal(-10),
+      fecha_vencimiento: diaReal(20),
+      indicador_cobranza_propia: 0,
+      cliente: { documento: RUT_A, razon_social: "Cliente A" },
+      ...over,
+    };
+  }
+
+  /** Recibo que cobra `total` al mismo cliente y moneda de la factura que referencia. */
+  function recibo(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: 900,
+      tipo_comprobante: 101,
+      serie: "R",
+      numero: 900,
+      moneda: "UYU",
+      total: 1000,
+      estado: "Aceptado DGI",
+      fecha_emision: diaReal(-1),
+      fecha_vencimiento: null,
+      indicador_cobranza_propia: 1,
+      cliente: { documento: RUT_A, razon_social: "Cliente A" },
+      ...over,
+    };
+  }
+
+  const ARGS_BASE = { dias_atras: 30, imputar_por_referencias: false } as const;
+
+  it("filtra saldo_por_moneda por cliente: no trae la deuda de toda la cartera", async () => {
+    const { ctx } = makeCtx({
+      response: [
+        factura({ id: 1, total: 1000, cliente: { documento: RUT_A, razon_social: "Cliente A" } }),
+        factura({ id: 2, total: 5000, cliente: { documento: RUT_B, razon_social: "Cliente B" } }),
+      ],
+    });
+
+    const res = await handleCuentaCorriente({ ...ARGS_BASE, cliente_rut: RUT_A }, ctx);
+    const out = res.structuredContent as Record<string, any>;
+
+    expect(res.isError).toBeUndefined();
+    expect(out.por_cliente).toHaveLength(1);
+    // El bug reportado: acá salía 6000 (la cartera entera).
+    expect(out.saldo_por_moneda.UYU.total).toBe(1000);
+    expect(out.totales.facturado_por_moneda.UYU).toBe(1000);
+  });
+
+  it("filtra por moneda: no arrastra las otras monedas", async () => {
+    const { ctx } = makeCtx({
+      response: [
+        factura({ id: 1, moneda: "UYU", total: 1000, cliente: { documento: RUT_A, razon_social: "Cliente A" } }),
+        factura({ id: 2, moneda: "USD", total: 200, cliente: { documento: RUT_A, razon_social: "Cliente A" } }),
+        factura({ id: 3, moneda: "UYU", total: 5000, cliente: { documento: RUT_B, razon_social: "Cliente B" } }),
+      ],
+    });
+
+    const res = await handleCuentaCorriente({ ...ARGS_BASE, moneda: "USD" }, ctx);
+    const out = res.structuredContent as Record<string, any>;
+
+    expect(res.isError).toBeUndefined();
+    expect(out.saldo_por_moneda).toEqual({ USD: { total: 200, comprobantes: 1 } });
+    expect(out.saldo_por_moneda.UYU).toBeUndefined();
+    expect(out.totales.facturado_por_moneda).toEqual({ USD: 200 });
+  });
+
+  it("cobranzas solo trae las del cliente pedido", async () => {
+    const { ctx } = makeCtx({
+      response: [
+        factura({ id: 1, total: 1000, cliente: { documento: RUT_A, razon_social: "Cliente A" } }),
+        recibo({ id: 901, total: 1000, cliente: { documento: RUT_A, razon_social: "Cliente A" } }),
+        factura({ id: 2, total: 5000, cliente: { documento: RUT_B, razon_social: "Cliente B" } }),
+        recibo({ id: 902, total: 5000, cliente: { documento: RUT_B, razon_social: "Cliente B" } }),
+      ],
+    });
+
+    const res = await handleCuentaCorriente({ ...ARGS_BASE, cliente_rut: RUT_A }, ctx);
+    const out = res.structuredContent as Record<string, any>;
+
+    expect(res.isError).toBeUndefined();
+    expect(out.cobranzas).toHaveLength(1);
+    expect(out.cobranzas[0].cliente_rut).toBe(RUT_A);
+  });
+
+  it("sin filtro, los agregados siguen siendo los de toda la cartera", async () => {
+    const { ctx } = makeCtx({
+      response: [
+        factura({ id: 1, total: 1000, cliente: { documento: RUT_A, razon_social: "Cliente A" } }),
+        factura({ id: 2, total: 5000, cliente: { documento: RUT_B, razon_social: "Cliente B" } }),
+      ],
+    });
+
+    const res = await handleCuentaCorriente(ARGS_BASE, ctx);
+    const out = res.structuredContent as Record<string, any>;
+
+    expect(res.isError).toBeUndefined();
+    expect(out.por_cliente).toHaveLength(2);
+    expect(out.saldo_por_moneda.UYU.total).toBe(6000);
+    expect(out.totales.facturado_por_moneda.UYU).toBe(6000);
   });
 });

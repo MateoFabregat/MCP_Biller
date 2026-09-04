@@ -1,7 +1,12 @@
 // Constantes globales del server MCP.
 
 export const SERVER_NAME = "biller-mcp-server";
-export const SERVER_VERSION = "0.1.0";
+// Tiene que coincidir con package.json y con la referencia de src/cli/init.ts:
+// las tres son la MISMA versión publicada. Un test en conteosDoc.test.ts lee
+// package.json y lo compara, para que subir una y olvidarse de la otra falle
+// en CI en vez de anunciar, por MCP initialize o por biller_health_check, una
+// versión que no es la que corre.
+export const SERVER_VERSION = "0.1.1";
 
 /** OpenAPI público usado como fuente de verdad para endpoints y campos. */
 export const OPENAPI_URL =

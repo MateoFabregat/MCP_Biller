@@ -19,10 +19,14 @@
 //    coincidir y no se manda: hay que volver a mirar. Es el mismo mecanismo de
 //    la emisión, y por el mismo motivo — acá tampoco hay forma de deshacer.
 //
-// 3. IDEMPOTENCIA POR DÍA. Contesta "¿ya se lo mandamos?". La clave incluye el
-//    RUT, el número y la fecha: dos recordatorios al mismo cliente el mismo día
-//    es el error que el documento del proyecto marca como "quema una relación
-//    comercial", y un retry del modelo lo produce solo.
+// 3. IDEMPOTENCIA POR DÍA. Contesta "¿ya se lo mandamos?". La clave se arma con
+//    el RUT del deudor (`sujeto`), el destinatario y el día uruguayo — y NO con
+//    el texto del mensaje. Ese matiz era el agujero: durante un tiempo la clave
+//    hasheaba el mensaje, así que una `nota` distinta o un saldo que cambió un
+//    peso alcanzaban para mandar el segundo reclamo del día. Dos recordatorios
+//    al mismo cliente el mismo día es el error que el documento del proyecto
+//    marca como "quema una relación comercial", y un retry del modelo lo
+//    produce solo.
 //
 // LO QUE ESTA TOOL NO HACE, A PROPÓSITO: no manda en lote. Un `for` sobre los
 // deudores es exactamente la forma de convertir un error de cálculo en veinte
@@ -330,6 +334,13 @@ export async function handleRecordatorioCobro(args: unknown, ctx: ToolContext): 
     const envio = await kapso.enviar(destino, recordatorio.mensaje, {
       actorIdentity: identidad ?? undefined,
       operation: a.permitir_reenvio ? "recordatorio_reenvio" : "recordatorio",
+      // EL SUJETO ES EL DEUDOR, NO EL TEXTO.
+      //
+      // La ventana de día hasheaba el mensaje, así que cambiar la `nota`, la
+      // firma de la empresa o que el saldo se moviera un peso estrenaba clave y
+      // dejaba salir el segundo reclamo del día. La promesa de la tool ("no
+      // repite el envío al mismo cliente el mismo día") se cumple recién ahora.
+      sujeto: `rut:${a.cliente_rut}`,
     });
 
     return jsonResult({

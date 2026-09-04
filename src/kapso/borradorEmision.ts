@@ -184,6 +184,17 @@ export function normalizarItems(items: ReadonlyArray<ItemCrudo> | undefined): {
         warnings.push(`No se pudo leer la cantidad "${item.cantidad}"${ordinal}: ${leida.detalle}`);
       } else {
         salida.cantidad = leida.valor;
+        // Misma regla que el precio: si el texto admite otra lectura, el
+        // usuario tiene que confirmarla ANTES, no descubrirla en el CFE. La
+        // cantidad multiplica al precio, así que el error tiene el mismo
+        // tamaño.
+        if (leida.ambiguo === true) {
+          warnings.push(
+            `⚠️ La cantidad "${item.cantidad}"${ordinal} se puede leer de dos formas. ${leida.detalle} ` +
+              `Preguntale al usuario "¿${formatearUy(leida.valor)} unidades?" y esperá que lo ` +
+              "confirme ANTES de emitir.",
+          );
+        }
       }
     }
 

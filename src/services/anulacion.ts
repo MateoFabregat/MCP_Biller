@@ -25,6 +25,7 @@
 // patrón produciría, en silencio, una nota de crédito de un tipo inexistente.
 // =============================================================================
 
+import { round2 } from "../biller/coerce.js";
 import { TIPOS_COMPROBANTE, TIPOS_EXPORTACION } from "../biller/cfeSchema.js";
 import { TASA_IVA } from "./calcularTotales.js";
 import { estaAceptado } from "./resumenFacturacion.js";
@@ -300,8 +301,16 @@ export function planAnulacion(
  * correcto y acredita mal es peor que no tener cuerpo: el primero se firma, el
  * segundo se revisa.
  */
-const TASA_BASICA = 0.22;
-const TASA_MINIMA = 0.1;
+// LAS TASAS NO SE DUPLICAN ACÁ. Viven en un solo lugar, `TASA_IVA` de
+// `calcularTotales.ts` (importado arriba), indexado por indicador de
+// facturación de DGI. Antes este módulo tenía su propia copia (`TASA_BASICA
+// = 0.22`, `TASA_MINIMA = 0.1`): si DGI cambiaba una tasa —pasó en 2007 con
+// la mínima— y alguien actualizaba `TASA_IVA` sin acordarse de esta copia, la
+// nota de crédito seguía acreditando con la tasa vieja. Sale bien formada,
+// DGI la acepta, y la empresa se acredita IVA que no pagó, sin que nada
+// falle ni avise. Se accede como `TASA_IVA[IND_BASICA]!` / `TASA_IVA[IND_MINIMA]!`
+// más abajo: el `!` es seguro porque esos dos indicadores SIEMPRE tienen tasa
+// numérica en la tabla (no son el caso "otra tasa", que es `null`).
 
 /** Indicadores de facturación de DGI que usa la nota. */
 const IND_EXENTO = 1;
@@ -315,10 +324,6 @@ const EPSILON = 0.02;
 function esMonedaBase(moneda: string | null): boolean {
   const m = (moneda ?? "").trim().toUpperCase();
   return m === "" || m === "UYU" || m === "858" || m === "UY";
-}
-
-function redondear2(n: number): number {
-  return Math.round(n * 100) / 100;
 }
 
 /** Valor absoluto de un campo de IVA que puede venir null, string o negativo. */
@@ -385,7 +390,7 @@ export function lineasNota(c: ComprobanteAAnular, razon: string): LineasNota {
   const referencia = `${razon} ${identificacionOriginal(c)}`.trim();
   // Positivo: el signo lo da el TIPO de comprobante, no el importe. Una nota de
   // crédito con importe negativo se resta dos veces.
-  const total = redondear2(Math.abs(c.total ?? 0));
+  const total = round2(Math.abs(c.total ?? 0));
 
   const linea = (concepto: string, precio: number, indicador: number): Record<string, unknown> => ({
     concepto,
@@ -444,14 +449,14 @@ export function lineasNota(c: ComprobanteAAnular, razon: string): LineasNota {
       items: null,
       advertencias: [
         ...advertencias,
-        `El comprobante tiene ${redondear2(otra)} de IVA a "otra tasa", y la tabla de valores no dice ` +
+        `El comprobante tiene ${round2(otra)} de IVA a "otra tasa", y la tabla de valores no dice ` +
           "cuál es. Sin la tasa no se puede reconstruir el importe bruto de esa porción: la nota hay " +
           "que armarla a mano, copiando las líneas del original con biller_obtener_comprobante.",
       ],
     };
   }
 
-  const ivaDeclarado = redondear2(bas + min);
+  const ivaDeclarado = round2(bas + min);
 
   // --- Camino 1: los ítems del original dicen la tasa ------------------------
   //
@@ -488,12 +493,12 @@ export function lineasNota(c: ComprobanteAAnular, razon: string): LineasNota {
       };
     }
     // El IVA que implica esa tasa sobre el total bruto.
-    const ivaImplicito = redondear2(total - total / (1 + tasa));
+    const ivaImplicito = round2(total - total / (1 + tasa));
     if (sinDesglose || Math.abs(ivaImplicito - ivaDeclarado) <= tolerancia(total)) {
       return { items: [linea(referencia, total, indicador)], advertencias };
     }
     advertencias.push(
-      `Los ítems del original dicen indicador ${indicador} (IVA ${redondear2(ivaImplicito)}) pero su ` +
+      `Los ítems del original dicen indicador ${indicador} (IVA ${round2(ivaImplicito)}) pero su ` +
         `desglose declara ${ivaDeclarado}. Las dos fuentes se contradicen, así que la tasa se toma ` +
         "del desglose, que es el que DGI tiene registrado.",
     );
@@ -534,9 +539,9 @@ export function lineasNota(c: ComprobanteAAnular, razon: string): LineasNota {
     return { items: [linea(referencia, total, indExento)], advertencias };
   }
 
-  const brutoBas = bas > 0 ? redondear2(bas + bas / TASA_BASICA) : 0;
-  const brutoMin = min > 0 ? redondear2(min + min / TASA_MINIMA) : 0;
-  const resto = redondear2(total - brutoBas - brutoMin);
+  const brutoBas = bas > 0 ? round2(bas + bas / TASA_IVA[IND_BASICA]!) : 0;
+  const brutoMin = min > 0 ? round2(min + min / TASA_IVA[IND_MINIMA]!) : 0;
+  const resto = round2(total - brutoBas - brutoMin);
   const tol = tolerancia(total);
 
   // --- El desglose no cierra por más de lo que explica el redondeo ----------
@@ -546,7 +551,7 @@ export function lineasNota(c: ComprobanteAAnular, razon: string): LineasNota {
       advertencias: [
         ...advertencias,
         `El desglose de IVA del original no cierra contra su total: las porciones gravadas suman ` +
-          `${redondear2(brutoBas + brutoMin)} y el total es ${total}. No se arma el cuerpo porque ` +
+          `${round2(brutoBas + brutoMin)} y el total es ${total}. No se arma el cuerpo porque ` +
           "acreditaría más de lo facturado. Revisá el comprobante con biller_obtener_comprobante.",
       ],
     };
@@ -561,8 +566,8 @@ export function lineasNota(c: ComprobanteAAnular, razon: string): LineasNota {
   // de verdad.
   const esExento = resto > tol;
   const ajuste = esExento ? 0 : resto;
-  const basFinal = redondear2(brutoBas + (brutoBas >= brutoMin ? ajuste : 0));
-  const minFinal = redondear2(brutoMin + (brutoBas >= brutoMin ? 0 : ajuste));
+  const basFinal = round2(brutoBas + (brutoBas >= brutoMin ? ajuste : 0));
+  const minFinal = round2(brutoMin + (brutoBas >= brutoMin ? 0 : ajuste));
 
   if (basFinal > 0) {
     items.push(linea(mixto ? `${referencia} (IVA básica)` : referencia, basFinal, IND_BASICA));

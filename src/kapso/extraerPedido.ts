@@ -57,6 +57,17 @@ export interface ItemPedido {
    * es de cien veces, y un eco cuesta un mensaje.
    */
   precio_ambiguo?: boolean;
+  /**
+   * Lo mismo que `precio_ambiguo`, pero para la cantidad ("6,500 unidades"
+   * puede ser 6.500 o seis coma cinco). La cantidad MULTIPLICA al precio, así
+   * que una cantidad mal leída mueve el total exactamente igual que un precio
+   * mal leído: no hay motivo para tratarla con menos cuidado.
+   *
+   * Existe porque `parsearCantidad` ya calculaba `ambiguo` y este extractor lo
+   * tiraba en el piso: la marca nunca llegaba a `pedido.ambiguo` y el mensaje
+   * salía sin una sola advertencia.
+   */
+  cantidad_ambiguo?: boolean;
 }
 
 /** Lo que se pudo leer del mensaje. Nada de esto es obligatorio. */
@@ -542,6 +553,13 @@ export function extraerPedidoEmision(texto: string): PedidoEmision {
         const recolectado = recolectarConcepto(tokens, i + salto);
         const item: ItemPedido = { cantidad: leida.valor };
         if (recolectado.concepto !== undefined) item.concepto = recolectado.concepto;
+        // La marca viaja con el ítem, igual que `precio_ambiguo`: sin esto,
+        // "0,500 kg de queso" facturaba 500 kg sin una sola advertencia. Ver
+        // `ItemPedido.cantidad_ambiguo`.
+        if (leida.ambiguo === true) {
+          item.cantidad_ambiguo = true;
+          pedido.ambiguo = true;
+        }
         abrirItem(item);
         i = recolectado.hasta - 1;
         continue;
@@ -630,7 +648,11 @@ export function extraerPedidoEmision(texto: string): PedidoEmision {
     }
     if (item.cantidad !== undefined) {
       pedido.campos.push("cantidad");
-      pedido.detalles.push(`Cantidad${ordinal}: ${item.cantidad}.`);
+      pedido.detalles.push(
+        item.cantidad_ambiguo === true
+          ? `Cantidad${ordinal}: ${item.cantidad} (admite otra lectura: CONFIRMALA antes de emitir).`
+          : `Cantidad${ordinal}: ${item.cantidad}.`,
+      );
     }
     if (item.precio !== undefined) pedido.campos.push("precio");
   });

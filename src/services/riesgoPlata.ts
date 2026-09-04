@@ -35,6 +35,7 @@
 // =============================================================================
 
 import { round2 } from "../biller/coerce.js";
+import { envolverEnLinea } from "../security/untrusted.js";
 import type { CuentaCorrienteResultado, SaldoCliente } from "./cuentaCorriente.js";
 import type { ComparacionResultado } from "./comparacion.js";
 import type { ClienteRanking, RankingClientesResultado } from "./rankingClientes.js";
@@ -133,12 +134,24 @@ function montoDe(mapa: Record<string, number>, moneda: string): number {
   return mapa[moneda] ?? 0;
 }
 
+/**
+ * Nombre de la contraparte, listo para meter EN MEDIO de una frase.
+ *
+ * Va envuelto porque el nombre lo escribió un tercero y estos títulos los lee
+ * el modelo con las tools de escritura habilitadas. El RUT, en cambio, sale
+ * crudo: lo valida DGI, no admite texto libre, y envolverlo solo agregaría
+ * ruido. Ver `envolverEnLinea` para por qué esto no ensucia el WhatsApp.
+ */
 function nombreDe(c: { rut: string | null; nombre: string | null }): string {
-  return c.nombre ?? c.rut ?? "(sin identificar)";
+  if (c.nombre !== null && c.nombre.trim() !== "") return envolverEnLinea(c.nombre);
+  return c.rut ?? "(sin identificar)";
 }
 
 function nombreDeSaldo(c: SaldoCliente): string {
-  return c.cliente_nombre ?? c.cliente_rut ?? "(sin identificar)";
+  if (c.cliente_nombre !== null && c.cliente_nombre.trim() !== "") {
+    return envolverEnLinea(c.cliente_nombre);
+  }
+  return c.cliente_rut ?? "(sin identificar)";
 }
 
 /** Suma un mapa moneda -> {total} a la lista de montos en riesgo. */
@@ -377,7 +390,11 @@ function concentracionEnAlza(
         salto_pp: salto,
         hhi_anterior: p.hhi,
         hhi_actual: a.hhi,
-        cliente_lider: lider ? { rut: lider.rut, nombre: lider.nombre } : null,
+        // `cliente_nombre` y no `nombre`: la barrera de salida envuelve por
+        // nombre de clave y `nombre` está afuera a propósito (round-trip a un
+        // borrador). Acá el dato no vuelve a entrar a ningún CFE, así que se
+        // publica bajo la clave que SÍ está cubierta.
+        cliente_lider: lider ? { rut: lider.rut, cliente_nombre: lider.nombre } : null,
       },
     },
   ];

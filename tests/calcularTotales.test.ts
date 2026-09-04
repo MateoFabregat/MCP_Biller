@@ -391,7 +391,7 @@ describe("el preview de confirmación", () => {
     expect(texto.length).toBeLessThan(1024);
     // Y lo que se recorta se DECLARA: un preview que muestra 8 de 20 líneas sin
     // decirlo hace pensar que el comprobante tiene 8.
-    expect(texto).toContain("y 12 ítems más");
+    expect(texto).toContain("12 ítems más que no entran en el mensaje");
     expect(texto).toContain("TOTAL");
     expect(texto).toContain("Hoy 26/08/2026");
   });
@@ -420,6 +420,93 @@ describe("el preview de confirmación", () => {
     expect(texto).toContain("RECEPTOR OBLIGATORIO");
     expect(texto).toContain("TOTAL");
     expect(texto).toContain("Hoy 26/08/2026");
+  });
+
+  // --- Issue 14: el bloque crítico no puede borrar el detalle entero --------
+  //
+  // Subir el aviso de precio ambiguo al bloque crítico (que no se recorta)
+  // tenía un efecto colateral: cuando el mensaje quedaba justo, TODO el
+  // detalle de ítems desaparecía —no unas líneas, cero líneas— y los avisos
+  // sobrantes se perdían sin el "… y N más" que sí tenían los informativos.
+
+  it("con 1 ítem y 6 precios ambiguos, dentro del presupuesto real del preview, se ve la línea del ítem y se declaran los avisos que no entran", () => {
+    // 700 caracteres: un techo del orden del presupuesto real citado por la
+    // issue (1024 del cuerpo de WhatsApp menos el envoltorio, con una razón
+    // social de 150 caracteres) — lo bastante chico para que no entren los 6
+    // avisos de precio ambiguo enteros.
+    const techo = 700;
+    const texto = formatearTotales(
+      calcularTotales(
+        parse({ ...BASE, montos_brutos: 0, items: [{ cantidad: 1, concepto: "Pelota", precio: 200, indicador_facturacion: 3 }] }),
+      ),
+      {
+        fecha_emision: "03/09/2026",
+        forma_pago: 1,
+        hoy: "03/09/2026",
+        montos_brutos: false,
+        max_chars: techo,
+        precios_ambiguos: Array.from({ length: 6 }, (_, i) => ({
+          concepto: `Producto ${i}`,
+          precio: 6.5,
+        })),
+      },
+    );
+
+    expect(texto.length).toBeLessThanOrEqual(techo);
+    expect(texto).toContain("… y 3 aviso");
+    // La línea del único ítem tiene que verse: un preview sin una sola línea
+    // no es un preview.
+    expect(texto).toContain("Pelota");
+    expect(texto).toContain("TOTAL");
+  });
+
+  it("ningún aviso crítico queda cortado a mitad de palabra", () => {
+    const texto = formatearTotales(
+      calcularTotales(
+        parse({ ...BASE, montos_brutos: 0, items: [{ cantidad: 1, concepto: "Pelota", precio: 200, indicador_facturacion: 3 }] }),
+      ),
+      {
+        fecha_emision: "03/09/2026",
+        forma_pago: 1,
+        hoy: "03/09/2026",
+        montos_brutos: false,
+        max_chars: 776,
+        precios_ambiguos: Array.from({ length: 6 }, (_, i) => ({
+          concepto: `Producto ${i}`,
+          precio: 6.5,
+        })),
+      },
+    );
+
+    // El corte viejo (por carácter) terminaba en "…se leyó $0,25 por un…".
+    expect(texto).not.toMatch(/por un…$/m);
+    // Toda línea que termina en "…" es porque el mensaje la declaró como tal
+    // ("… y N aviso(s) más"/"… N ítems más…"), nunca porque se cortó una
+    // palabra a la mitad.
+    for (const linea of texto.split("\n")) {
+      if (linea.endsWith("…")) expect(linea.startsWith("…")).toBe(true);
+    }
+  });
+
+  it("con 20 ítems, receptor obligatorio y 3 precios ambiguos, se ve al menos una línea de ítem y la declaración de los ocultos", () => {
+    const muchos = Array.from({ length: 20 }, (_, i) => ({
+      cantidad: 3,
+      concepto: `Producto con un nombre bastante largo número ${i}`,
+      precio: 1234.56,
+      indicador_facturacion: 3,
+    }));
+    const texto = formatearTotales(calcularTotales(parse({ ...BASE, montos_brutos: 1, items: muchos })), {
+      fecha_emision: "03/09/2026",
+      forma_pago: 1,
+      hoy: "03/09/2026",
+      montos_brutos: true,
+      advertencias_criticas: ["⛔ RECEPTOR OBLIGATORIO: la e-Factura exige receptor identificado."],
+      precios_ambiguos: Array.from({ length: 3 }, (_, i) => ({ concepto: `Producto ${i}`, precio: 6.5 })),
+    });
+
+    expect(texto).toContain("Producto con un nombre");
+    expect(texto).toContain("ítems más que no entran en el mensaje");
+    expect(texto).toContain("TOTAL");
   });
 
   it("un ítem que no aporta al total lo dice en vez de mostrar su importe", () => {

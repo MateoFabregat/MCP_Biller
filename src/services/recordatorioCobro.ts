@@ -35,6 +35,7 @@
 // tool (`src/tools/recordatorioCobro.ts`). Acá solo se arma el contenido.
 // =============================================================================
 
+import { envolverEnLinea } from "../security/untrusted.js";
 import { round2 } from "../biller/coerce.js";
 import type {
   CuentaCorrienteResultado,
@@ -166,7 +167,7 @@ export function construirRecordatorio(
   if (saldoTotal <= 0) {
     return vacio(
       "sin_deuda",
-      `${cliente.cliente_nombre ?? rut} no tiene saldo pendiente en el período consultado. No hay ` +
+      `${envolverEnLinea(cliente.cliente_nombre, rut)} no tiene saldo pendiente en el período consultado. No hay ` +
         "nada que reclamar — mandar un recordatorio igual es la forma más rápida de que el próximo " +
         "se ignore.",
       cliente,
@@ -182,7 +183,7 @@ export function construirRecordatorio(
   if (reclamables.length === 0) {
     return vacio(
       "sin_documentos_vencidos",
-      `${cliente.cliente_nombre ?? rut} tiene saldo pendiente pero nada vencido todavía. Apurar una ` +
+      `${envolverEnLinea(cliente.cliente_nombre, rut)} tiene saldo pendiente pero nada vencido todavía. Apurar una ` +
         "factura que está en plazo es lo que hace que el recordatorio que sí corresponde se lea " +
         "como spam. Si igual querés mandarlo, pedilo con incluir_por_vencer.",
       cliente,
@@ -240,7 +241,12 @@ export function construirRecordatorio(
     lineasTexto.push(opciones.nota.trim(), "");
   }
 
-  const saludo = cliente.cliente_nombre === null ? "Hola," : `Hola ${cliente.cliente_nombre},`;
+  // El nombre lo escribió un tercero y este mensaje lo lee el modelo antes de
+  // que una persona lo apruebe. Va marcado; la marca se cae en `KapsoClient`,
+  // que es la única puerta hacia un teléfono, así que el cliente recibe
+  // "Hola Ferretería López," y el modelo lee el nombre etiquetado como dato.
+  const saludo =
+    cliente.cliente_nombre === null ? "Hola," : `Hola ${envolverEnLinea(cliente.cliente_nombre)},`;
   lineasTexto.push(saludo, "");
   lineasTexto.push(
     reclamables.length === 1

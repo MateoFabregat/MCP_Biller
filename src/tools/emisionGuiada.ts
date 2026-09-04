@@ -70,6 +70,7 @@ import {
   tipoComprobanteSugerido,
   type ClaseReceptor,
   type EstadoEmision,
+  type PasoEmision,
   type PerfilCasa,
 } from "../kapso/emision.js";
 import {
@@ -432,7 +433,12 @@ function aplicarRespuestaDelUsuario(
   // y "sin identificar" se leería contra la pregunta que todavía no vio.
   let r = interpretarPaso(mensaje);
   if (r.paso === "ninguna") {
-    r = interpretarRespuestaLibre(mensaje, siguientePaso(estado).paso);
+    r = interpretarRespuestaLibre(mensaje, siguientePaso(estado).paso, undefined, {
+      // Distingue "¿Dirección y ciudad?" (primera vez) de "¿En qué ciudad?"
+      // (la repregunta): con dirección ya cargada, el mensaje entero es la
+      // ciudad y no hay que volver a partirlo por la coma. Ver issue 21.
+      direccionYaCargada: (estado.direccion_cliente ?? "") !== "",
+    });
   }
   switch (r.paso) {
     case "receptor":
@@ -464,6 +470,12 @@ function aplicarRespuestaDelUsuario(
     case "tasa_cambio":
       estado.tasa_cambio = r.tasa;
       break;
+    case "datos_cliente_nuevo":
+      // `direccion` puede faltar (la repregunta solo trae `ciudad`): cada
+      // campo se escribe si vino, y el otro queda como estaba.
+      if (r.direccion !== undefined) estado.direccion_cliente = r.direccion;
+      if (r.ciudad !== undefined) estado.ciudad_cliente = r.ciudad;
+      break;
     case "fecha_otra":
       // Tocó "otra fecha": no hay dato todavía, solo la intención. El paso
       // sigue siendo "fecha", pero preguntado como texto libre.
@@ -477,6 +489,18 @@ function aplicarRespuestaDelUsuario(
       break;
     case "cantidad":
       aplicarAlItemEnCurso(estado, (item) => (item.cantidad = r.cantidad));
+      break;
+    case "precio":
+      // Se propaga la ambigüedad igual que cuando el precio sale del
+      // extractor (`ItemEnCurso.precio_ambiguo`): es lo que hace aparecer el
+      // aviso en el preview para que el usuario confirme "6.50" antes de
+      // emitir, y no se pierde por haber llegado a mano en vez de en el
+      // mensaje inicial.
+      aplicarAlItemEnCurso(estado, (item) => {
+        item.precio = r.precio;
+        if (r.ambiguo) item.precio_ambiguo = true;
+        else delete item.precio_ambiguo;
+      });
       break;
     case "item_otro":
       // Abrir un ítem vacío ES la forma de decir "seguí preguntando por
@@ -748,22 +772,6 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     // dudosa. Ver `estadoDesdeArgumentos`.
     const { estadoArgs, warnings } = estadoDesdeArgumentos(a);
 
-    // --- El pedido, leído por TypeScript ------------------------------------
-    //
-    // "facturale a Pérez 2 bolsas de portland a 6.500" trae cuatro campos, y
-    // hasta acá el único que los sacaba del texto era el modelo. Eso hacía que
-    // el resultado dependiera de que hubiera copiado bien un número —y
-    // `Number("6.500")` es 6,5—. Ahora el server lo vuelve a leer con
-    // `extraerPedido.ts` y usa lo que saque SOLO PARA LLENAR HUECOS: un campo
-    // que el agente mandó explícito no se toca nunca. Ver `rellenarDesdePedido`.
-    //
-    // Los ids de botón (`emision:*`) no pasan por acá: no son castellano, y
-    // para ellos ya está `interpretarPaso` unas líneas más abajo.
-    const pedido: PedidoEmision | null =
-      a.mensaje === undefined || a.mensaje.trim().startsWith(PREFIJO_PASO)
-        ? null
-        : extraerPedidoEmision(a.mensaje);
-
     // --- El store: lo que ya sabíamos va DEBAJO de lo que llegó ahora --------
     //
     // Este es el cambio que saca al flujo de emisión de encima del contexto del
@@ -787,6 +795,47 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     const guardado = clave === null ? null : store.leer(clave);
     const estado: EstadoEmision =
       guardado === null ? estadoArgs : fusionarEstado(guardado.estado, estadoArgs);
+
+    // --- El pedido, leído por TypeScript ------------------------------------
+    //
+    // "facturale a Pérez 2 bolsas de portland a 6.500" trae cuatro campos, y
+    // hasta acá el único que los sacaba del texto era el modelo. Eso hacía que
+    // el resultado dependiera de que hubiera copiado bien un número —y
+    // `Number("6.500")` es 6,5—. Ahora el server lo vuelve a leer con
+    // `extraerPedido.ts` y usa lo que saque SOLO PARA LLENAR HUECOS: un campo
+    // que el agente mandó explícito no se toca nunca. Ver `rellenarDesdePedido`.
+    //
+    // Los ids de botón (`emision:*`) no pasan por acá: no son castellano, y
+    // para ellos ya está `interpretarPaso` unas líneas más abajo.
+    //
+    // TAMPOCO CORRE EN UN PASO DONDE EL MENSAJE NO PUEDE SER UN PEDIDO
+    // (issue 21). "Av. Italia 1234 apto 302, Montevideo" en el paso de la
+    // dirección del cliente nuevo se leía como cliente "av italia" e ítem
+    // "apto" × 1234 a $302 — con un ítem abierto, eso abre una línea FANTASMA
+    // y avisa "NO emitas hasta cargarlos o descartarlos" sobre plata que
+    // nadie dijo. Un número en el paso de la tasa de cambio, de la fecha o del
+    // vencimiento tiene el mismo problema: no es un precio, es una cotización
+    // o una fecha, y el extractor no sabe distinguirlos porque no sabe qué se
+    // preguntó.
+    //
+    // EL PASO SE MIRA SOBRE EL ESTADO ANTERIOR A APLICAR EL MENSAJE: `estado`
+    // en este punto es la fusión de lo guardado con los argumentos explícitos
+    // de ESTA llamada, pero todavía no vio ni el pedido ni la respuesta libre
+    // — es exactamente "lo que se sabía antes de que llegara este mensaje",
+    // que es la pregunta que el usuario está contestando.
+    const PASOS_SIN_PEDIDO: ReadonlySet<PasoEmision> = new Set([
+      "datos_cliente_nuevo",
+      "tasa_cambio",
+      "fecha",
+      "fecha_vencimiento",
+    ]);
+    const pasoAbierto = siguientePaso(estado).paso;
+    const pedido: PedidoEmision | null =
+      a.mensaje === undefined ||
+      a.mensaje.trim().startsWith(PREFIJO_PASO) ||
+      PASOS_SIN_PEDIDO.has(pasoAbierto)
+        ? null
+        : extraerPedidoEmision(a.mensaje);
 
     // --- "Lo de siempre" (V5.1): prellenar desde la última venta -------------
     //
@@ -998,6 +1047,24 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       a.clientes_frecuentes.length > 0
     ) {
       const lista = construirListaClientes(a.clientes_frecuentes);
+      // UNA FILA QUE NO SE PUEDE TOCAR DESAPARECE, Y ESO HAY QUE DECIRLO.
+      //
+      // `construirListaClientes` descarta a los clientes sin documento porque
+      // el id de la fila ES el documento. El descarte es correcto —una fila que
+      // no resuelve nada es peor que no estar—, pero en silencio el modelo cree
+      // que ofreció cinco clientes y el usuario ve dos. Se avisa acá, donde el
+      // agente puede arreglarlo mandando el RUT que ya tiene.
+      const sinDocumento = a.clientes_frecuentes.filter(
+        (c) => (c.documento ?? "").trim() === "",
+      ).length;
+      if (sinDocumento > 0) {
+        warnings.push(
+          `${sinDocumento} de los clientes frecuentes que pasaste no traen documento, así que NO ` +
+            "aparecen en la lista: la fila se identifica por RUT/CI y sin él el toque no resuelve " +
+            "nada. Volvé a pasarlos con su documento (lo tiene biller_ranking_clientes) o dejá que " +
+            "el usuario entre por “➕ Otro cliente”.",
+        );
+      }
       return await responder({
         a,
         ctx,
@@ -1008,7 +1075,9 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
         interactivo: lista,
         documentoDetectado,
         warnings,
-        sesion: { store, clave, recuperado },
+        // `desdeRevision` 0 cuando no había nada: "leí que no existía". Si al
+        // guardar YA existe, otra llamada lo creó en el medio: se fusiona.
+        sesion: { store, clave, recuperado, desdeRevision: guardado?.revision ?? 0 },
       });
     }
 
@@ -1022,7 +1091,7 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       interactivo,
       documentoDetectado,
       warnings,
-      sesion: { store, clave, recuperado },
+      sesion: { store, clave, recuperado, desdeRevision: guardado?.revision ?? 0 },
     });
   } catch (err) {
     return errorToolResult(err, ctx);
@@ -1100,7 +1169,7 @@ async function responder(p: {
   interactivo: Parameters<KapsoClient["enviarInteractivo"]>[1] | null;
   documentoDetectado: ReturnType<typeof clasificarDocumento> | null;
   warnings: string[];
-  sesion: { store: BorradorStore; clave: string | null; recuperado: string[] };
+  sesion: { store: BorradorStore; clave: string | null; recuperado: string[]; desdeRevision?: number };
 }): Promise<ToolResult> {
   const { a, ctx, estado, siguiente, tipo, pregunta, interactivo, documentoDetectado } = p;
   const warnings = [...p.warnings];
@@ -1128,9 +1197,14 @@ async function responder(p: {
   // preguntar. Entre "ya tengo todo" y el CFE falta el ciclo de confirmación
   // entero, que es justo donde el usuario se va a hacer otra cosa y vuelve
   // diez minutos después.
-  const { store, clave, recuperado } = p.sesion;
+  const { store, clave, recuperado, desdeRevision } = p.sesion;
   let revision: number | null = null;
-  if (clave !== null) revision = store.guardar(clave, estado).revision;
+  // `desdeRevision` es la revisión que se leyó al ENTRAR, antes de los GET
+  // contra la API. Si otra llamada de la misma conversación escribió en el
+  // medio, el store fusiona en vez de pisarla. Ver `BorradorStore.guardar`.
+  if (clave !== null) {
+    revision = store.guardar(clave, estado, { desdeRevision: desdeRevision ?? 0 }).revision;
+  }
 
   let realizado = false;
   let motivo: string | null = null;

@@ -459,22 +459,57 @@ describe("qué preguntar ahora", () => {
     expect(colaVacia.listo).toBe(true);
   });
 
-  it("el texto crudo NO contesta las preguntas de ítem: eso lo manda el agente", () => {
-    // Se probó al revés —ramas de `concepto` y `precio` en
-    // `interpretarRespuestaLibre`— y salió caro: "no sé" y "ni idea" quedaban
-    // impresos como la descripción de una línea de un CFE, "bolsas 25kg" (que
-    // lleva dígitos) trancaba la conversación en silencio, y cada frase que el
-    // flujo usa para otra cosa había que enumerarla a mano. Que el server
-    // parsee castellano es trabajo que el modelo ya hace bien: el camino es que
-    // el agente mande `items: [{ concepto: "bolsas 25kg" }]`.
+  it("el texto crudo NO contesta la pregunta del concepto: eso lo manda el agente", () => {
+    // Se probó al revés —la rama de `concepto` en `interpretarRespuestaLibre`—
+    // y salió caro: "no sé" y "ni idea" quedaban impresos como la descripción
+    // de una línea de un CFE, "bolsas 25kg" (que lleva dígitos) trancaba la
+    // conversación en silencio, y cada frase que el flujo usa para otra cosa
+    // había que enumerarla a mano. Que el server parsee castellano es trabajo
+    // que el modelo ya hace bien: el camino es que el agente mande
+    // `items: [{ concepto: "bolsas 25kg" }]`.
     //
     // Este test fija esa frontera para que no vuelva por accidente. El hueco
     // que deja está anotado en TODO_NEXT.md (P1), con los casos que tendría que
     // aguantar el día que se haga bien.
+    //
+    // EL PRECIO YA NO ESTÁ EN ESTA LISTA (issue 20): un número pelado en el
+    // paso del precio no tiene la misma ambigüedad que un texto en el paso del
+    // concepto — no hay ningún otro campo al que pueda ir. Ver el describe de
+    // más abajo, "el precio escrito se lee".
     for (const texto of ["medialunas", "60", "bolsas 25kg", "no sé"]) {
       expect(interpretarRespuestaLibre(texto, "concepto").paso, texto).toBe("ninguna");
-      expect(interpretarRespuestaLibre(texto, "precio").paso, texto).toBe("ninguna");
     }
+  });
+
+  describe("el precio escrito se lee (issue 20)", () => {
+    it("un número pelado, con o sin signo de peso, fija el precio", () => {
+      for (const [texto, esperado] of [
+        ["6500", 6500],
+        ["6.500", 6500],
+        ["$ 6.500", 6500],
+        ["6500,50", 6500.5],
+      ] as const) {
+        const r = interpretarRespuestaLibre(texto, "precio");
+        expect(r, texto).toMatchObject({ paso: "precio", precio: esperado, ambiguo: false });
+      }
+    });
+
+    it("'6.50' fija 6,50 y marca la ambigüedad", () => {
+      const r = interpretarRespuestaLibre("6.50", "precio");
+      expect(r).toMatchObject({ paso: "precio", precio: 6.5, ambiguo: true });
+    });
+
+    it("una frase con un número adentro no elige: sigue siendo 'ninguna'", () => {
+      for (const texto of ["unos 6500", "eran 3 no 2", "60 pesos cada uno", "2 x 6500"]) {
+        expect(interpretarRespuestaLibre(texto, "precio").paso, texto).toBe("ninguna");
+      }
+    });
+
+    it("cero o negativo no se acepta: la pregunta se repite", () => {
+      for (const texto of ["0", "-500"]) {
+        expect(interpretarRespuestaLibre(texto, "precio").paso, texto).toBe("ninguna");
+      }
+    });
   });
 
   it("un 🗑️ que llega tarde no saca la línea equivocada NI se queda mudo", async () => {

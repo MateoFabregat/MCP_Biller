@@ -50,12 +50,41 @@ export const FAMILIA_ETICKET = new Set([101, 102, 103, 131, 132, 133, 151, 152, 
 export const UMBRAL_UI_RECEPTOR_DEFAULT = 5000;
 
 /**
- * Valor de referencia de la UI en pesos, usado SOLO si no hay uno configurado.
- * Está deliberadamente por lo BAJO respecto de la UI vigente: con un valor bajo
+ * Valor de referencia de la UI en pesos, usado SOLO si no hay uno configurado
+ * o si el configurado no se puede usar (ver `resolverUmbralReceptor`). Está
+ * deliberadamente por lo BAJO respecto de la UI vigente: con un valor bajo
  * el umbral en pesos queda bajo, así que el aviso aparece de más y no de menos.
  * Equivocarse avisando de más cuesta una pregunta; de menos, un CFE mal emitido.
  */
 export const VALOR_UI_REFERENCIA = 6;
+
+/**
+ * Formato aaaa-mm-dd, el único que `BILLER_VALOR_UI_FECHA` puede traer. Sirve
+ * para dos cosas: rechazar un valor que no es ni siquiera una fecha, y poder
+ * restarla contra "hoy" para calcular la antigüedad.
+ */
+const FORMATO_FECHA_UI = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Banda de valores plausibles de la UI en pesos uruguayos. No es una
+ * validación exacta —la UI real se mueve con la inflación y este rango puede
+ * quedar corto dentro de algunos años— pero un valor por fuera es casi
+ * siempre un tipeo: el punto decimal corrido (63 en vez de 6,3, el mismo error
+ * que costó caro en `feedback_resolver_y_plata.md`) o pegar otro número de la
+ * planilla. Ante la duda, un umbral calculado sobre ese número no avisa: emite
+ * mal, y por eso se prefiere ignorarlo y decir por qué.
+ */
+export const VALOR_UI_MIN_PLAUSIBLE = 1;
+export const VALOR_UI_MAX_PLAUSIBLE = 20;
+
+/**
+ * Después de cuántos días sin actualizar, el valor configurado se considera
+ * VENCIDO y se ignora. El INE publica la UI todos los días hábiles: pasadas un
+ * par de semanas, ya no representa el valor de hoy, y usarlo igual —sin
+ * avisar— es exactamente el modo de falla que este chequeo cierra: un e-Ticket
+ * que debía exigir receptor (o no) decidido con el número de hace un mes.
+ */
+export const VALOR_UI_ANTIGUEDAD_MAX_DIAS = 15;
 
 export interface OpcionesUi {
   /** Pesos por Unidad Indexada. Si falta, se usa VALOR_UI_REFERENCIA y se avisa. */
@@ -64,35 +93,112 @@ export interface OpcionesUi {
   valor_ui_fecha?: string;
   /** Umbral en UI. Default 5000. */
   umbral_ui?: number;
+  /**
+   * Hoy, en hora uruguaya (aaaa-mm-dd), SOLO para calcular la antigüedad de
+   * `valor_ui_fecha`. Sale de `services/fechaUy.ts` (`hoyIsoUy()`) — nunca de
+   * `new Date()` acá, que es justo el desfasaje de UTC que ese módulo existe
+   * para evitar. Si se omite, no se puede saber si el valor está vencido y el
+   * chequeo de antigüedad se salta (pero el de formato y el de rango, no).
+   */
+  hoy?: string;
 }
+
+/** Por qué no se usó el valor configurado. `null` si sí se usó, o si nunca se configuró nada. */
+export type ProblemaValorUi = "formato_invalido" | "absurdo" | "vencido" | null;
 
 export interface UmbralReceptor {
   umbral_ui: number;
   valor_ui: number;
-  /** true si el valor de UI salió de configuración; false si es el de referencia. */
+  /** true si el valor de UI configurado se pudo usar tal cual; false si se cayó al de referencia. */
   valor_ui_configurado: boolean;
   valor_ui_fecha: string | null;
   /** Umbral convertido a pesos. */
   umbral_uyu: number;
   nota: string;
+  /** Detalle de por qué no se usó el valor configurado (ver `valor_ui_configurado`). */
+  problema: ProblemaValorUi;
+}
+
+/** Días entre dos fechas aaaa-mm-dd (b - a). `null` si alguna no parsea. */
+function diasEntre(a: string, b: string): number | null {
+  const ta = Date.parse(`${a}T00:00:00Z`);
+  const tb = Date.parse(`${b}T00:00:00Z`);
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return null;
+  return Math.round((tb - ta) / 86_400_000);
 }
 
 export function resolverUmbralReceptor(opciones: OpcionesUi = {}): UmbralReceptor {
   const umbral_ui = opciones.umbral_ui ?? UMBRAL_UI_RECEPTOR_DEFAULT;
-  const configurado = typeof opciones.valor_ui === "number" && opciones.valor_ui > 0;
-  const valor_ui = configurado ? opciones.valor_ui! : VALOR_UI_REFERENCIA;
+
+  // La fecha solo cuenta si tiene el formato que sabemos leer: una fecha
+  // rota (o directamente basura) no se muestra tal cual en la nota, ni se usa
+  // para calcular antigüedad — se trata como si no hubiera fecha.
+  const fechaCruda = opciones.valor_ui_fecha;
+  const fechaValida =
+    fechaCruda !== undefined && FORMATO_FECHA_UI.test(fechaCruda) ? fechaCruda : undefined;
+  const formatoInvalido = fechaCruda !== undefined && fechaValida === undefined;
+
+  const antiguedadDias =
+    fechaValida !== undefined && opciones.hoy !== undefined ? diasEntre(fechaValida, opciones.hoy) : null;
+  const vencido = antiguedadDias !== null && antiguedadDias > VALOR_UI_ANTIGUEDAD_MAX_DIAS;
+
+  const valorCrudo = opciones.valor_ui;
+  const tieneValor = typeof valorCrudo === "number" && Number.isFinite(valorCrudo) && valorCrudo > 0;
+  const dentroDeRango =
+    tieneValor && valorCrudo >= VALOR_UI_MIN_PLAUSIBLE && valorCrudo <= VALOR_UI_MAX_PLAUSIBLE;
+  const absurdo = tieneValor && !dentroDeRango;
+
+  const configurado = dentroDeRango && !vencido;
+  const valor_ui = configurado ? valorCrudo! : VALOR_UI_REFERENCIA;
+  const umbral_uyu = Math.round(umbral_ui * valor_ui);
+
+  const problema: ProblemaValorUi = configurado
+    ? null
+    : absurdo
+      ? "absurdo"
+      : vencido
+        ? "vencido"
+        : formatoInvalido && !tieneValor
+          ? "formato_invalido"
+          : null;
+
+  let nota: string;
+  if (configurado) {
+    nota =
+      `Umbral de ${umbral_ui} UI = $${umbral_uyu} a una UI de $${valor_ui}` +
+      (fechaValida !== undefined ? ` (valor del ${fechaValida}).` : ".");
+  } else if (absurdo) {
+    nota =
+      `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}, IGNORANDO BILLER_VALOR_UI=${valorCrudo} por estar ` +
+      `fuera del rango plausible ($${VALOR_UI_MIN_PLAUSIBLE} a $${VALOR_UI_MAX_PLAUSIBLE}): parece un ` +
+      `tipeo (¿un dígito de más, o el punto decimal corrido?). Se usa el valor de REFERENCIA ` +
+      `($${VALOR_UI_REFERENCIA}) hasta que se corrija.`;
+  } else if (vencido) {
+    nota =
+      `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}: BILLER_VALOR_UI_FECHA (${fechaValida}) tiene ` +
+      `${antiguedadDias} días, más de los ${VALOR_UI_ANTIGUEDAD_MAX_DIAS} que se toleran. El valor ` +
+      `configurado está VENCIDO, así que se ignora y se usa el de REFERENCIA ($${VALOR_UI_REFERENCIA}) ` +
+      "hasta que se actualice.";
+  } else if (formatoInvalido) {
+    nota =
+      `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}, usando un valor de UI de REFERENCIA ` +
+      `($${VALOR_UI_REFERENCIA}) porque BILLER_VALOR_UI_FECHA="${fechaCruda}" no tiene el formato ` +
+      "aaaa-mm-dd: sin una fecha confiable no se puede saber si el valor está vigente.";
+  } else {
+    nota =
+      `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}, usando un valor de UI de REFERENCIA ` +
+      `($${VALOR_UI_REFERENCIA}) porque BILLER_VALOR_UI no está configurado. El valor real lo publica ` +
+      "el INE/DGI y cambia a diario: configuralo para que el umbral sea exacto.";
+  }
+
   return {
     umbral_ui,
     valor_ui,
     valor_ui_configurado: configurado,
-    valor_ui_fecha: opciones.valor_ui_fecha ?? null,
-    umbral_uyu: Math.round(umbral_ui * valor_ui),
-    nota: configurado
-      ? `Umbral de ${umbral_ui} UI = $${Math.round(umbral_ui * valor_ui)} a una UI de $${valor_ui}` +
-        (opciones.valor_ui_fecha !== undefined ? ` (valor del ${opciones.valor_ui_fecha}).` : ".")
-      : `Umbral de ${umbral_ui} UI ≈ $${Math.round(umbral_ui * valor_ui)}, usando un valor de UI de ` +
-        `REFERENCIA ($${VALOR_UI_REFERENCIA}) porque BILLER_VALOR_UI no está configurado. El valor real ` +
-        "lo publica el INE/DGI y cambia a diario: configuralo para que el umbral sea exacto.",
+    valor_ui_fecha: fechaValida ?? null,
+    umbral_uyu,
+    nota,
+    problema,
   };
 }
 

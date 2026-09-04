@@ -75,6 +75,7 @@ export {
 
 export {
   construirConfirmacionEmision,
+  overheadConfirmacionEmision,
   construirConfirmacionAnulacion,
   construirRevisionAnulacion,
   construirDesambiguacion,

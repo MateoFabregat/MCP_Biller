@@ -559,6 +559,12 @@ export interface ValidarComprobanteContexto {
   valor_ui?: number;
   valor_ui_fecha?: string;
   umbral_ui?: number;
+  /**
+   * Hoy, en hora uruguaya (aaaa-mm-dd). Sirve para que `resolverUmbralReceptor`
+   * sepa si `valor_ui_fecha` está VENCIDA. El caller lo saca de
+   * `services/fechaUy.ts` (`hoyIsoUy()`), nunca de `new Date()` acá.
+   */
+  hoy?: string;
 }
 
 export function validarComprobante(
@@ -630,6 +636,7 @@ export function validarComprobante(
       valor_ui: contexto.valor_ui,
       valor_ui_fecha: contexto.valor_ui_fecha,
       umbral_ui: contexto.umbral_ui,
+      hoy: contexto.hoy,
     });
     if (chequeo.exige) {
       warnings.push(

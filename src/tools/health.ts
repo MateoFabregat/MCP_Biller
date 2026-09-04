@@ -10,6 +10,8 @@ import { faltantesParaProduccion } from "../write/gate.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type ConfigInspection } from "../config.js";
 import { SERVER_NAME, SERVER_VERSION } from "../constants.js";
+import { resolverUmbralReceptor } from "../biller/requisitos.js";
+import { hoyIsoUy } from "../services/fechaUy.js";
 import { remitenteVerificado } from "../security/remitentes.js";
 import type { ToolContext } from "./shared.js";
 import {
@@ -161,6 +163,21 @@ function buildWarnings(c: ConfigInspection): string[] {
     );
   }
 
+  // BILLER_VALOR_UI puede estar configurado y AUN ASÍ no ser utilizable: un
+  // tipeo que quedó fuera del rango plausible, o una fecha vencida. Ninguna de
+  // las dos cosas rompe el arranque —se degrada al valor de referencia, como
+  // siempre— pero acá es donde se avisa, sin esperar a que alguien emita un
+  // e-Ticket para enterarse. `resolverUmbralReceptor` es el único lugar que
+  // sabe evaluar esto: no se reimplementa el chequeo acá.
+  const umbralUi = resolverUmbralReceptor({
+    valor_ui: c.valorUi ?? undefined,
+    valor_ui_fecha: c.valorUiFecha ?? undefined,
+    hoy: hoyIsoUy(),
+  });
+  if (c.valorUi !== null && !umbralUi.valor_ui_configurado) {
+    warnings.push(`BILLER_VALOR_UI configurado (${c.valorUi}) no se está usando: ${umbralUi.nota}`);
+  }
+
   if (writeToolsRegistered && c.writeEnabled && c.allowProductionWrites && c.environment === "production") {
     warnings.push(
       "⚠️  ESCRITURA EN PRODUCCIÓN HABILITADA. Cada emisión genera un documento fiscal REAL " +
@@ -175,7 +192,12 @@ function buildWarnings(c: ConfigInspection): string[] {
       auditPersistente: c.auditLogPath !== null,
       idempotenciaFiscalPersistente: c.idempotencyLogPath !== null,
       tieneTopeDeMonto: Object.keys(c.maxMontos).length > 0,
-      valorUiVigente: c.valorUi !== null && c.valorUiFecha !== null,
+      // No es solo "está configurado": un valor absurdo o vencido tampoco
+      // cuenta como vigente, porque `resolverUmbralReceptor` lo va a ignorar
+      // igual que si faltara. Antes esto solo miraba presencia, así que un
+      // BILLER_VALOR_UI con un tipeo pasaba el gate como "listo para
+      // producción" mientras cada emisión real lo descartaba en silencio.
+      valorUiVigente: umbralUi.valor_ui_configurado,
       replayWebhookPersistente: c.webhookReplayLogPath !== null,
       kapso: c.kapso.configurado
         ? {

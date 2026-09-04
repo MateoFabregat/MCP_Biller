@@ -41,6 +41,25 @@ export interface KapsoKeyInput {
   destinatario: string;
   operation: KapsoOutgoingOperation;
   payload: unknown;
+  /**
+   * QUÉ identifica al envío en la ventana de día, cuando no es su texto.
+   *
+   * LA PROMESA QUE ESTO CUMPLE. `biller_recordatorio_cobro` dice, en su
+   * documentación y en su `description`, que no repite el reclamo al mismo
+   * cliente el mismo día. La clave, en cambio, hasheaba el TEXTO del mensaje:
+   * bastaba una `nota` distinta, otra firma de empresa, o que el saldo hubiera
+   * cambiado un peso, para estrenar clave y mandar el segundo reclamo. La
+   * garantía escrita era falsa justo en el caso que el módulo llama "quema una
+   * relación comercial".
+   *
+   * Con `sujeto` (el RUT del deudor) la ventana de día pasa a preguntar lo que
+   * dice preguntar: "¿ya le escribimos HOY a este cliente?", sin importar cómo
+   * quedó redactado el mensaje.
+   *
+   * Solo aplica a la ventana `dia`. En las de reintento la identidad del envío
+   * SÍ es su contenido: un mensaje corregido tiene que poder salir.
+   */
+  sujeto?: string;
 }
 
 /**
@@ -134,7 +153,16 @@ export function clavesSalidaKapso(input: KapsoKeyInput, ahora: number): ClavesSa
   const ventana = ventanaDe(input.operation);
   if (ventana === "sin_reserva") return null;
   if (ventana === "dia") {
-    return { actual: claveSalidaKapso(input, `dia:${hoyIsoUy(new Date(ahora))}`) };
+    // EL TEXTO NO ENTRA EN LA CLAVE DEL DÍA, Y ES A PROPÓSITO.
+    //
+    // Se descarta el payload SIEMPRE, no solo cuando hay `sujeto`. Si dependiera
+    // de que quien llama se acuerde de pasarlo, la garantía volvería a ser una
+    // convención — y la convención ya falló una vez acá: la tool prometía "uno
+    // por cliente por día" mientras la clave hasheaba el mensaje. Sin `sujeto`,
+    // la identidad del envío es el destinatario (que ya está en el material) y
+    // el día. Con `sujeto`, además el deudor concreto.
+    const porSujeto: KapsoKeyInput = { ...input, payload: { sujeto: input.sujeto ?? "(destinatario)" } };
+    return { actual: claveSalidaKapso(porSujeto, `dia:${hoyIsoUy(new Date(ahora))}`) };
   }
   const tramo = Math.floor(ahora / VENTANA_REINTENTO_MS);
   return {

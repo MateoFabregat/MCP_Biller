@@ -26,7 +26,16 @@ function esValido(r: ComprobanteRecibido): boolean {
 
 export interface ProveedorRanking {
   rut_emisor: string | null;
-  /** Razón social, si se resolvió contra DGI. */
+  /**
+   * Razón social, si se resolvió contra DGI. Hoy siempre `null`.
+   *
+   * OJO AL LLENARLO: la clave `nombre` está FUERA de la barrera de salida a
+   * propósito (ver `NO_ENVUELTOS_A_PROPOSITO`), porque los nombres de clientes
+   * vuelven a entrar a un borrador. Un nombre de PROVEEDOR no vuelve a entrar a
+   * nada y es la fuente más hostil que toca este server: lo escribe quien te
+   * factura. Si esto se empieza a poblar, la clave tiene que pasar a una que la
+   * barrera SÍ cubra (`razon_social`), no quedarse como `nombre`.
+   */
   nombre: string | null;
   /** Total comprado por moneda (sin convertir). */
   total_por_moneda: Record<string, number>;

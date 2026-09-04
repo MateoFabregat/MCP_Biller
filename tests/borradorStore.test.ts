@@ -328,7 +328,15 @@ describe("biller_emision_guiada con sesión", () => {
     const r = await llamar(ctx, { reiniciar: true });
     expect(r.paso).toBe("receptor");
     expect(r.estado_entendido.documento).toBeUndefined();
-    expect(r.sesion.revision).toBe(1);
+    // LA REVISIÓN NO VUELVE A EMPEZAR, Y ES A PROPÓSITO.
+    //
+    // Antes daba 1 otra vez. Eso hacía ciega la detección de escrituras
+    // tardías: una llamada que había leído la revisión 1, se fue a esperar la
+    // API, y volvió a guardar mientras el usuario reiniciaba, encontraba otra
+    // revisión 1 y creía que nada había pasado en el medio — así resucitaba la
+    // factura que el usuario acababa de descartar. La revisión ahora es
+    // monotónica por sesión: el borrador nuevo arranca donde terminó el viejo.
+    expect(r.sesion.revision).toBe(2);
   });
 
   it("dos conversaciones distintas no se pisan", async () => {
@@ -813,5 +821,51 @@ describe("la confirmación de precio no positivo se invalida si cambia la línea
     );
     expect(porConcepto[0]!.precio_no_positivo_confirmado).toBeUndefined();
     expect(itemIncompleto(porConcepto[0]!)).toBe(true);
+  });
+});
+
+// =============================================================================
+// La lápida: una llamada que leyó ANTES de un borrado no resucita el borrador.
+//
+// El caso real es un burst de WhatsApp: la llamada A lee el borrador y se va a
+// esperar cinco GET contra la API; mientras tanto el usuario toca ✖️ Cancelar y
+// arranca otra factura; A vuelve y guarda. Sin lápida, A pisaba lo nuevo con lo
+// viejo y la factura cancelada reaparecía a un toque de "Emitir".
+// =============================================================================
+
+describe("borrador cancelado y escritura tardía", () => {
+  it("la escritura que leyó antes del borrado se descarta", () => {
+    const store = new BorradorStoreMemoria();
+    const clave = store.clave("59891234567");
+
+    store.guardar(clave, { nombre_cliente: "Cliente X" } as never);
+    const leidaPorA = store.leer(clave)!.revision;
+
+    store.borrar(clave);
+    store.guardar(clave, { nombre_cliente: "Cliente Y" } as never, { desdeRevision: 0 });
+
+    // A vuelve de la red y guarda sobre la base que leyó antes del borrado.
+    store.guardar(clave, { nombre_cliente: "Cliente X", forma_pago: 1 } as never, {
+      desdeRevision: leidaPorA,
+    });
+
+    const final = store.leer(clave)!.estado as Record<string, unknown>;
+    expect(final.nombre_cliente).toBe("Cliente Y");
+    expect(final.forma_pago).toBeUndefined();
+  });
+
+  it("dos escrituras concurrentes SIN borrado en el medio siguen fusionando", () => {
+    const store = new BorradorStoreMemoria();
+    const clave = store.clave("59891234567");
+
+    // Las dos leyeron "no existe".
+    store.guardar(clave, { montos_brutos: true } as never, { desdeRevision: 0 });
+    store.guardar(clave, { items: [{ concepto: "harina", precio: 6500 }] } as never, {
+      desdeRevision: 0,
+    });
+
+    const final = store.leer(clave)!.estado as Record<string, unknown>;
+    expect(final.montos_brutos).toBe(true);
+    expect((final.items as unknown[]).length).toBe(1);
   });
 });

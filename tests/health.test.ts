@@ -26,6 +26,45 @@ describe("biller_health_check", () => {
     expect(res.structuredContent?.approval_secret_configurado).toBe(false);
   });
 
+  // ISSUE 05: un BILLER_VALOR_UI configurado pero absurdo o vencido no se
+  // avisaba en ningún lado hasta que alguien emitía un e-Ticket. Ahora
+  // health_check lo dice de entrada.
+  it("avisa cuando BILLER_VALOR_UI está configurado pero fuera de rango plausible", () => {
+    const res = handleHealthCheck(
+      {},
+      {
+        inspect: () =>
+          inspectConfig({
+            BILLER_API_BASE_URL: "https://test.biller.uy",
+            BILLER_API_TOKEN: "TOKENSECRETO",
+            BILLER_VALOR_UI: "630", // el tipeo: el punto decimal corrido
+            BILLER_VALOR_UI_FECHA: "2026-09-01",
+          }),
+        verificado: () => true,
+      },
+    );
+    const warnings = res.structuredContent?.warnings as string[];
+    expect(warnings.join(" ")).toMatch(/BILLER_VALOR_UI configurado \(630\) no se está usando/);
+  });
+
+  it("un BILLER_VALOR_UI dentro de rango y con fecha razonable no dispara ese aviso", () => {
+    const res = handleHealthCheck(
+      {},
+      {
+        inspect: () =>
+          inspectConfig({
+            BILLER_API_BASE_URL: "https://test.biller.uy",
+            BILLER_API_TOKEN: "TOKENSECRETO",
+            BILLER_VALOR_UI: "6.3",
+            BILLER_VALOR_UI_FECHA: "2026-09-03",
+          }),
+        verificado: () => true,
+      },
+    );
+    const warnings = res.structuredContent?.warnings as string[];
+    expect(warnings.join(" ")).not.toContain("no se está usando");
+  });
+
   it("status=config_incompleta cuando faltan variables", () => {
     const res = handleHealthCheck({}, { inspect: () => inspectConfig({}), verificado: () => true });
     expect(res.structuredContent?.status).toBe("config_incompleta");

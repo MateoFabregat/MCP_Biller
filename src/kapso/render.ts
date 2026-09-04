@@ -10,7 +10,8 @@
 // (`protocolo.ts`), nunca al revés: el enrutador no importa este módulo.
 // =============================================================================
 
-import type { InteractivoBotones, InteractivoLista } from "./client.js";
+import { LIMITES_INTERACTIVO, type InteractivoBotones, type InteractivoLista } from "./client.js";
+import { recortarSeguro } from "../utils/texto.js";
 import { hoyDgiUy } from "../services/fechaUy.js";
 import { formatearUy, montoConSigno, simboloMoneda } from "../services/importe.js";
 import { opcionesDisponibles, type MenuOpcion, type MenuOpciones } from "./intenciones.js";
@@ -107,7 +108,7 @@ export function construirMenuTexto(opciones: MenuOpciones = {}): string {
  * aprueba y el que se emite podrían no ser el mismo — y el usuario no tendría
  * cómo notarlo.
  */
-export function construirConfirmacionEmision(datos: {
+export interface DatosConfirmacionEmision {
   /** El cuerpo ya formateado: ítems, IVA, total y supuestos. Ver `formatearTotales`. */
   resumen: string;
   cliente?: string;
@@ -116,18 +117,116 @@ export function construirConfirmacionEmision(datos: {
   tipoComprobante?: string;
   ambiente: "test" | "production";
   token: string;
-}): InteractivoBotones {
+}
+
+/**
+ * La ficha de identidad del comprobante: las líneas de arriba y el cierre.
+ *
+ * Se calcula aparte del cuerpo porque hay que poder MEDIRLA sin armar el
+ * mensaje: `overheadConfirmacionEmision` la usa para decirle a
+ * `formatearTotales` cuánto espacio le queda de verdad.
+ */
+function fichaConfirmacion(datos: DatosConfirmacionEmision): { cabeza: string[]; cola: string[] } {
   // El encabezado dice a QUIÉN, y va arriba de todo: el error más caro de una
   // emisión no es el total, es el cliente. Antes el nombre iba después de los
   // números, donde se lee último o no se lee.
   const quien = datos.cliente === undefined || datos.cliente.trim() === "" ? "" : datos.cliente.trim();
-  const encabezado =
-    (datos.tipoComprobante ?? "Comprobante") + (quien === "" ? "" : ` a ${quien}`);
+  const cabeza = [(datos.tipoComprobante ?? "Comprobante") + (quien === "" ? "" : ` a ${quien}`)];
 
-  const lineas = [encabezado];
   const doc = enmascararDocumento(datos.documento);
-  if (doc !== null) lineas.push(doc);
-  lineas.push("", datos.resumen, "", "¿Lo emito?");
+  if (doc !== null) cabeza.push(doc);
+
+  // La fecha, la forma de pago y el criterio de IVA NO se repiten acá: ya van
+  // al pie del resumen (`describirSupuestos`), que es parte de lo que nunca se
+  // recorta. Repetirlos arriba gastaría del mismo presupuesto de 1024 sin
+  // agregar un dato.
+  // LA LÍNEA QUE PONE LA DECISIÓN DONDE VA.
+  //
+  // Quien toca "✅ Emitir" es el que responde por lo que dice el documento, y
+  // eso hay que decirlo en el mismo mensaje donde se toca, no en un manual. No
+  // es una advertencia legal: es información operativa que cambia cómo se lee
+  // lo de arriba. Un CFE no se edita —se anula con una nota de crédito y se
+  // emite de nuevo, y las dos cosas quedan ante DGI—, así que el minuto de
+  // revisar acá vale más que el trámite de después.
+  //
+  // Va en la cola, que es la parte que nunca se recorta.
+  return {
+    cabeza,
+    cola: ["", "Revisá los datos: un CFE emitido no se edita, se corrige con otro documento.", "", "¿Lo emito?"],
+  };
+}
+
+/**
+ * Cuántos caracteres del cuerpo se lleva el envoltorio de la confirmación.
+ *
+ * Quien arma el resumen tiene que restarle esto al límite de WhatsApp. Sin este
+ * número el resumen se armaba contra un techo fijo de 900 que no contemplaba
+ * una razón social de 150 caracteres, y el mensaje terminaba cortado por el
+ * final — o sea, sin el "¿Lo emito?" y sin el último aviso.
+ */
+export function overheadConfirmacionEmision(
+  datos: Omit<DatosConfirmacionEmision, "resumen" | "token" | "ambiente">,
+): number {
+  const { cabeza, cola } = fichaConfirmacion({ ...datos, resumen: "", token: "", ambiente: "test" });
+  // +1 por cada salto de línea, +1 por la línea en blanco entre cabeza y cuerpo.
+  return [...cabeza, "", ...cola].join("\n").length + 1;
+}
+
+export function construirConfirmacionEmision(datos: DatosConfirmacionEmision): InteractivoBotones {
+  const { cabeza, cola } = fichaConfirmacion(datos);
+
+  // ÚLTIMA RED: si el resumen igual no entra, se recorta EL RESUMEN, nunca la
+  // cola. Quien llama debería haber pedido el resumen con el presupuesto de
+  // `overheadConfirmacionEmision`; esto cubre al que no lo hizo. Se corta por
+  // renglón entero y se deja dicho cuántos se cayeron: un preview al que le
+  // faltan líneas sin avisar es peor que uno más corto.
+  const disponible = LIMITES_INTERACTIVO.cuerpo - overheadConfirmacionEmision(datos);
+  let resumen = datos.resumen;
+  if (resumen.length > disponible) {
+    const renglones = resumen.split("\n");
+    let cortados = 0;
+    // SE CAEN ÍTEMS, NUNCA TOTALES. El separador "———" que escribe
+    // `formatearTotales` marca dónde termina el detalle: arriba de él está lo
+    // prescindible, abajo el neto, el IVA y el TOTAL. Sin esta ancla, recortar
+    // "por el medio" podía llevarse justo la línea del TOTAL en un comprobante
+    // con muchas líneas — que es peor que el corte que este bloque arregla.
+    //
+    // EL AVISO SE MIDE DE VERDAD, NUNCA CON UN PLACEHOLDER.
+    //
+    // Medir contra "… (N renglones del detalle no entraron)" (39 caracteres) y
+    // después escribir "… (1 renglón/es del detalle no entraron)" (40) dejaba
+    // pasar un cuerpo un carácter más largo que el techo real: el cliente de
+    // WhatsApp lo recortaba a su vez, por el final, y "¿Lo emito?" quedaba
+    // afuera del mensaje. Acá se arma el aviso CON EL NÚMERO QUE VA A LLEVAR y
+    // se compara contra ese largo, no contra una estimación.
+    for (;;) {
+      if (cortados > 0) {
+        const avisoReal = `… (${cortados} renglón/es del detalle no entraron)`;
+        if (renglones.join("\n").length + avisoReal.length + 1 <= disponible) break;
+      }
+      if (renglones.length <= 2) break;
+      const sep = renglones.indexOf("———");
+      let objetivo = sep > 1 ? sep - 1 : Math.floor(renglones.length / 2);
+      if (objetivo < 0) break;
+      // LA DECLARACIÓN DE LOS ÍTEMS OCULTOS ES INFORMACIÓN, NO RELLENO.
+      //
+      // `formatearTotales` escribe "… N ítems más que no entran en el mensaje"
+      // como el renglón inmediatamente antes del separador — o sea, es
+      // candidato natural a `objetivo`. Borrarlo reemplaza la única frase que
+      // avisa que el TOTAL incluye ítems que la persona nunca vio por "1
+      // renglón no entró", que dice menos con más caracteres. Si el candidato
+      // empieza con "… ", se saca el de arriba en su lugar.
+      if (renglones[objetivo]?.startsWith("… ") && objetivo > 0) objetivo -= 1;
+      renglones.splice(objetivo, 1);
+      cortados += 1;
+    }
+    resumen =
+      cortados === 0
+        ? recortarSeguro(resumen, disponible, "…")
+        : `${renglones.join("\n")}\n… (${cortados} renglón/es del detalle no entraron)`;
+  }
+
+  const lineas = [...cabeza, "", resumen, ...cola];
 
   return {
     tipo: "botones",

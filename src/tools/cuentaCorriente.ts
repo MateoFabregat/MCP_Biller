@@ -16,9 +16,17 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { round2 } from "../biller/coerce.js";
 import { correrCuentaCorriente } from "../services/corridaCuentaCorriente.js";
-import { ESTRATEGIAS, ORIGENES_IMPUTACION } from "../services/cuentaCorriente.js";
-import { BUCKETS } from "../services/vencimientos.js";
+import {
+  ESTRATEGIAS,
+  ORIGENES_IMPUTACION,
+  type CuentaCorrienteResultado,
+  type DocumentoDeuda,
+  type MontoPorMoneda,
+  type SaldoCliente,
+} from "../services/cuentaCorriente.js";
+import { BUCKETS, esVencido, etiquetaBucket, type Bucket } from "../services/vencimientos.js";
 import {
   READ_ONLY_ANNOTATIONS,
   applyLimit,
@@ -73,11 +81,23 @@ const inputShape = {
     .default(false)
     .describe("Incluir en el detalle las facturas ya cobradas por completo (default false)."),
   sucursal: z.string().optional().describe("Filtra la consulta a una sola sucursal (ID de Biller)."),
-  moneda: z.string().optional().describe("Filtro LOCAL por moneda (ej: UYU, USD)."),
+  moneda: z
+    .string()
+    .optional()
+    .describe(
+      "Filtro LOCAL por moneda (ej: UYU, USD). Se aplica DESPUÉS de imputar (necesita ver los cobros " +
+        "de todas las monedas primero), pero TODOS los agregados de la respuesta (saldos, buckets, " +
+        "cobranzas, totales) se recalculan sobre esa moneda: no arrastran las demás.",
+    ),
   cliente_rut: z
     .string()
     .optional()
-    .describe("Filtro LOCAL por RUT. Ojo: acota también los cobros, así que se aplica DESPUÉS de imputar."),
+    .describe(
+      "Filtro LOCAL por RUT. Se aplica DESPUÉS de imputar (necesita ver los cobros de toda la cartera " +
+        "primero para saber qué le corresponde a este cliente), pero TODOS los agregados de la " +
+        "respuesta (saldos, buckets, cobranzas, totales) se recalculan sobre este cliente: no traen la " +
+        "deuda de toda la cartera.",
+    ),
   limit: z
     .number()
     .int()
@@ -184,6 +204,103 @@ const outputShape = {
   no_convertir_moneda: z.literal(true),
 };
 
+// =============================================================================
+// Recálculo de agregados cuando `cliente_rut` o `moneda` filtran la respuesta.
+//
+// El servicio calcula TODO sobre la cartera completa (tiene que: imputar un
+// cobro necesita ver las facturas de todos los clientes). Pero lo que se
+// PUBLICA cuando alguien pregunta "¿cuánto me debe Pérez?" no puede seguir
+// siendo el total de la cartera solo porque `documentos` y `por_cliente` sí
+// se filtraron. Doctrina del proyecto: un número que no corresponde a lo que
+// se preguntó es peor que ningún número.
+//
+// Cada función de acá recalcula UN agregado a partir de lo YA filtrado
+// (`por_cliente` o `documentos`), nunca releyendo `resultado` sin filtrar.
+// =============================================================================
+
+/** Suma un campo MontoPorMoneda de `por_cliente` (ya filtrado), restringido a `moneda` si vino. */
+function sumarMontosPorCliente(
+  clientes: SaldoCliente[],
+  campo: "saldo_por_moneda" | "vencido_por_moneda",
+  moneda: string | undefined,
+): Record<string, MontoPorMoneda> {
+  const out: Record<string, MontoPorMoneda> = {};
+  for (const cliente of clientes) {
+    for (const [m, v] of Object.entries(cliente[campo])) {
+      if (moneda !== undefined && m !== moneda) continue;
+      const b = (out[m] ??= { total: 0, comprobantes: 0 });
+      b.total = round2(b.total + v.total);
+      b.comprobantes += v.comprobantes;
+    }
+  }
+  return out;
+}
+
+/** Suma un campo numérico de `por_cliente` (ya filtrado), restringido a `moneda` si vino. */
+function sumarNumerosPorCliente(
+  clientes: SaldoCliente[],
+  campo: "saldo_a_favor_por_moneda" | "facturado_por_moneda" | "cobrado_por_moneda",
+  moneda: string | undefined,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const cliente of clientes) {
+    for (const [m, v] of Object.entries(cliente[campo])) {
+      if (moneda !== undefined && m !== moneda) continue;
+      out[m] = round2((out[m] ?? 0) + v);
+    }
+  }
+  return out;
+}
+
+/**
+ * `por_vencer` no se guarda por cliente, pero se deduce sin error: todo saldo
+ * pendiente (`saldo_por_moneda`) cae en exactamente una de las dos bolsas,
+ * vencido o por vencer, así que por_vencer = saldo - vencido, moneda a moneda.
+ */
+function porVencerDesdeSaldoYVencido(
+  saldoPorMoneda: Record<string, MontoPorMoneda>,
+  vencidoPorMoneda: Record<string, MontoPorMoneda>,
+): Record<string, MontoPorMoneda> {
+  const out: Record<string, MontoPorMoneda> = {};
+  for (const [m, saldo] of Object.entries(saldoPorMoneda)) {
+    const vencido = vencidoPorMoneda[m] ?? { total: 0, comprobantes: 0 };
+    out[m] = {
+      total: round2(saldo.total - vencido.total),
+      comprobantes: saldo.comprobantes - vencido.comprobantes,
+    };
+  }
+  return out;
+}
+
+/**
+ * Recalcula `resumen_por_bucket` desde los documentos ya filtrados. No hay
+ * desglose por bucket en `por_cliente`, así que esto sí necesita iterar
+ * documentos — pero son los documentos YA filtrados por cliente/moneda, nunca
+ * los de toda la cartera.
+ */
+function recalcularResumenPorBucket(
+  documentos: DocumentoDeuda[],
+): CuentaCorrienteResultado["resumen_por_bucket"] {
+  const bucketsMap = new Map<Bucket, CuentaCorrienteResultado["resumen_por_bucket"][number]>();
+  for (const d of documentos) {
+    if (d.saldo <= 0 || d.bucket === null) continue;
+    const vencida = esVencido(d.bucket);
+    const resumen = bucketsMap.get(d.bucket) ?? {
+      bucket: d.bucket,
+      etiqueta: etiquetaBucket(d.bucket),
+      vencida,
+      totales_por_moneda: {},
+      conteo: 0,
+    };
+    const b = (resumen.totales_por_moneda[d.moneda] ??= { total: 0, comprobantes: 0 });
+    b.total = round2(b.total + d.saldo);
+    b.comprobantes += 1;
+    resumen.conteo += 1;
+    bucketsMap.set(d.bucket, resumen);
+  }
+  return [...bucketsMap.values()].sort((a, b) => Number(b.vencida) - Number(a.vencida));
+}
+
 export async function handleCuentaCorriente(
   args: unknown,
   ctx: ToolContext,
@@ -208,7 +325,35 @@ export async function handleCuentaCorriente(
       a.cliente_rut === undefined
         ? resultado.por_cliente
         : resultado.por_cliente.filter((c) => c.cliente_rut === a.cliente_rut);
+    const cobranzas = resultado.cobranzas.filter((c) => coincide(c.cliente_rut, c.moneda));
     const limitado = applyLimit(documentos, a.limit);
+
+    // Sin filtro, los agregados de `resultado` YA son los de toda la cartera:
+    // no hay nada que recalcular y no tocarlos evita cualquier divergencia con
+    // el comportamiento de hoy (ver AC "sin filtro, todo sigue igual").
+    const filtroActivo = a.cliente_rut !== undefined || a.moneda !== undefined;
+
+    const saldoPorMoneda = filtroActivo
+      ? sumarMontosPorCliente(porCliente, "saldo_por_moneda", a.moneda)
+      : resultado.saldo_por_moneda;
+    const vencidoPorMoneda = filtroActivo
+      ? sumarMontosPorCliente(porCliente, "vencido_por_moneda", a.moneda)
+      : resultado.vencido_por_moneda;
+    const porVencerPorMoneda = filtroActivo
+      ? porVencerDesdeSaldoYVencido(saldoPorMoneda, vencidoPorMoneda)
+      : resultado.por_vencer_por_moneda;
+    const saldoAFavorPorMoneda = filtroActivo
+      ? sumarNumerosPorCliente(porCliente, "saldo_a_favor_por_moneda", a.moneda)
+      : resultado.saldo_a_favor_por_moneda;
+    const resumenPorBucket = filtroActivo
+      ? recalcularResumenPorBucket(documentos)
+      : resultado.resumen_por_bucket;
+    const totales = filtroActivo
+      ? {
+          facturado_por_moneda: sumarNumerosPorCliente(porCliente, "facturado_por_moneda", a.moneda),
+          cobrado_por_moneda: sumarNumerosPorCliente(porCliente, "cobrado_por_moneda", a.moneda),
+        }
+      : resultado.totales;
 
     return jsonResult({
       hoy: hoyIso,
@@ -226,15 +371,15 @@ export async function handleCuentaCorriente(
       },
       estrategia: resultado.estrategia,
       imputacion_exacta: resultado.imputacion_exacta,
-      saldo_por_moneda: resultado.saldo_por_moneda,
-      vencido_por_moneda: resultado.vencido_por_moneda,
-      por_vencer_por_moneda: resultado.por_vencer_por_moneda,
-      saldo_a_favor_por_moneda: resultado.saldo_a_favor_por_moneda,
-      resumen_por_bucket: resultado.resumen_por_bucket,
+      saldo_por_moneda: saldoPorMoneda,
+      vencido_por_moneda: vencidoPorMoneda,
+      por_vencer_por_moneda: porVencerPorMoneda,
+      saldo_a_favor_por_moneda: saldoAFavorPorMoneda,
+      resumen_por_bucket: resumenPorBucket,
       por_cliente: porCliente,
       documentos: limitado.list,
-      cobranzas: resultado.cobranzas,
-      totales: resultado.totales,
+      cobranzas,
+      totales,
       conteo: { ...resultado.conteo },
       excluidos: { ...resultado.excluidos },
       ventanas_consultadas: corrida.ventanas,

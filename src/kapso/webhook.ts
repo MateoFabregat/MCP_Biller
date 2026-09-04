@@ -64,11 +64,63 @@ import { normalizarTelefono } from "../config.js";
 import type { BorradorStore } from "./borradorStore.js";
 import { interpretarMensaje, type Interpretacion } from "./menu.js";
 
-/** Header con el que Meta (y Kapso, que lo reenvía) firma el cuerpo. */
+/**
+ * Los DOS headers con los que puede venir la firma del cuerpo, en orden de
+ * preferencia.
+ *
+ * POR QUÉ SON DOS, Y POR QUÉ ESTO ERA UN BUG MUDO.
+ *
+ * `x-hub-signature-256` es el header de Meta, y es el que llega cuando el
+ * webhook se conecta directo contra la Cloud API. Pero un webhook registrado
+ * por la API de plataforma de Kapso —que es el camino multi-empresa, el mismo
+ * que hace falta para dar de alta a las demás empresas de Biller— viene firmado
+ * por Kapso con `X-Webhook-Signature`: HMAC-SHA256 en hexadecimal, sin el
+ * prefijo `sha256=`, sobre los BYTES CRUDOS del cuerpo (verificado el
+ * 2026-09-03 contra docs.kapso.ai/docs/platform/webhooks/security).
+ *
+ * Leyendo solo el primero, un evento firmado por Kapso llega sin firma
+ * reconocible, se responde 401 y el chat queda MUDO — el peor modo de falla de
+ * este proyecto, y el más difícil de diagnosticar porque el log dice
+ * "firma_invalida" y todo lo demás parece estar bien.
+ *
+ * Aceptar los dos nombres NO afloja nada: el secreto sigue siendo el mismo y la
+ * firma se sigue calculando sobre el mismo cuerpo crudo. Lo único que cambia es
+ * de qué renglón del header se lee el hexadecimal.
+ */
+export const HEADERS_FIRMA = ["x-webhook-signature", "x-hub-signature-256"] as const;
+
+/** El header histórico. Se conserva porque lo usan los tests y la doc. */
 export const HEADER_FIRMA = "x-hub-signature-256";
 
 /** Tope del cuerpo aceptado. Un webhook de WhatsApp entra holgado en 1 MB. */
 export const MAX_BODY_BYTES = 1024 * 1024;
+
+/**
+ * EL TECHO DEL TEXTO ENTRANTE LO PONE EL SERVER, NO META (issue 12).
+ *
+ * `normalizarEvento` copiaba `text.body` sin cap —hasta 1 MB, el tope de
+ * `MAX_BODY_BYTES`— y se lo pasaba tal cual a `interpretarMensaje`, que es
+ * SÍNCRONO. Medido: un mensaje de 1 MB bloquea el event loop casi 6
+ * segundos, y durante esos segundos no se atiende a nadie más.
+ *
+ * WhatsApp real ya corta un mensaje de texto en 4096 caracteres —por eso la
+ * severidad es baja: para llegar acá hace falta firma válida y remitente
+ * autorizado, y el cliente oficial nunca manda más—, pero "hoy el techo lo
+ * pone Meta" es exactamente el supuesto que no hay que dejar en pie: un
+ * remitente autorizado que use la Cloud API directo, sin el cliente oficial
+ * de por medio, puede mandar cualquier cosa que entre en el `MAX_BODY_BYTES`
+ * del cuerpo entero.
+ */
+export const MAX_TEXTO_ENTRANTE = 4096;
+
+/**
+ * Los ids de botón y de fila NO son texto libre —los emitimos nosotros—, pero
+ * llegan de vuelta en el mismo campo (`texto`) y por el mismo camino
+ * síncrono, así que se cortan con los límites reales de la Cloud API: 256
+ * caracteres para el id de un botón, 200 para el id de una fila de lista.
+ */
+export const MAX_ID_BOTON = 256;
+export const MAX_ID_FILA = 200;
 
 /** Tipos de evento que sabemos leer. El resto se ignora con 200. */
 export type TipoEventoKapso = "texto" | "boton" | "lista" | "estado" | "no_soportado";
@@ -117,6 +169,41 @@ export function firmaValida(cuerpoCrudo: string, header: string | undefined, sec
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * Saca la firma de los headers de una request, mire por donde mire.
+ *
+ * Devuelve TODAS las candidatas y no la primera: si un proxy agrega un header
+ * vacío, quedarse con él descartaría la firma buena que venía en el otro.
+ */
+export function firmasDeHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): string[] {
+  const out: string[] = [];
+  for (const nombre of HEADERS_FIRMA) {
+    const bruto = headers[nombre];
+    const valor = Array.isArray(bruto) ? bruto[0] : bruto;
+    if (typeof valor === "string" && valor.trim() !== "") out.push(valor);
+  }
+  return out;
+}
+
+/**
+ * true si ALGUNA de las firmas presentes es válida.
+ *
+ * "Alguna" y no "todas": los dos headers son el mismo HMAC sobre el mismo
+ * cuerpo con el mismo secreto, así que producir uno válido ya exige conocer el
+ * secreto. Exigir que coincidan los dos solo agregaría formas de quedar mudo.
+ */
+export function algunaFirmaValida(
+  cuerpoCrudo: string,
+  headers: Record<string, string | string[] | undefined>,
+  secreto: string,
+): boolean {
+  const firmas = firmasDeHeaders(headers);
+  if (firmas.length === 0) return false;
+  return firmas.some((f) => firmaValida(cuerpoCrudo, f, secreto));
+}
+
 /** Firma un cuerpo con el formato que espera `firmaValida`. Para tests y para documentar. */
 export function firmar(cuerpoCrudo: string, secreto: string): string {
   return `sha256=${createHmac("sha256", secreto).update(cuerpoCrudo, "utf8").digest("hex")}`;
@@ -130,6 +217,21 @@ function primerObjeto(valor: unknown): Record<string, unknown> | null {
 
 function texto(valor: unknown): string | null {
   return typeof valor === "string" && valor.trim() !== "" ? valor : null;
+}
+
+/**
+ * Corta un texto al máximo indicado, ANTES de que le llegue a
+ * `interpretarMensaje` (síncrono). Ver `MAX_TEXTO_ENTRANTE`.
+ *
+ * Se corta por UNIDADES DE CÓDIGO UTF-16 (`.slice`, no bytes): es lo mismo
+ * que hace WhatsApp al contar "caracteres", y cortar a mitad de un par
+ * subrogado (un emoji de dos unidades) es un riesgo menor comparado con
+ * bloquear el proceso — la parte cortada de más, en el peor caso, es un solo
+ * carácter mal formado al final de una lista que igual no iba a matchear
+ * nada por ese pedacito.
+ */
+function recortar(valor: string | null, max: number): string | null {
+  return valor === null || valor.length <= max ? valor : valor.slice(0, max);
 }
 
 /**
@@ -196,7 +298,7 @@ export function normalizarEvento(payload: unknown): EventoEntrante {
 
   if (mensaje.type === "text") {
     const t = mensaje.text as Record<string, unknown> | undefined;
-    return { ...base, tipo: "texto", texto: texto(t?.body) };
+    return { ...base, tipo: "texto", texto: recortar(texto(t?.body), MAX_TEXTO_ENTRANTE) };
   }
 
   if (mensaje.type === "interactive") {
@@ -206,8 +308,8 @@ export function normalizarEvento(payload: unknown): EventoEntrante {
     // Lo que se interpreta es el ID, no el título: el id lo emitimos nosotros y
     // es lo que el enrutador sabe leer. El título es texto para humanos y puede
     // repetirse entre opciones.
-    if (boton !== undefined) return { ...base, tipo: "boton", texto: texto(boton.id) };
-    if (fila !== undefined) return { ...base, tipo: "lista", texto: texto(fila.id) };
+    if (boton !== undefined) return { ...base, tipo: "boton", texto: recortar(texto(boton.id), MAX_ID_BOTON) };
+    if (fila !== undefined) return { ...base, tipo: "lista", texto: recortar(texto(fila.id), MAX_ID_FILA) };
   }
 
   // Audio, imagen, ubicación, sticker: llegan y no los sabemos leer todavía.
@@ -232,6 +334,15 @@ const VIAS_AUTORESPONDIBLES: ReadonlySet<Interpretacion["via"]> = new Set([
   "no_disponible",
   "desconocido",
 ]);
+
+/**
+ * Lo que contesta una cancelación ESCRITA ("pará", "cancelá", "dejá") cuando
+ * hay un borrador vivo. Texto exacto del issue 18: es lo único que ve el
+ * usuario, así que no lo redacta el agente.
+ */
+const TEXTO_CANCELACION_EN_FLUJO =
+  "Listo, dejé la factura sin hacer y no emití nada. Si querés arrancar otra, tocá " +
+  '"Emitir un comprobante" o escribime "menú".';
 
 export type DecisionWebhook =
   | { accion: "ignorar"; motivo: string }
@@ -273,8 +384,14 @@ export interface DecidirOpciones {
 /**
  * Decide qué hacer con un evento ya normalizado y ya autenticado por firma.
  *
- * Es una función pura: no manda mensajes ni llama a Biller. Quien la usa decide
- * si ejecuta la decisión — y así el ruteo se puede testear entero sin red.
+ * NO MANDA MENSAJES NI LLAMA A BILLER — esa parte de la decisión 2 del
+ * encabezado sigue entera. La única mutación que hace es borrar un borrador
+ * PROPIO cuando la cancelación escrita ("pará", "cancelá") llega con un
+ * borrador vivo (issue 18): es la misma lectura de estado propio que ya
+ * justifica `borradores` más arriba, llevada un paso más — borrar lo que este
+ * mismo server guardó no es ni tocar plata ni escribir en Biller. Fuera de
+ * ese caso puntual, sigue siendo determinística: mismo evento, misma
+ * decisión.
  */
 export function decidirWebhook(evento: EventoEntrante, opciones: DecidirOpciones): DecisionWebhook {
   if (evento.tipo === "estado") {
@@ -323,6 +440,26 @@ export function decidirWebhook(evento: EventoEntrante, opciones: DecidirOpciones
     capabilityMode: opciones.capabilityMode,
     en_flujo: enFlujo,
   });
+
+  // CANCELACIÓN ESCRITA CON BORRADOR VIVO: EL WEBHOOK LA RESUELVE SOLO.
+  //
+  // Fuera de flujo, `cancelacion` sigue sin estar en `VIAS_AUTORESPONDIBLES`
+  // y se delega siempre: el agente puede tener otra confirmación pendiente
+  // (un recibo, por ejemplo) que no es cosa nuestra cancelar sin verla. Pero
+  // con un borrador vivo el webhook YA SABE qué hay pendiente —es una emisión
+  // guiada, la misma que le permite leer `enFlujo`— y contestar "no entendí"
+  // o delegar a un agente que no la va a resolver bien es el callejón que
+  // encontró la auditoría del flujo (docs/FLUJO_WHATSAPP.md §2.6, Z1).
+  if (interpretacion.via === "cancelacion" && enFlujo && opciones.borradores !== undefined) {
+    opciones.borradores.borrar(opciones.borradores.clave(evento.from));
+    return {
+      accion: "responder",
+      from: evento.from,
+      interpretacion,
+      respuesta: TEXTO_CANCELACION_EN_FLUJO,
+      mostrar_menu: false,
+    };
+  }
 
   if (VIAS_AUTORESPONDIBLES.has(interpretacion.via)) {
     return {

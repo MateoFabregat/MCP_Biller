@@ -81,7 +81,13 @@ export interface BorradorGuardado {
   estado: EstadoEmision;
   /** ISO. Cuándo se tocó por última vez. Manda para el TTL. */
   actualizado: string;
-  /** Cuántas veces se guardó. Solo para diagnóstico. */
+  /**
+   * Cuántas veces se guardó.
+   *
+   * Dejó de ser solo diagnóstico: es el número que `guardar` compara para
+   * detectar que otra llamada escribió mientras esta pensaba. Ver
+   * `guardar(…, { desdeRevision })`.
+   */
   revision: number;
 }
 
@@ -98,7 +104,15 @@ export interface BorradorStore {
   clave(bruto: string): string;
   /** El borrador vivo de esa sesión, o null si no hay o si venció. */
   leer(sesion: string): BorradorGuardado | null;
-  guardar(sesion: string, estado: EstadoEmision): BorradorGuardado;
+  /**
+   * Guarda el estado.
+   *
+   * `desdeRevision` es la revisión que quien llama LEYÓ antes de armar
+   * `estado`. Si en el medio hubo otra escritura, el store fusiona en vez de
+   * pisar. Omitirlo conserva el comportamiento viejo (pisar), que es lo
+   * correcto para quien no leyó nada antes.
+   */
+  guardar(sesion: string, estado: EstadoEmision, opciones?: { desdeRevision?: number }): BorradorGuardado;
   /** Se llama cuando el flujo termina (emitido o abandonado a propósito). */
   borrar(sesion: string): void;
   /** Cuántas sesiones vivas hay. Para `biller_metricas` y los tests. */
@@ -280,6 +294,35 @@ export function fusionarItems(
 /** Lo normal: el proceso vive más que la conversación. */
 export class BorradorStoreMemoria implements BorradorStore {
   protected readonly borradores = new Map<string, BorradorGuardado>();
+  /**
+   * Lápidas: sesión interna → revisión que tenía el borrador al momento de
+   * borrarse (0 si nunca llegó a existir en memoria).
+   *
+   * EXISTE PARA DISTINGUIR "OTRA LLAMADA ESCRIBIÓ" DE "EL USUARIO DESCARTÓ ESTO".
+   *
+   * Caso real: la llamada A lee el borrador (revisión 1), se va a esperar la
+   * API. El usuario cancela — `borrar` deja la sesión sin nada — y arranca de
+   * nuevo con otro cliente, que vuelve a guardarse con revisión 2 (monotónica,
+   * ver `guardar`). Cuando A por fin vuelve y guarda con `desdeRevision: 1`,
+   * SIN esta lápida no hay forma de notar que hubo un borrado en el medio: la
+   * revisión leída (1) ya no coincide con la actual (2) de cualquier forma, así
+   * que el store la trataría como el caso de fusión concurrente de siempre —y
+   * fusionaría los datos que el usuario acaba de cancelar sobre los nuevos.
+   *
+   * NO SE BORRA AL GUARDAR ENCIMA, Y ES A PROPÓSITO. Como la revisión es
+   * monotónica y nunca vuelve para atrás, cualquier `desdeRevision` posterior al
+   * borrado real siempre va a ser MAYOR que la lápida (la sigue la revisión que
+   * dejó el guardado nuevo, que ya arrancó en `lapida + 1`). Es decir: la
+   * comparación `lapida >= desdeRevision` solo puede dar verdadero para una
+   * lectura hecha ANTES del borrado, sin importar cuántos guardados legítimos
+   * pasaron después. Borrarla en el primer guardado posterior reabriría
+   * exactamente el agujero que esto vino a cerrar (ver el test de la llamada
+   * tardía en `tests/borradorStore.test.ts`).
+   *
+   * El costo es memoria: una entrada por sesión que alguna vez se borró, para
+   * siempre. Se acota igual que `borradores`, ver `desalojar`.
+   */
+  protected readonly lapidas = new Map<string, number>();
   protected readonly ahora: () => Date;
   /** El secreto de la empresa con el que se sala la clave. "" = sin identidad. */
   private readonly sal: string;
@@ -344,13 +387,78 @@ export class BorradorStoreMemoria implements BorradorStore {
     return guardado;
   }
 
-  guardar(sesionCruda: string, estado: EstadoEmision): BorradorGuardado {
+  /**
+   * LA CARRERA QUE ESTO CIERRA.
+   *
+   * Dos mensajes de WhatsApp seguidos son dos llamadas superpuestas a
+   * `biller_emision_guiada`. Cada una lee el borrador, se va a esperar cinco
+   * GET contra la API para resolver el cliente, y recién entonces guarda. La
+   * segunda guardaba sobre la base que había leído ANTES de que la primera
+   * escribiera: la respuesta más nueva del usuario desaparecía y el flujo le
+   * volvía a preguntar lo mismo. En el orden inverso desaparecían los ítems ya
+   * dictados.
+   *
+   * La ventana no es teórica: es todo lo que tarda la API, y un burst de dos
+   * mensajes en WhatsApp es lo más común del mundo.
+   *
+   * Se resuelve releyendo AL GUARDAR y fusionando con lo que haya ahora:
+   * gana el valor más nuevo campo por campo, y ningún campo que el otro haya
+   * escrito se pierde por no estar en nuestra copia vieja.
+   *
+   * ESO SÍ: LA BASE DESCARTADA PIERDE, NO GANA EL ÚLTIMO. Si entre la lectura
+   * de quien llama y este guardado el usuario BORRÓ el borrador (canceló, o
+   * `reiniciar=true`), lo que leyó quien llama ya no describe nada vivo. Fusionar
+   * igual resucitaría exactamente lo que el usuario descartó. Ver la lápida más
+   * abajo, y el comentario de `lapidas` en la clase.
+   */
+  guardar(
+    sesionCruda: string,
+    estado: EstadoEmision,
+    opciones: { desdeRevision?: number } = {},
+  ): BorradorGuardado {
     const previo = this.leer(sesionCruda);
     const sesion = this.interna(sesionCruda);
+    const desdeRevision = opciones.desdeRevision;
+    const lapida = this.lapidas.get(sesion);
+
+    // ESCRITURA TARDÍA SOBRE ALGO QUE EL USUARIO YA DESCARTÓ.
+    //
+    // `desdeRevision > 0` dice "quien llama leyó un borrador real antes de
+    // armar `estado`". Si para cuando guarda no hay nada vivo (se borró todo)
+    // O la lápida es igual o posterior a lo que leyó, esa lectura quedó vieja:
+    // el borrado pasó DESPUÉS de que leyó y ANTES de que escribiera. No se
+    // guarda —ni se fusiona, que sería resucitar lo descartado— y se devuelve
+    // el estado actual tal cual está.
+    if (desdeRevision !== undefined && desdeRevision > 0 &&
+      (previo === null || (lapida !== undefined && lapida >= desdeRevision))) {
+      logger.info("borrador.escritura_tardia_descartada", {
+        desde_revision: desdeRevision,
+        lapida: lapida ?? null,
+        habia_borrador_vivo: previo !== null,
+      });
+      return previo ?? { estado: {}, actualizado: this.ahora().toISOString(), revision: lapida ?? 0 };
+    }
+
+    const hubo0tro =
+      desdeRevision !== undefined &&
+      previo !== null &&
+      previo.revision !== desdeRevision;
+    const efectivo = hubo0tro ? fusionarEstado(previo.estado, estado) : estado;
+    if (hubo0tro) {
+      logger.info("borrador.fusion_concurrente", {
+        revision_leida: desdeRevision ?? null,
+        revision_actual: previo?.revision ?? null,
+      });
+    }
+
     const guardado: BorradorGuardado = {
-      estado,
+      estado: efectivo,
       actualizado: this.ahora().toISOString(),
-      revision: (previo?.revision ?? 0) + 1,
+      // Monotónica: sigue desde la lápida si la sesión venía de un borrado, no
+      // desde 0. Sin esto, el primer guardado tras un `borrar` volvía a numerar
+      // desde 1 y una lectura vieja con `desdeRevision: 1` coincidía por
+      // casualidad con la revisión "nueva" — el mismo agujero que esto cierra.
+      revision: (previo?.revision ?? lapida ?? 0) + 1,
     };
     this.borradores.delete(sesion); // check-readonly:allow Map.delete de una sesión en memoria, no es HTTP
     this.borradores.set(sesion, guardado);
@@ -361,8 +469,27 @@ export class BorradorStoreMemoria implements BorradorStore {
 
   borrar(sesionCruda: string): void {
     const sesion = this.interna(sesionCruda);
-    if (!this.borradores.delete(sesion)) return; // check-readonly:allow Map.delete, no es HTTP
-    this.persistirBorrado(sesion);
+    const previo = this.borradores.get(sesion);
+    this.borradores.delete(sesion); // check-readonly:allow Map.delete, no es HTTP
+
+    // LA LÁPIDA SE ESCRIBE SIEMPRE, ESTÉ O NO EN MEMORIA.
+    //
+    // Antes se salía temprano cuando el Map no tenía la sesión, y eso convertía
+    // el desalojo por LRU en un agujero: pasadas las 500 sesiones vivas, el
+    // borrador de una emisión YA CONFIRMADA se caía de memoria, `borrar` no
+    // anotaba nada, y otra instancia —o el mismo proceso tras un reinicio—
+    // volvía a leer del archivo el borrador de un comprobante que ya existe.
+    // La factura siguiente arrancaba con el cliente y los ítems de la anterior:
+    // exactamente lo que este store dice impedir.
+    //
+    // Anotar el borrado de algo que no estaba es inocuo: la lápida dice "esta
+    // sesión terminó", que es verdad tanto si estaba en memoria como si no. Sin
+    // revisión previa (nunca vivió en memoria) queda en 0: no hay forma de saber
+    // qué leyó una escritura tardía, así que no se bloquea nada por esto solo —
+    // la rama "no hay previo" de `guardar` ya cubre el caso sin ambigüedad.
+    this.lapidas.set(sesion, previo?.revision ?? 0);
+    this.desalojarLapidas();
+    this.persistirBorrado(sesion, previo?.revision ?? 0);
   }
 
   vivas(): number {
@@ -395,14 +522,43 @@ export class BorradorStoreMemoria implements BorradorStore {
     return this.ahora().toISOString();
   }
 
+  /**
+   * Techo de lápidas, igual que `desalojar` para los borradores vivos: sin
+   * esto, un proceso largo que emite y cancela sin parar acumula una entrada
+   * por sesión PARA SIEMPRE (la lápida, a propósito, no se borra al guardar
+   * encima — ver el comentario de `lapidas`). Desalojar la más vieja es
+   * seguro: en el peor caso, una escritura tardía extremadamente demorada deja
+   * de detectarse como tal y cae en la fusión concurrente de siempre, que es
+   * exactamente el comportamiento de antes de este cambio.
+   */
+  private desalojarLapidas(): void {
+    while (this.lapidas.size > MAX_SESIONES) {
+      const masVieja = this.lapidas.keys().next();
+      if (masVieja.done === true) return;
+      this.lapidas.delete(masVieja.value); // check-readonly:allow Map.delete, no es HTTP
+    }
+  }
+
   /** Descarta todo lo que hay en memoria. Solo lo usa la subclase de archivo. */
   protected vaciarMemoria(): void {
     this.borradores.clear();
+    // Las lápidas también describen el archivo, no la memoria: si el archivo
+    // se achicó o se borró, la fuente de verdad para "qué se descartó" cambió
+    // por completo y una lápida vieja podría bloquear una escritura legítima
+    // sobre un archivo nuevo que nunca vio ese borrado.
+    this.lapidas.clear();
   }
 
   /** Gancho para la subclase que escribe a disco. En memoria no hace nada. */
   protected persistir(_sesion: string, _guardado: BorradorGuardado): void {}
-  protected persistirBorrado(_sesion: string): void {}
+  /**
+   * Anota el borrado donde el estado sobreviva al proceso.
+   *
+   * `revision` es la que tenía el borrador al morir: la necesita la otra
+   * instancia para saber si una escritura suya, leída ANTES del borrado, quedó
+   * obsoleta. Ver `aplicarLineas`.
+   */
+  protected persistirBorrado(_sesion: string, _revision: number): void {}
 }
 
 /**
@@ -515,7 +671,23 @@ export class BorradorStoreArchivo extends BorradorStoreMemoria {
         };
         if (typeof e.sesion !== "string") continue;
         if (e.borrado === true) {
+          // LA LÁPIDA TAMBIÉN VIAJA ENTRE INSTANCIAS.
+          //
+          // Sin esto, la detección de escrituras tardías funcionaba solo dentro
+          // del proceso que borró: otra instancia leía el archivo, veía que la
+          // sesión no está, y no tenía forma de saber que había estado y se
+          // canceló. Una llamada lenta de ESA instancia resucitaba el borrador
+          // de una factura que el usuario ya había descartado.
+          //
+          // La revisión de la línea de borrado es la que tenía el borrador al
+          // morir; si la línea no la trae (formato viejo), se conserva la que
+          // haya en memoria.
+          const revisionMuerta =
+            typeof e.revision === "number"
+              ? e.revision
+              : (this.borradores.get(e.sesion)?.revision ?? 0);
           this.borradores.delete(e.sesion); // check-readonly:allow Map.delete, no es HTTP
+          this.lapidas.set(e.sesion, Math.max(revisionMuerta, this.lapidas.get(e.sesion) ?? 0));
           continue;
         }
         if (typeof e.estado !== "object" || e.estado === null) continue;
@@ -536,11 +708,17 @@ export class BorradorStoreArchivo extends BorradorStoreMemoria {
     return super.leer(sesion);
   }
 
-  override guardar(sesion: string, estado: EstadoEmision): BorradorGuardado {
+  override guardar(
+    sesion: string,
+    estado: EstadoEmision,
+    opciones: { desdeRevision?: number } = {},
+  ): BorradorGuardado {
     // Refrescar ANTES de guardar, por la revisión: si otra instancia guardó
-    // tres veces, la nuestra tiene que ser la cuarta, no la segunda.
+    // tres veces, la nuestra tiene que ser la cuarta, no la segunda. Y también
+    // por la fusión: la revisión que se compara tiene que ser la del ARCHIVO,
+    // no la que quedó en memoria antes del refresco.
     this.refrescar();
-    return super.guardar(sesion, estado);
+    return super.guardar(sesion, estado, opciones);
   }
 
   override borrar(sesion: string): void {
@@ -583,8 +761,8 @@ export class BorradorStoreArchivo extends BorradorStoreMemoria {
     this.escribir({ sesion, ...guardado });
   }
 
-  protected override persistirBorrado(sesion: string): void {
-    this.escribir({ sesion, borrado: true, actualizado: this.marcaDeTiempo() });
+  protected override persistirBorrado(sesion: string, revision: number): void {
+    this.escribir({ sesion, borrado: true, revision, actualizado: this.marcaDeTiempo() });
   }
 }
 

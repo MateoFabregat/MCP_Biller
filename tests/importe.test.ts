@@ -161,3 +161,28 @@ describe("cantidades", () => {
     expect(parsearImporte("tres").valor).toBeNull();
   });
 });
+
+describe("fracciones con barra: el espacio no decide el precio", () => {
+  it.each([
+    ["1/2 kg", 0.5],
+    ["1/2kg", 0.5],
+    ["3/4 de bolsa", 0.75],
+    ["2 1/2", 2.5],
+  ])("%s -> %s", (texto, esperado) => {
+    expect(parsearCantidad(texto).valor).toBe(esperado);
+  });
+
+  it("un código con barra no es una fracción: se rechaza, no se adivina", () => {
+    // "12/03" tiene num >= den; "3/12" y "art 12/24" tienen un denominador que
+    // no es de mostrador. Ninguno de los tres es una cantidad.
+    for (const texto of ["12/03", "3/12", "art 12/24"]) {
+      const r = parsearCantidad(texto);
+      expect(r.valor).toBeNull();
+      expect(r.detalle).not.toBe("");
+    }
+  });
+
+  it("el motivo del rechazo pregunta en vez de adivinar", () => {
+    expect(parsearCantidad("3/12").detalle).toContain("código");
+  });
+});

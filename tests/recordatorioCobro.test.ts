@@ -12,6 +12,7 @@
 //   4. nunca aparece un dato de otro cliente en el mensaje.
 // =============================================================================
 
+import { limpiarMarcas } from "../src/security/untrusted.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { KapsoConfig } from "../src/config.js";
 import { normalizeComprobantesEmitidos } from "../src/biller/normalize.js";
@@ -352,7 +353,15 @@ describe("la tool: dry-run y confirmación", () => {
     expect(llamadas).toHaveLength(1);
     const body = JSON.parse(String(llamadas[0]!.init.body)) as Record<string, any>;
     expect(body.to).toBe(PERMITIDO);
-    expect(body.text.body).toBe(sc(previo).mensaje);
+    // EL MISMO TEXTO, MENOS LAS MARCAS.
+    //
+    // El `mensaje` que ve el modelo lleva la razón social envuelta (la escribió
+    // un tercero); el que llega al teléfono no, porque `KapsoClient` saca las
+    // marcas en la única puerta hacia una persona. Lo que se verifica es que no
+    // haya NINGUNA otra diferencia: lo aprobado y lo enviado siguen siendo el
+    // mismo texto.
+    expect(body.text.body).toBe(limpiarMarcas(String(sc(previo).mensaje)));
+    expect(String(sc(previo).mensaje)).toContain("⟦dato-no-confiable⟧");
   });
 
   it("si el saldo cambió entre el preview y la confirmación, el token deja de valer", async () => {

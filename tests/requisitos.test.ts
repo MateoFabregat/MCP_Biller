@@ -37,6 +37,67 @@ describe("umbral de receptor (regla de las 5.000 UI)", () => {
     expect(u.umbral_uyu).toBeLessThan(31_500);
   });
 
+  // ISSUE 05: el valor de UI puede estar vencido o ser un tipeo, y antes
+  // ninguna de las dos cosas se avisaba: caía al de referencia EN SILENCIO
+  // (basura) o directamente no se chequeaba (vencido).
+  it("un valor absurdo (tipeo: el punto decimal corrido) se ignora y avisa", () => {
+    const u = resolverUmbralReceptor({ valor_ui: 63, valor_ui_fecha: "2026-08-25" });
+    expect(u.valor_ui_configurado).toBe(false);
+    expect(u.problema).toBe("absurdo");
+    expect(u.valor_ui).toBe(VALOR_UI_REFERENCIA);
+    expect(u.nota).toMatch(/IGNORANDO BILLER_VALOR_UI=63/);
+  });
+
+  it("un valor de UI vencido (más de 15 días) se ignora y avisa", () => {
+    const u = resolverUmbralReceptor({
+      valor_ui: UI,
+      valor_ui_fecha: "2026-01-01",
+      hoy: "2026-09-01",
+    });
+    expect(u.valor_ui_configurado).toBe(false);
+    expect(u.problema).toBe("vencido");
+    expect(u.valor_ui).toBe(VALOR_UI_REFERENCIA);
+    expect(u.nota).toMatch(/VENCIDO/);
+  });
+
+  it("un valor de UI reciente (dentro de los 15 días) SÍ se usa", () => {
+    const u = resolverUmbralReceptor({
+      valor_ui: UI,
+      valor_ui_fecha: "2026-08-30",
+      hoy: "2026-09-01",
+    });
+    expect(u.valor_ui_configurado).toBe(true);
+    expect(u.problema).toBeNull();
+    expect(u.valor_ui).toBe(UI);
+  });
+
+  it("sin 'hoy' no se puede evaluar antigüedad: no se marca vencido igual", () => {
+    // Callers que no pasan `hoy` (ninguno del código de producción — solo
+    // fixtures viejos) no rompen: el chequeo de antigüedad se salta, no se
+    // inventa un vencimiento.
+    const u = resolverUmbralReceptor({ valor_ui: UI, valor_ui_fecha: "2020-01-01" });
+    expect(u.valor_ui_configurado).toBe(true);
+  });
+
+  it("una fecha con formato inválido se ignora (no se usa para nota ni antigüedad)", () => {
+    const u = resolverUmbralReceptor({
+      valor_ui: UI,
+      valor_ui_fecha: "31/12/2026",
+      hoy: "2026-09-01",
+    });
+    // El valor SÍ se usa (está en rango) — lo que se descarta es la fecha rota.
+    expect(u.valor_ui_configurado).toBe(true);
+    expect(u.valor_ui_fecha).toBeNull();
+  });
+
+  it("un e-Ticket con BILLER_VALOR_UI absurdo igual exige receptor con el umbral de referencia", () => {
+    // El bug que esto cierra: un tipeo en la UI no puede hacer que el chequeo
+    // se apague. Se sigue exigiendo receptor, calculado con la referencia.
+    const r = exigeReceptor(101, 40_000, { valor_ui: 630, valor_ui_fecha: "2026-08-30" });
+    expect(r.exige).toBe(true);
+    expect(r.umbral.valor_ui_configurado).toBe(false);
+  });
+
   it("un e-Ticket por encima del umbral exige receptor", () => {
     const r = exigeReceptor(101, 40_000, { valor_ui: UI });
     expect(r.exige).toBe(true);

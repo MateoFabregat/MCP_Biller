@@ -44,7 +44,7 @@ import {
   parseFechaDgi,
 } from "../biller/cfeSchema.js";
 import { hoyDgiUy } from "../services/fechaUy.js";
-import { formatearUy, montoConSigno } from "../services/importe.js";
+import { formatearUy, montoConSigno, parsearImporte } from "../services/importe.js";
 import type { InteractivoBotones, InteractivoLista } from "./client.js";
 import { PREFIJO_PASO } from "./protocolo.js";
 import {
@@ -543,6 +543,13 @@ export type RespuestaPaso =
   | { paso: "forma_pago"; forma_pago: number }
   | { paso: "montos_brutos"; incluye_iva: boolean }
   | { paso: "tasa_cambio"; tasa: number }
+  /** El precio por unidad, escrito a mano en el paso que lo pregunta. */
+  | { paso: "precio"; precio: number; ambiguo: boolean }
+  /**
+   * Dirección y/o ciudad del cliente nuevo, escritas a mano. `ciudad` falta
+   * cuando el mensaje no traía coma: el flujo repregunta solo eso.
+   */
+  | { paso: "datos_cliente_nuevo"; direccion?: string; ciudad?: string }
   | { paso: "ninguna" };
 
 /** Saca tildes, baja a minúsculas y colapsa espacios. Para comparar lo que se escribió. */
@@ -583,6 +590,13 @@ export function interpretarRespuestaLibre(
   raw: string,
   paso: string,
   hoy: string = hoyDgi(),
+  /**
+   * Contexto que no se puede sacar del PASO solo. Hoy es un único caso: si ya
+   * hay una dirección cargada y lo que falta es la ciudad, el mensaje entero
+   * es la ciudad y no hay que volver a partirlo por la coma. Ver el `case
+   * "datos_cliente_nuevo"` más abajo.
+   */
+  contexto: { direccionYaCargada?: boolean } = {},
 ): RespuestaPaso {
   const t = normalizarLibre(raw);
   if (t === "") return { paso: "ninguna" };
@@ -643,9 +657,25 @@ export function interpretarRespuestaLibre(
     case "precio_incluye_iva":
     case "montos_brutos": {
       // La pregunta del mostrador uruguayo: ¿el precio que dijiste ya lleva IVA?
-      if (es("si", "con iva", "iva incluido", "ya incluye", "incluye iva", "si ya incluye"))
+      //
+      // LA GENTE CONTESTA DOS COSAS EN UNA FRASE. "sí, con IVA" y "no, se suma
+      // aparte" son la respuesta más natural a esta pregunta y no matcheaban
+      // NINGUNA de las dos listas: el mensaje caía en `ninguna`, el extractor
+      // fijaba el criterio sin la tasa, y el flujo preguntaba la tasa que el
+      // propio mensaje decía que iba a asumir. Por eso se saca el "sí"/"no" de
+      // adelante antes de comparar: lo que queda es la frase de la lista.
+      //
+      // El afirmativo suelto sigue valiendo por sí mismo (`es("si")` de abajo),
+      // así que sacarlo no puede perder una respuesta: o queda vacío —y era un
+      // "sí" a secas— o queda la frase que explica.
+      const sinPrefijo = t.replace(/^(si|no|dale|ok|obvio)\s+/, "");
+      const dice = (...frases: string[]): boolean => frases.includes(t) || frases.includes(sinPrefijo);
+
+      if (dice("si", "con iva", "iva incluido", "ya incluye", "incluye iva", "si ya incluye",
+               "ya lo incluye", "con el iva", "iva adentro", "con iva incluido"))
         return { paso: "montos_brutos", incluye_iva: true };
-      if (es("no", "sin iva", "no incluye", "mas iva", "sin el iva", "se suma aparte", "aparte"))
+      if (dice("no", "sin iva", "no incluye", "mas iva", "sin el iva", "se suma aparte", "aparte",
+               "se suma", "hay que sumarlo", "sin impuestos"))
         return { paso: "montos_brutos", incluye_iva: false };
 
       // LA OTRA PREGUNTA QUE TAMBIÉN SE LLAMA `iva`: "¿Qué IVA lleva?".
@@ -720,6 +750,62 @@ export function interpretarRespuestaLibre(
       // decimal, así que perderla no es perder un signo — es perder el precio.
       const n = Number(raw.trim().replace(/\s/g, "").replace(",", "."));
       return Number.isFinite(n) && n > 0 ? { paso: "tasa_cambio", tasa: n } : { paso: "ninguna" };
+    }
+
+    case "datos_cliente_nuevo": {
+      // "¿Dirección y ciudad? Todo junto va bien: 'Rivera 1234, Melo'." no
+      // tenía ningún caso acá: la respuesta caía en `ninguna`, la pregunta se
+      // repetía, Y —el bug más caro, issue 21— el mensaje se lo pasaba entero
+      // al extractor de pedidos, que lo leía como una venta ("melo" × 1234).
+      //
+      // CON DIRECCIÓN YA CARGADA, EL MENSAJE ENTERO ES LA CIUDAD.
+      //
+      // `siguientePaso` vuelve a preguntar este paso cuando ya hay dirección
+      // pero falta la ciudad ("¿En qué ciudad?"), y esa repregunta NO lleva
+      // coma — es una sola palabra ("Melo"). Partirla con
+      // `separarDireccionCiudad` de nuevo la dejaría entera como dirección
+      // (sin coma, esa función no adivina) y la ciudad seguiría faltando para
+      // siempre. `contexto.direccionYaCargada` es lo que distingue las dos
+      // preguntas, que devuelven el mismo nombre de paso.
+      if (contexto.direccionYaCargada === true) {
+        const ciudad = raw.trim();
+        return ciudad === "" ? { paso: "ninguna" } : { paso: "datos_cliente_nuevo", ciudad };
+      }
+      // Primera vez: se reusa la MISMA función que ya parte "dirección, ciudad"
+      // cuando llega de un argumento explícito, así que el criterio de dónde
+      // corta la coma es uno solo en todo el módulo.
+      const partido = separarDireccionCiudad(raw);
+      if (partido.direccion === "") return { paso: "ninguna" };
+      return { paso: "datos_cliente_nuevo", direccion: partido.direccion, ciudad: partido.ciudad };
+    }
+
+    case "precio": {
+      // ES LA RESPUESTA MÁS FRECUENTE DEL PRODUCTO, Y LA QUE MÁS TIEMPO ESTUVO
+      // SIN LEERSE.
+      //
+      // La pregunta dice "¿A qué precio por unidad? Solo el número." y no tiene
+      // ningún botón: si "6500" no se lee, la pregunta se repite para siempre y
+      // depende enteramente de que el agente copie el número al borrador.
+      //
+      // A DIFERENCIA DEL CONCEPTO, ACÁ NO HAY NADA QUE DESAMBIGUAR: un número
+      // pelado en el paso del precio solo puede ser el precio. Por eso se
+      // acepta, y esa es la diferencia con "cliente" o "concepto", donde un
+      // texto libre puede confundirse con otra cosa.
+      //
+      // Pero "un número pelado" es literal: se exige que el MENSAJE ENTERO sea
+      // un importe (con "$" opcional, puntos y comas) y nada más. "unos 6500" y
+      // "eran 3 no 2" tienen un número adentro, pero no SON un número — son una
+      // frase — y ahí se sigue sin elegir: `parsearImporte` a secas los leería
+      // igual (le alcanza con encontrar un solo trozo numérico en el texto), así
+      // que la guarda vive acá, no en el parser.
+      const compacto = raw.replace(/[\s$]/g, "");
+      if (!/^\d+([.,]\d+)*$/.test(compacto)) return { paso: "ninguna" };
+
+      // A partir de acá sí es un importe de verdad: se reusa el parser que ya
+      // resuelve puntos de miles vs. decimales y marca la ambigüedad de "6.50".
+      const leido = parsearImporte(raw);
+      if (leido.valor === null || leido.valor <= 0) return { paso: "ninguna" };
+      return { paso: "precio", precio: leido.valor, ambiguo: leido.ambiguo };
     }
 
     default:

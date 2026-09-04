@@ -33,6 +33,7 @@
 // disponibles son una estimación OPTIMISTA. Se avisa explícitamente.
 // =============================================================================
 
+import { envolverEnLinea } from "../security/untrusted.js";
 import { asRecord, toNumberOrNull, toStringOrNull } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
@@ -544,7 +545,9 @@ export function generarAlertas(
     alertas.push({
       tipo: esRechazo ? "rechazo_dgi" : "estado_pendiente",
       severidad: grupo.severidad,
-      titulo: `${grupo.conteo} comprobante(s) en estado "${grupo.estado}"`,
+      // `estado` es un string que devuelve la API, no un enum nuestro: va
+      // envuelto por la misma razón que la razón social (ver envolverEnLinea).
+      titulo: `${grupo.conteo} comprobante(s) en estado "${envolverEnLinea(grupo.estado, "(sin estado)")}"`,
       detalle: esRechazo
         ? `Esos comprobantes NO tienen validez fiscal: la venta figura en el sistema pero no ante DGI. ` +
           "Hay que reemitirlos o corregirlos."
@@ -562,7 +565,11 @@ export function generarAlertas(
     alertas.push({
       tipo: vencido ? "cae_vencido" : porVencer ? "cae_por_vencer" : "cae_por_agotarse",
       severidad: s.severidad,
-      titulo: `CAE ${s.cae_numero ?? "(sin número)"} — ${s.etiqueta_tipo} serie ${s.serie ?? "?"}`,
+      // `serie` y `cae_numero` los devuelve la API. La `serie` ya se coló una
+      // vez en un cuerpo sugerido; acá entra a texto libre, así que va marcada.
+      titulo:
+        `CAE ${envolverEnLinea(s.cae_numero, "(sin número)")} — ${s.etiqueta_tipo} ` +
+        `serie ${envolverEnLinea(s.serie, "?")}`,
       detalle: s.motivos.join(" "),
       cantidad: 1,
       datos: { cae: s },

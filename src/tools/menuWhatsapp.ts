@@ -216,7 +216,13 @@ function siguienteAccion(r: ReturnType<typeof interpretarMensaje>): string {
         "conteste te va a llegar el id de la opción y seguís normal."
       );
     case "saludo":
-      return "Mandá el menú: llamá a esta misma tool con enviar=true y el número de la conversación.";
+      // Con un borrador vivo, el enrutador manda una línea de aviso ANTES del
+      // menú (ver enrutador.ts, paso 3): la factura a medio cargar no se
+      // pierde de vista solo porque el usuario escribió "menú".
+      return r.respuesta_sugerida
+        ? `Decí primero esto: "${r.respuesta_sugerida}" y ahí sí mandá el menú: llamá a esta misma ` +
+            "tool con enviar=true y el número de la conversación."
+        : "Mandá el menú: llamá a esta misma tool con enviar=true y el número de la conversación.";
     case "cortesia":
       return `Contestá algo corto tipo: "${r.respuesta_sugerida}". NO mandes el menú.`;
     case "no_disponible":
@@ -393,15 +399,31 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
       // a un toque. Es el peor de los dos errores posibles: emitir algo que el
       // usuario ya dijo que no.
       //
-      // Solo lo dispara el BOTÓN, que es inequívoco: el usuario tocó algo que
-      // dice "Cancelar". Un "pará" escrito no borra nada —"pará, eran 3 no 2"
-      // es una corrección, no un descarte—, y para eso está `reiniciar`.
+      // ANTES SOLO LO DISPARABA EL BOTÓN. El argumento —"un 'pará' escrito
+      // puede ser una corrección, no un descarte"— es correcto para "pará,
+      // eran 3 no 2" y falso para un "pará" a secas: `CANCELACIONES` (el
+      // léxico que decide la vía `cancelacion`) solo matchea por IGUALDAD
+      // EXACTA, así que una frase con algo más adelante —la corrección— nunca
+      // entra por acá. Con el borrador vivo, una cancelación pura escrita
+      // borra igual que el botón (issue 18). Sin borrador vivo no hay nada
+      // que descartar y se sigue delegando en el agente, que puede tener otra
+      // confirmación pendiente (un recibo, por ejemplo) que no es cosa
+      // nuestra cancelar.
       let borradorDescartado = false;
-      if (r.via === "emision_cancelada" && claveBorrador !== null) {
+      let respuestaSugerida = r.respuesta_sugerida ?? null;
+      if (
+        (r.via === "emision_cancelada" || (r.via === "cancelacion" && enFlujo)) &&
+        claveBorrador !== null
+      ) {
         const store = ctx.getBorradorStore();
         borradorDescartado = store.leer(claveBorrador) !== null;
         store.borrar(claveBorrador);
         enFlujo = false;
+        if (r.via === "cancelacion") {
+          respuestaSugerida =
+            "Listo, dejé la factura sin hacer y no emití nada. Si querés arrancar otra, tocá " +
+            '"Emitir un comprobante" o escribime "menú".';
+        }
       }
 
       interpretacion = {
@@ -412,7 +434,7 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
         opcion_titulo: r.opcion?.titulo ?? null,
         tools_sugeridas: r.opcion?.tools ?? [],
         mostrar_menu: r.mostrar_menu,
-        respuesta_sugerida: r.respuesta_sugerida ?? null,
+        respuesta_sugerida: respuestaSugerida,
         confianza: r.confianza ?? null,
         candidatas: candidatas.map((o) => ({ id: o.id, titulo: o.titulo, tools: o.tools })),
         confirmation_token: r.confirmation_token ?? null,
@@ -422,6 +444,16 @@ export async function handleMenuWhatsapp(args: unknown, ctx: ToolContext): Promi
         en_flujo_derivado: flujoDerivado,
         siguiente_accion: siguienteAccion(r),
       };
+      // LA CANCELACIÓN ESCRITA CON BORRADOR VIVO YA SE RESOLVIÓ ACÁ, EN
+      // CÓDIGO: el server ya borró el borrador y ya decidió qué decir. La
+      // instrucción genérica de `siguienteAccion` ("descartá el dry-run vos")
+      // asume que falta hacer algo; acá no falta nada, así que se reemplaza
+      // por una que dice exactamente eso.
+      if (r.via === "cancelacion" && borradorDescartado) {
+        interpretacion.siguiente_accion =
+          `El usuario canceló la factura a medio cargar y el server ya borró el borrador. ` +
+          `Contestale EXACTAMENTE esto y no llames a ninguna tool de emisión: "${respuestaSugerida}"`;
+      }
       if (r.via === "ambiguo") {
         warnings.push(
           `"${a.mensaje}" apunta a más de una opción (${candidatas.map((o) => o.titulo).join(", ")}). ` +

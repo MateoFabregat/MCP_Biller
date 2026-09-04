@@ -21,9 +21,10 @@ import { normalizarTelefono } from "../../config.js";
 import { identidadDeConversacion, rechazoSesionAjena } from "../../security/remitentes.js";
 import { WRITE_PATHS } from "../../constants.js";
 import { KapsoClient } from "../../kapso/client.js";
-import { construirConfirmacionEmision } from "../../kapso/menu.js";
+import { construirConfirmacionEmision, overheadConfirmacionEmision } from "../../kapso/menu.js";
+import { LIMITES_INTERACTIVO } from "../../kapso/client.js";
 import { calcularTotales } from "../../services/calcularTotales.js";
-import { hoyDgiUy } from "../../services/fechaUy.js";
+import { hoyDgiUy, hoyIsoUy } from "../../services/fechaUy.js";
 import { buscarPorNumeroInterno } from "../../services/dedupe.js";
 import {
   WRITE_ANNOTATIONS,
@@ -290,6 +291,10 @@ export async function handleEmitirComprobante(
     valor_ui: cfg.valorUi,
     valor_ui_fecha: cfg.valorUiFecha,
     umbral_ui: cfg.umbralUi,
+    // Hoy en hora uruguaya, para que el chequeo del umbral de receptor sepa si
+    // BILLER_VALOR_UI_FECHA quedó VENCIDA (ver requisitos.ts). Sale de
+    // fechaUy.ts, no de `new Date()` acá.
+    hoy: hoyIsoUy(),
   });
 
   // Sucursal: Biller la exige. En dry-run avisamos; en execute bloqueamos con un
@@ -421,6 +426,22 @@ export async function handleEmitirComprobante(
         /RECEPTOR OBLIGATORIO|DGI exige receptor identificado/i.test(w),
       ),
       hoy: hoyDgiUy(),
+      // EL PRESUPUESTO REAL, NO UN TECHO INVENTADO.
+      //
+      // El resumen que se arma acá es el MISMO que sale por WhatsApp —esa
+      // identidad es lo que hace que lo aprobado y lo ejecutado sean lo mismo—,
+      // así que tiene que entrar en el cuerpo de un mensaje que además lleva el
+      // tipo, la razón social (hasta 150 caracteres), el documento, la ficha y
+      // el "¿Lo emito?". Con el techo fijo de 900 un nombre largo empujaba el
+      // total por encima de los 1024 y WhatsApp cortaba por el final: se perdía
+      // el "¿Lo emito?" y el aviso del precio ambiguo.
+      max_chars:
+        LIMITES_INTERACTIVO.cuerpo -
+        overheadConfirmacionEmision({
+          cliente: nombreCliente(payload.cliente),
+          documento: documentoCliente(payload.cliente),
+          tipoComprobante: TIPOS_COMPROBANTE[payload.tipo_comprobante],
+        }),
     },
   });
 

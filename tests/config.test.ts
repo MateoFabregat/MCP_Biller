@@ -314,4 +314,38 @@ describe("parámetros del proceso en la config validada", () => {
       },
     );
   });
+
+  // ISSUE 05: BILLER_VALOR_UI y BILLER_VALOR_UI_FECHA caían a "no configurado"
+  // sin decir por qué. Un tipeo que ni siquiera parsea como número, o una
+  // fecha que no es aaaa-mm-dd, ahora avisan igual que un rate limit inválido.
+  describe("BILLER_VALOR_UI y BILLER_VALOR_UI_FECHA", () => {
+    it("un valor que no parsea como número se ignora y avisa", () => {
+      const i = inspectConfig({ ...MINIMA, BILLER_VALOR_UI: "seis con treinta" });
+      expect(i.valorUi).toBeNull();
+      expect(i.configWarnings.join(" ")).toContain("BILLER_VALOR_UI=");
+    });
+
+    it("una fecha sin formato aaaa-mm-dd se ignora y avisa", () => {
+      const i = inspectConfig({ ...MINIMA, BILLER_VALOR_UI_FECHA: "30/08/2026" });
+      expect(i.valorUiFecha).toBeNull();
+      expect(i.configWarnings.join(" ")).toContain("BILLER_VALOR_UI_FECHA");
+    });
+
+    it("un valor y una fecha bien formados no avisan nada", () => {
+      const i = inspectConfig({
+        ...MINIMA,
+        BILLER_VALOR_UI: "6.3",
+        BILLER_VALOR_UI_FECHA: "2026-08-30",
+      });
+      expect(i.valorUi).toBe(6.3);
+      expect(i.valorUiFecha).toBe("2026-08-30");
+      expect(i.configWarnings).toEqual([]);
+    });
+
+    it("loadConfig también acepta el par bien formado (camino de ejecución real)", () => {
+      const c = loadConfig({ ...MINIMA, BILLER_VALOR_UI: "6.3", BILLER_VALOR_UI_FECHA: "2026-08-30" });
+      expect(c.valorUi).toBe(6.3);
+      expect(c.valorUiFecha).toBe("2026-08-30");
+    });
+  });
 });

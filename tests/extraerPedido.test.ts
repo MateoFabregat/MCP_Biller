@@ -238,6 +238,26 @@ describe("la plata la lee TypeScript, no el modelo", () => {
     expect(p.items[0]?.precio).toBeUndefined();
     expect(p.cliente).toBe("perez");
   });
+
+  it("'0,500' de cantidad ya no es ambiguo: se leyó bien, sin advertencia", () => {
+    // El bug de la caza de septiembre: la coma de miles se aplicaba a "0,500"
+    // igual que a "6,500", y facturaba 500 kg de queso sin que nadie lo viera.
+    const p = extraerPedidoEmision("0,500 kg de queso a 600");
+    expect(p.items[0]?.cantidad).toBe(0.5);
+    expect(p.items[0]?.cantidad_ambiguo).toBeUndefined();
+    expect(p.ambiguo).toBe(false);
+  });
+
+  it("la ambigüedad de la CANTIDAD también sobrevive hasta el preview", () => {
+    // Antes, `parsearCantidad("6,500 ...")` ya devolvía `ambiguo: true`, pero
+    // el extractor lo tiraba en el piso al armar el ítem. Ver
+    // `ItemPedido.cantidad_ambiguo`.
+    const p = extraerPedidoEmision("facturale a perez 6,500 kg de queso a 600");
+    expect(p.items[0]?.cantidad).toBe(6500);
+    expect(p.items[0]?.cantidad_ambiguo).toBe(true);
+    expect(p.ambiguo).toBe(true);
+    expect(p.detalles.some((d) => d.startsWith("Cantidad") && d.includes("CONFIRMALA"))).toBe(true);
+  });
 });
 
 describe("las señales que no son números", () => {

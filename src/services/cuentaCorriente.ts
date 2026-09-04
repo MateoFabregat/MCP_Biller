@@ -41,6 +41,7 @@
 // =============================================================================
 
 import { round2 } from "../biller/coerce.js";
+import { envolverEnLinea } from "../security/untrusted.js";
 import { extractClienteNombre, extractClienteRut } from "../biller/normalize.js";
 import type { ComprobanteEmitido } from "../biller/types.js";
 import { classifyCfe } from "./cfeTypes.js";
@@ -187,7 +188,10 @@ export function referenciasDesdeItems(c: ComprobanteEmitido): ReferenciaCobranza
       total,
       serie: m[2]!.toUpperCase(),
       numero,
-      origen_texto: concepto,
+      // El concepto de un recibo es texto libre que escribió la contraparte, y
+      // acá sale bajo una clave que la barrera no cubre. Va marcado en el punto
+      // de copia, que es donde la barrera pierde de vista al dato.
+      origen_texto: envolverEnLinea(concepto),
     });
   }
 

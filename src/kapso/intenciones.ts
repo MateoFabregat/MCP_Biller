@@ -628,6 +628,11 @@ export const CANCELACIONES = [
   "no lo emitas", "no emitas", "no la emitas", "para no lo emitas", "para no emitas", "no cancelalo", "dejalo",
   "espera no lo mandes", "esperate", "olvidate", "dejalo asi", "mejor no", "no sigas",
   "abortar", "abortalo",
+  // "dejalo" cancelaba y "dejá" (normalizada: "deja") no — la descripción del
+  // parámetro `reiniciar` de `biller_emision_guiada` (tools/emisionGuiada.ts)
+  // cita textual "no, dejá" como ejemplo de cancelación. Y "olvidalo" faltaba
+  // al lado de "olvidate", que sí estaba.
+  "deja", "deja eso", "olvidalo",
 ];
 
 /**

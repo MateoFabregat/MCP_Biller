@@ -90,3 +90,26 @@ describe("los documentos no afirman conteos falsos", () => {
     expect(cruce).toEqual([]);
   });
 });
+
+// ISSUE 07: una sola versión del server, verificada por un test.
+//
+// SERVER_VERSION vive en src/constants.ts, package.json declara la versión
+// publicada, y src/cli/init.ts referencia el paquete con esa misma versión en
+// un string (`biller-mcp-server@X.Y.Z`). Las tres tienen que decir lo mismo:
+// el `initialize` de MCP y `biller_health_check` anuncian SERVER_VERSION, y si
+// diverge de package.json están anunciando una versión que no es la que se
+// publicó. Antes nada comparaba las tres — este test falla si alguien sube
+// package.json y se olvida de constants.ts (o viceversa).
+describe("la versión que el server anuncia es la que se publica", () => {
+  it("SERVER_VERSION coincide con package.json", async () => {
+    const { SERVER_VERSION } = await import("../src/constants.js");
+    const pkg = JSON.parse(leer("package.json")) as { version: string };
+    expect(SERVER_VERSION).toBe(pkg.version);
+  });
+
+  it("src/cli/init.ts referencia el paquete con la versión vigente", async () => {
+    const { SERVER_VERSION } = await import("../src/constants.js");
+    const initTs = leer("src/cli/init.ts");
+    expect(initTs).toMatch(new RegExp(`biller-mcp-server@${SERVER_VERSION.replace(/\./g, "\\.")}(?!\\d)`));
+  });
+});

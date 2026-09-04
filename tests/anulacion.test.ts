@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ComprobanteBodySchema } from "../src/biller/cfeSchema.js";
-import { calcularTotales } from "../src/services/calcularTotales.js";
+import { calcularTotales, TASA_IVA } from "../src/services/calcularTotales.js";
 import {
   NOTA_CREDITO_DE,
   NOTA_DEBITO_DE,
@@ -262,6 +262,49 @@ describe("la tasa de la nota se DERIVA del original, no se asume", () => {
     });
     const items = (p.cuerpo_sugerido?.items ?? []) as Array<{ indicador_facturacion: number }>;
     expect(items[0]!.indicador_facturacion).toBe(2);
+  });
+});
+
+// ISSUE 06: las tasas de IVA viven en un solo lugar (TASA_IVA de
+// calcularTotales.ts). Este test prueba el ACOPLE, no el valor: si alguien
+// reintroduce una copia local de la tasa mínima en anulacion.ts, cambiar
+// TASA_IVA acá no va a mover el bruto de la nota, y este test lo detecta.
+describe("la tasa de la nota se lee de TASA_IVA, no de una copia local", () => {
+  it("cambiar TASA_IVA[mínima] cambia el bruto reconstruido de esa porción", () => {
+    const original = TASA_IVA[2];
+    try {
+      // 10.000 de IVA mínima con la tasa real (10%): bruto = 1.000 + 1.000/0,10 = 11.000.
+      const p = planAnulacion(
+        {
+          ...FACTURA,
+          total: 11000,
+          iva: { tasa_basica: 0, tasa_minima: 1000, tasa_otra: 0 },
+          items: null,
+        },
+        { ya_tiene_nota_credito: true },
+      );
+      const items = (p.cuerpo_sugerido?.items ?? []) as Array<{ precio: number }>;
+      expect(items[0]!.precio).toBe(11000);
+
+      // Si TASA_IVA cambia (DGI sube la mínima a 12%), el bruto reconstruido
+      // TIENE que moverse. Si no se mueve, hay una copia local de la tasa.
+      TASA_IVA[2] = 0.12;
+      const p2 = planAnulacion(
+        {
+          ...FACTURA,
+          total: 11000,
+          iva: { tasa_basica: 0, tasa_minima: 1000, tasa_otra: 0 },
+          items: null,
+        },
+        { ya_tiene_nota_credito: true },
+      );
+      const items2 = (p2.cuerpo_sugerido?.items ?? []) as Array<{ precio: number }>;
+      // bruto = 1.000 + 1.000/0,12 ≈ 9.333,33
+      expect(items2[0]!.precio).toBeCloseTo(9333.33, 2);
+      expect(items2[0]!.precio).not.toBe(items[0]!.precio);
+    } finally {
+      TASA_IVA[2] = original;
+    }
   });
 });
 

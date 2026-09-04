@@ -642,7 +642,28 @@ export function interpretarMensaje(raw: string, opciones: MenuOpciones = {}): In
 
   // 3. Saludo o pedido explícito de menú. Va ANTES de los sinónimos: "menu" no
   //    debe matchear "¿qué más podés hacer?" por contener la palabra opciones.
-  if (SALUDOS.includes(norm)) return { opcion: null, via: "saludo", mostrar_menu: true };
+  //
+  //    CON UN BORRADOR VIVO, "menú" no lo dice: antes contestaba las diez
+  //    opciones y listo, y el usuario se olvidaba (o no sabía) que había una
+  //    factura a medio cargar que le iba a seguir preguntando el precio. Se
+  //    avisa ANTES del menú, no en vez del menú: "menú" sigue siendo la forma
+  //    de pedir las opciones, no una forma de cancelar (para eso está
+  //    `CANCELACIONES`).
+  if (SALUDOS.includes(norm)) {
+    return {
+      opcion: null,
+      via: "saludo",
+      mostrar_menu: true,
+      ...(opciones.en_flujo === true
+        ? {
+            respuesta_sugerida:
+              "Tenés una factura a medio cargar. Si la querés seguir, contestame lo que te " +
+              'pregunté; si no, escribí "cancelar" y la dejo sin hacer. Mientras tanto, acá van ' +
+              "las opciones:",
+          }
+        : {}),
+    };
+  }
 
   // 4. Cortesía: no hay nada que buscar y el menú sería una respuesta grosera.
   if (CORTESIAS.includes(norm)) {

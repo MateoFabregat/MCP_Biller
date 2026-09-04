@@ -19,6 +19,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TIPOS_COMPROBANTE } from "../biller/cfeSchema.js";
 import { evaluarRequisitos, resolverUmbralReceptor } from "../biller/requisitos.js";
+import { hoyIsoUy } from "../services/fechaUy.js";
 import {
   READ_ONLY_ANNOTATIONS,
   errorToolResult,
@@ -155,6 +156,9 @@ export function handleRequisitosComprobante(args: unknown, ctx: ToolContext): To
       umbral_ui: umbralUi,
       total_uyu: totalUyu,
       sucursal_por_defecto: sucursalPorDefecto,
+      // Para que resolverUmbralReceptor pueda decir si valor_ui_fecha está
+      // VENCIDA. Sale de fechaUy.ts, nunca de `new Date()` acá.
+      hoy: hoyIsoUy(),
     };
 
     const ev = evaluarRequisitos(a.tipo_comprobante, a.datos_conocidos ?? {}, opciones);

@@ -386,6 +386,21 @@ export interface ContextoPreview {
   precios_ambiguos?: Array<{ concepto?: string; precio: number }>;
   /** Avisos fiscales que deben verse antes de los importes a aprobar. */
   advertencias_criticas?: string[];
+  /**
+   * Techo de caracteres del preview. Default: `MAX_CHARS_PREVIEW`.
+   *
+   * EXISTE PORQUE EL DEFAULT MENTÍA. El techo de 900 se eligió "con margen
+   * sobre los 1024" del cuerpo de WhatsApp, pero el margen no alcanzaba: quien
+   * arma el mensaje de confirmación le agrega ADELANTE el tipo de comprobante
+   * y la razón social —hasta 150 caracteres según DGI— y ATRÁS el "¿Lo emito?".
+   * Con un nombre largo el cuerpo pasaba de 1024 y WhatsApp cortaba por el
+   * final: se perdían el "¿Lo emito?" y el aviso del precio ambiguo, que es
+   * justo el que el módulo promete no recortar nunca.
+   *
+   * Quien conoce el envoltorio pasa acá el espacio REAL que queda. Ver
+   * `overheadConfirmacionEmision` en kapso/render.ts.
+   */
+  max_chars?: number;
 }
 
 /** Cuántas líneas de ítem entran cómodas en los 1024 chars del cuerpo. */
@@ -399,7 +414,7 @@ const MAX_LINEAS_PREVIEW = 8;
  * el "¿Lo emito?" del final. Si el cuerpo se pasa, lo que se corta es el final
  * — o sea el TOTAL y los supuestos, justo lo que hay que leer.
  */
-const MAX_CHARS_PREVIEW = 900;
+export const MAX_CHARS_PREVIEW = 900;
 
 /** Hasta dónde se recorta el concepto de una línea. */
 const MAX_CONCEPTO_PREVIEW = 24;
@@ -553,7 +568,18 @@ export function formatearTotales(t: TotalesEstimados, ctx: ContextoPreview = {})
   const bloques: string[] = [];
   if (lineasItems.length > 0) {
     const cuerpo = lineasItems.map((f) => fila(f.etiqueta, f.importe, ancho));
-    if (ocultas > 0) cuerpo.push(`… y ${ocultas} ítem${ocultas === 1 ? "" : "s"} más`);
+    // NO ALCANZA CON DECIR QUE HAY MÁS.
+    //
+    // Quien toca "Emitir" se hace cargo del documento entero, incluidas las
+    // líneas que el mensaje no le mostró. "… y 3 ítems más" se lee como un
+    // detalle de formato; lo que hay que decir es que está aprobando algo que
+    // no terminó de ver, y que el total sí las incluye.
+    if (ocultas > 0) {
+      cuerpo.push(
+        `… ${ocultas} ítem${ocultas === 1 ? "" : "s"} más que no entran en el mensaje ` +
+          `(el TOTAL sí ${ocultas === 1 ? "lo incluye" : "los incluye"}).`,
+      );
+    }
     bloques.push(cuerpo.join("\n"), "———");
   }
   bloques.push(totalesTexto);
@@ -563,29 +589,87 @@ export function formatearTotales(t: TotalesEstimados, ctx: ContextoPreview = {})
   const supuestos = describirSupuestos(ctx);
   if (supuestos !== "") bloques.push("", supuestos);
 
+  const techo = ctx.max_chars ?? MAX_CHARS_PREVIEW;
   let cuerpo = bloques.join("\n");
   // Un bloqueo fiscal no es letra chica. En particular, el receptor
   // obligatorio tiene que aparecer antes de los números que la persona va a
   // aprobar por WhatsApp; `warnings` estructurado lo ve el agente, no
   // necesariamente quien toca el botón.
-  const criticas = (ctx.advertencias_criticas ?? []).filter((a) => a.trim() !== "");
+  const criticas = [
+    ...(ctx.advertencias_criticas ?? []).filter((a) => a.trim() !== ""),
+    ...avisosPrecioAmbiguo(ctx, plata),
+  ];
   let bloqueCritico = criticas.join("\n");
   let base = bloqueCritico === "" ? cuerpo : `${bloqueCritico}\n\n${cuerpo}`;
 
-  if (base.length > MAX_CHARS_PREVIEW && bloqueCritico !== "") {
+  if (base.length > techo && bloqueCritico !== "") {
     // Si lo crítico compite con el detalle, caen primero los ítems. El TOTAL y
     // los supuestos son la firma humana del documento y nunca se recortan.
-    const esenciales = [totalesTexto, ...(supuestos === "" ? [] : ["", supuestos])].join("\n");
-    const disponibles = Math.max(0, MAX_CHARS_PREVIEW - esenciales.length - 2);
-    if (bloqueCritico.length > disponibles) {
-      bloqueCritico =
-        disponibles <= 1 ? "" : `${bloqueCritico.slice(0, Math.max(0, disponibles - 1))}…`;
+    //
+    // PERO UN PREVIEW SIN UNA SOLA LÍNEA DE ÍTEM NO ES UN PREVIEW.
+    //
+    // Antes "caen primero los ítems" quería decir "cae el detalle entero":
+    // `esenciales` no incluía ni una línea, así que la persona aprobaba un
+    // TOTAL sin haber visto nunca qué lo compone. Ahora se reserva la primera
+    // línea de ítems y, si hay ítems ocultos, la línea que lo declara — esa
+    // declaración es la única defensa contra "8 de 20 sin decirlo".
+    const primerItem = lineasItems[0];
+    const detalleReservado: string[] = [];
+    if (primerItem !== undefined) {
+      detalleReservado.push(fila(primerItem.etiqueta, primerItem.importe, ancho));
+      if (ocultas > 0) {
+        detalleReservado.push(
+          `… ${ocultas} ítem${ocultas === 1 ? "" : "s"} más que no entran en el mensaje ` +
+            `(el TOTAL sí ${ocultas === 1 ? "lo incluye" : "los incluye"}).`,
+        );
+      }
     }
+    const esenciales = [
+      ...(detalleReservado.length > 0 ? [detalleReservado.join("\n"), "———"] : []),
+      totalesTexto,
+      ...(supuestos === "" ? [] : ["", supuestos]),
+    ].join("\n");
+
+    // SE RECORTA POR AVISO ENTERO, NUNCA POR CARÁCTER.
+    //
+    // La versión anterior cortaba `bloqueCritico` con `.slice`, que parte un
+    // aviso a mitad de palabra ("…se leyó $0,25 por un…") y además borra los
+    // avisos de más sin decir cuántos eran. `acumularConDeclaracion` es la
+    // misma lógica que usa `agregarAvisos` más abajo: un aviso entra entero o
+    // no entra, y lo que no entra se declara con un conteo.
+    const disponibles = Math.max(0, techo - esenciales.length - 2);
+    const puestos =
+      disponibles <= 1
+        ? []
+        : acumularConDeclaracion(criticas, disponibles, (n) => `… y ${n} aviso(s) crítico(s) más`);
+    bloqueCritico = puestos.join("\n");
     cuerpo = esenciales;
     base = bloqueCritico === "" ? cuerpo : `${bloqueCritico}\n\n${cuerpo}`;
   }
   const avisos = advertenciasDelPreview(t, ctx, plata);
-  return avisos.length === 0 ? base : agregarAvisos(base, avisos);
+  return avisos.length === 0 ? base : agregarAvisos(base, avisos, techo);
+}
+
+/**
+ * El aviso de un precio con dos lecturas posibles.
+ *
+ * Separado del resto porque viaja con los avisos CRÍTICOS: es el único donde el
+ * número que la persona está por aprobar puede estar mal por cien veces, así
+ * que va arriba de los importes y no se recorta.
+ */
+function avisosPrecioAmbiguo(ctx: ContextoPreview, plata: (n: number) => string): string[] {
+  return (ctx.precios_ambiguos ?? []).map((p) => {
+    const cual = p.concepto === undefined || p.concepto.trim() === "" ? "" : ` de "${p.concepto}"`;
+    // NO SE INVENTA LA OTRA LECTURA. Acá llega el número ya parseado, no el
+    // texto que escribió el usuario, así que "también podría ser X" sería una
+    // cuenta nuestra sobre un dato que no tenemos. Lo que sí se puede afirmar —y
+    // es lo que hay que decir— es que el número de arriba está en duda y que la
+    // diferencia es de dos órdenes de magnitud.
+    return (
+      `⚠️ El precio${cual} se leyó ${plata(p.precio)} por unidad, y estaba escrito de una forma ` +
+      "que admite otra lectura muy distinta. Confirmalo ANTES de emitir."
+    );
+  });
 }
 
 /**
@@ -603,22 +687,13 @@ function advertenciasDelPreview(
 ): string[] {
   const avisos: string[] = [];
 
-  // 1. Los precios ambiguos. Van primero porque son el único aviso donde el
-  //    total mostrado puede estar mal por CIEN VECES.
-  for (const p of ctx.precios_ambiguos ?? []) {
-    const cual = p.concepto === undefined || p.concepto.trim() === "" ? "" : ` de "${p.concepto}"`;
-    // NO SE INVENTA LA OTRA LECTURA. Acá llega el número ya parseado, no el
-    // texto que escribió el usuario, así que "también podría ser X" sería una
-    // cuenta nuestra sobre un dato que no tenemos. Lo que sí se puede afirmar —y
-    // es lo que hay que decir— es que el número de arriba está en duda y que la
-    // diferencia es de dos órdenes de magnitud.
-    avisos.push(
-      `⚠️ El precio${cual} se leyó ${plata(p.precio)} por unidad, y estaba escrito de una forma ` +
-        "que admite otra lectura muy distinta. Confirmalo ANTES de emitir.",
-    );
-  }
-
-  // 2. Lo que el cálculo no pudo determinar y lo que no suma al total.
+  // Lo que el cálculo no pudo determinar y lo que no suma al total.
+  //
+  // Los precios ambiguos NO están acá: subieron al bloque crítico de arriba
+  // (ver `avisosPrecioAmbiguo`). Estaban primeros en esta lista con el
+  // comentario de que eran "el único aviso donde el total puede estar mal por
+  // cien veces", y aun así se recortaban como cualquier otro cuando el mensaje
+  // quedaba justo — que es exactamente cuando más falta hacen.
   for (const a of t.advertencias) avisos.push(`⚠️ ${a}`);
 
   const sinCargo = t.lineas.filter((l) => !l.aporta_al_total).length;
@@ -636,6 +711,39 @@ function advertenciasDelPreview(
 }
 
 /**
+ * Acumula elementos de texto ENTEROS mientras entren en el presupuesto, y
+ * declara con un conteo lo que se cae.
+ *
+ * El principio es uno solo, y lo usan tanto los avisos informativos del final
+ * como el bloque crítico de arriba: un elemento entra completo o no entra —
+ * nunca se lo corta por la mitad—, y si algo queda afuera el mensaje lo dice,
+ * porque un aviso que desaparece sin dejar rastro es peor que no haberlo
+ * escrito.
+ */
+function acumularConDeclaracion(
+  items: string[],
+  techo: number,
+  declarar: (restantes: number) => string,
+  largoOcupado = 0,
+): string[] {
+  const puestos: string[] = [];
+  let largo = largoOcupado;
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i]!;
+    const restantes = items.length - i;
+    // Se reserva lugar para la línea "y N más" antes de decidir si entra.
+    const cola = restantes > 1 ? `\n${declarar(restantes - 1)}` : "";
+    if (largo + item.length + 1 + cola.length > techo) {
+      if (restantes > 0) puestos.push(declarar(restantes));
+      break;
+    }
+    puestos.push(item);
+    largo += item.length + 1;
+  }
+  return puestos;
+}
+
+/**
  * Pega los avisos abajo del preview SIN pasarse del techo del cuerpo.
  *
  * Se truncan los avisos y nunca los números: si algo tiene que caerse del
@@ -643,20 +751,12 @@ function advertenciasDelPreview(
  * declara con un conteo, porque un aviso que desaparece sin dejar rastro es
  * peor que no haberlo escrito.
  */
-function agregarAvisos(base: string, avisos: string[]): string {
-  const puestos: string[] = [];
-  let largo = base.length + 1; // el salto de línea que separa el bloque
-  for (let i = 0; i < avisos.length; i += 1) {
-    const aviso = avisos[i]!;
-    const restantes = avisos.length - i;
-    // Se reserva lugar para la línea de "y N avisos más" antes de decidir.
-    const cola = restantes > 1 ? `\n… y ${restantes - 1} aviso(s) más` : "";
-    if (largo + aviso.length + 1 + cola.length > MAX_CHARS_PREVIEW) {
-      if (restantes > 0) puestos.push(`… y ${restantes} aviso(s) más`);
-      break;
-    }
-    puestos.push(aviso);
-    largo += aviso.length + 1;
-  }
+function agregarAvisos(base: string, avisos: string[], techo: number): string {
+  const puestos = acumularConDeclaracion(
+    avisos,
+    techo,
+    (n) => `… y ${n} aviso(s) más`,
+    base.length + 1, // el salto de línea que separa el bloque
+  );
   return puestos.length === 0 ? base : `${base}\n${puestos.join("\n")}`;
 }

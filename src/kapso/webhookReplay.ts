@@ -75,6 +75,28 @@ function isDigest(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
+/** Intenta parsear una línea del journal. `undefined` si ni siquiera es JSON. */
+function intentarParsear(linea: string): JournalEntry | undefined {
+  try {
+    return JSON.parse(linea) as JournalEntry;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Misma validación de forma que antes vivía inline en `cargar`/`leerActual`. */
+function entradaValida(
+  entrada: JournalEntry,
+): entrada is JournalEntry & { digest: string; state: WebhookReplayState | "released"; ts: number } {
+  return (
+    isDigest(entrada.digest) &&
+    (entrada.state === "in_flight" || entrada.state === "processed" || entrada.state === "released") &&
+    typeof entrada.ts === "number" &&
+    Number.isFinite(entrada.ts) &&
+    entrada.ts >= 0
+  );
+}
+
 /**
  * El comportamiento acotado que comparten las dos implementaciones.
  *
@@ -238,29 +260,48 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
       // broader permissions.
       chmodSync(this.path, 0o600);
       const contenido = readFileSync(this.path, "utf8");
-      for (const linea of contenido.split("\n")) {
+      // Un archivo append-only que no termina en salto de línea tiene una cola
+      // sin confirmar: es lo que deja un proceso al que mataron a mitad de un
+      // `writeSync`. Eso NO es corrupción — es un append interrumpido — y no
+      // puede tratarse igual que una línea rota en el medio del archivo, que sí
+      // es corrupción real. Reproducido: journal con una línea válida y
+      // `{"digest":"bb` al final volvía TODOS los webhooks de la empresa 503.
+      const terminaConSalto = contenido === "" || contenido.endsWith("\n");
+      const lineas = contenido.split("\n");
+      const colaPartida = terminaConSalto ? undefined : lineas.pop();
+      let huboColaPartida = false;
+      for (const linea of lineas) {
         if (linea.trim() === "") continue;
         this.journalTransitions += 1;
-        let entrada: JournalEntry;
-        try {
-          entrada = JSON.parse(linea) as JournalEntry;
-        } catch (err) {
-          this.degradar("leer", err);
-          continue;
-        }
-        if (!isDigest(entrada.digest) ||
-          (entrada.state !== "in_flight" && entrada.state !== "processed" && entrada.state !== "released") ||
-          typeof entrada.ts !== "number" || !Number.isFinite(entrada.ts) || entrada.ts < 0) {
+        const entrada = intentarParsear(linea);
+        if (entrada === undefined || !entradaValida(entrada)) {
           this.degradar("validar", new Error("journal de replay corrupto"));
           continue;
         }
         if (entrada.state === "released") this.entries.delete(entrada.digest); // check-readonly:allow Map.delete del store, no es HTTP
         else this.entries.set(entrada.digest, { state: entrada.state, touched: entrada.ts });
       }
+      if (colaPartida !== undefined && colaPartida.trim() !== "") {
+        const entrada = intentarParsear(colaPartida);
+        if (entrada !== undefined && entradaValida(entrada)) {
+          // Parsea y valida igual que cualquier otra línea: la ausencia del
+          // salto final no dice nada por sí sola, la posición sí, pero el
+          // contenido resultó completo.
+          this.journalTransitions += 1;
+          if (entrada.state === "released") this.entries.delete(entrada.digest); // check-readonly:allow Map.delete del store, no es HTTP
+          else this.entries.set(entrada.digest, { state: entrada.state, touched: entrada.ts });
+        } else {
+          huboColaPartida = true;
+          logger.warn("kapso.webhook.replay.linea_partida", { largo: colaPartida.length });
+        }
+      }
       if (this.cargaConfiable) {
         this.purgar();
         this.recortarExcedente();
-        this.compactIfNeeded();
+        // Si hubo cola partida, se fuerza la compactación aunque no se haya
+        // llegado al techo: es la única forma de que el archivo quede sano y
+        // el próximo arranque no vuelva a encontrarse con la misma cola.
+        this.compactIfNeeded(huboColaPartida);
       }
     } catch (err) {
       this.degradar("leer", err);
@@ -304,26 +345,40 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
     }
   }
 
-  private leerActual(): Map<string, ReplayEntry> {
+  /**
+   * Relee el journal con el lock de la reserva tomado. `colaPartida` avisa si
+   * la última porción no confirmó (mismo criterio que `cargar`), para que
+   * `claim` pueda forzar la compactación después de escribir su propia línea.
+   */
+  private leerActual(): { entries: Map<string, ReplayEntry>; colaPartida: boolean } {
     const actual = new Map<string, ReplayEntry>();
-    if (!existsSync(this.path)) return actual;
-    for (const linea of readFileSync(this.path, "utf8").split("\n")) {
+    if (!existsSync(this.path)) return { entries: actual, colaPartida: false };
+    const contenido = readFileSync(this.path, "utf8");
+    const terminaConSalto = contenido === "" || contenido.endsWith("\n");
+    const lineas = contenido.split("\n");
+    const cola = terminaConSalto ? undefined : lineas.pop();
+    for (const linea of lineas) {
       if (linea.trim() === "") continue;
-      let entrada: JournalEntry;
-      try {
-        entrada = JSON.parse(linea) as JournalEntry;
-      } catch {
-        throw new Error("el journal de replay está corrupto");
-      }
-      if (!isDigest(entrada.digest) ||
-        (entrada.state !== "in_flight" && entrada.state !== "processed" && entrada.state !== "released") ||
-        typeof entrada.ts !== "number" || !Number.isFinite(entrada.ts) || entrada.ts < 0) {
+      const entrada = intentarParsear(linea);
+      if (entrada === undefined || !entradaValida(entrada)) {
+        // Acá sí, en el medio del archivo: es corrupción real, se falla cerrado.
         throw new Error("el journal de replay está corrupto");
       }
       if (entrada.state === "released") actual.delete(entrada.digest); // check-readonly:allow Map.delete temporal, no es HTTP
       else actual.set(entrada.digest, { state: entrada.state, touched: entrada.ts });
     }
-    return actual;
+    let colaPartida = false;
+    if (cola !== undefined && cola.trim() !== "") {
+      const entrada = intentarParsear(cola);
+      if (entrada !== undefined && entradaValida(entrada)) {
+        if (entrada.state === "released") actual.delete(entrada.digest); // check-readonly:allow Map.delete temporal, no es HTTP
+        else actual.set(entrada.digest, { state: entrada.state, touched: entrada.ts });
+      } else {
+        colaPartida = true;
+        logger.warn("kapso.webhook.replay.linea_partida", { largo: cola.length });
+      }
+    }
+    return { entries: actual, colaPartida };
   }
 
   private escribirLinea(digest: string, state: WebhookReplayState | "released", touched: number): boolean {
@@ -355,11 +410,17 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
     }
   }
 
-  private compactIfNeeded(): void {
+  /**
+   * `forzar` salta el chequeo de umbral. Se usa cuando `cargar`/`leerActual`
+   * detectaron una cola partida: aunque el journal esté chico, hay que
+   * reescribirlo igual para que el archivo en disco quede sano y el próximo
+   * arranque no vuelva a toparse con la misma línea a medio escribir.
+   */
+  private compactIfNeeded(forzar = false): void {
     // La compactación es best effort: el techo duro de memoria lo pone el Map
     // acotado. Si falla, el store queda marcado como degradado y las reservas
     // siguientes fallan cerrado.
-    if (this.entries.size <= this.maxEntries && this.journalTransitions <= this.maxEntries * 2) return;
+    if (!forzar && this.entries.size <= this.maxEntries && this.journalTransitions <= this.maxEntries * 2) return;
     let lockFd: number | null = null;
     let journalLockHeld = false;
     const tmpPath = `${this.path}.${randomUUID()}.tmp`;
@@ -423,7 +484,7 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
     try {
       // Otro proceso pudo haber agregado este id después de que esta instancia
       // cargó el journal.
-      const actual = this.leerActual();
+      const { entries: actual, colaPartida } = this.leerActual();
       const previo = actual.get(digest);
       if (previo !== undefined && !this.vencida(previo, now)) {
         this.entries.clear();
@@ -453,7 +514,10 @@ export class FileWebhookReplayStore extends BoundedReplayStore {
         throw new Error("No se pudo persistir la reserva de replay; por seguridad el webhook NO se procesó.");
       }
       this.entries.set(digest, { state: "in_flight", touched: now });
-      this.compactIfNeeded();
+      // Si `leerActual` encontró una cola partida, se fuerza la compactación
+      // ya que estamos escribiendo de todos modos con el lock tomado: es la
+      // oportunidad de dejar el journal sano sin esperar a un reinicio.
+      this.compactIfNeeded(colaPartida);
       return true;
     } catch (err) {
       this.degradar("reservar", err);
