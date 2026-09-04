@@ -268,20 +268,22 @@ describe("decisión de ruteo", () => {
     expect(d.accion).toBe("ignorar");
   });
 
-  it("un audio de alguien autorizado se CONTESTA, no se ignora", () => {
-    // Cambió en sep-2026: antes se ignoraba con un motivo legible… en un log
-    // que el usuario no lee. Del otro lado eso es silencio, y el que dictó un
-    // audio no tiene forma de saber si el sistema está roto o no lo escuchó.
+  it("un audio de alguien autorizado se DELEGA al agente, no se ignora", () => {
+    // Cambió en sep-2026: antes se ignoraba, y del otro lado eso es silencio.
+    // Se delega y no se contesta acá porque Kapso le pasa al agente una
+    // variable de TEXTO (`vars.last_user_input`), no el payload crudo: si
+    // transcribió el audio, el agente lo resuelve. Este webhook ve `type:
+    // "audio"` y nada más, así que contestar "no puedo escuchar audios" sería
+    // contradecir al agente que ya lo resolvió.
     const d = decidirWebhook(
       normalizarEvento({
         entry: [{ changes: [{ value: { messages: [{ from: AUTORIZADO, type: "audio" }] } }] }],
       }),
       opciones,
     );
-    expect(d.accion).toBe("responder");
-    if (d.accion === "responder") {
-      expect(d.interpretacion).toBeNull();
-      expect(d.respuesta).toMatch(/audios/i);
+    expect(d.accion).toBe("delegar");
+    if (d.accion === "delegar") {
+      expect(d.interpretacion.respuesta_sugerida).toMatch(/audio/i);
     }
   });
 });
@@ -573,10 +575,12 @@ describe("un audio o una foto no pueden terminar en silencio", () => {
     perfil: null,
   });
 
-  it("a un remitente AUTORIZADO se le contesta que escriba", () => {
+  it("a un remitente AUTORIZADO se le delega, con un respaldo escrito", () => {
     const d = decidirWebhook(evento("audio"), opciones);
-    expect(d.accion).toBe("responder");
-    if (d.accion === "responder") expect(d.respuesta).toMatch(/escrib/i);
+    expect(d.accion).toBe("delegar");
+    if (d.accion === "delegar") {
+      expect(d.interpretacion.respuesta_sugerida).toMatch(/escrib/i);
+    }
   });
 
   it("a un desconocido se le sigue sin contestar NADA", () => {

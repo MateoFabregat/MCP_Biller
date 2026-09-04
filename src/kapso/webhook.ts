@@ -328,13 +328,14 @@ export function normalizarEvento(payload: unknown): EventoEntrante {
  * el agente con el humano adelante. Un webhook no tiene con quién confirmar.
  */
 /**
- * Lo que se contesta ante un audio, una foto, un sticker o una ubicación.
+ * El respaldo para un audio, una foto, un sticker o una ubicación.
  *
- * Corto y con la salida adelante: el que dictó un audio quiere resolver algo,
- * no leer una explicación de por qué no se puede.
+ * Es condicional a propósito ("si no la pude leer"): el webhook ve el payload
+ * crudo y no sabe si el agente recibió una transcripción. Afirmar que no se
+ * puede, cuando el agente quizás ya lo resolvió, es peor que no decir nada.
  */
 export const TEXTO_TIPO_NO_SOPORTADO =
-  "Todavía no puedo escuchar audios ni leer imágenes 🙈 Escribime en un mensaje qué necesitás " +
+  "Si me mandaste un audio o una foto y no la pude leer, escribime en un mensaje qué necesitás " +
   '—por ejemplo "facturale 2 bolsas a 610 a Pérez" o "¿quién me debe?"— y lo hago.';
 
 const VIAS_AUTORESPONDIBLES: ReadonlySet<Interpretacion["via"]> = new Set([
@@ -437,23 +438,37 @@ export function decidirWebhook(evento: EventoEntrante, opciones: DecidirOpciones
     };
   }
 
-  // UN AUDIO O UNA FOTO NO PUEDEN TERMINAR EN SILENCIO.
+  // UN AUDIO O UNA FOTO NO PUEDEN TERMINAR EN SILENCIO — PERO TAMPOCO LOS
+  // CONTESTA ESTE WEBHOOK.
   //
-  // Va DESPUÉS de la allowlist a propósito: contestarle "no puedo leer audios"
-  // a un desconocido ya confirma que este número atiende a esta empresa, que es
-  // exactamente lo que la barrera de entrada evita. A un autorizado, en cambio,
-  // el silencio es el peor modo de falla del proyecto: dicta un mensaje —que en
-  // Uruguay es la forma más común de escribir— y no recibe nada, que es
-  // indistinguible de "está roto".
+  // Va DESPUÉS de la allowlist a propósito: contestarle cualquier cosa a un
+  // desconocido ya confirma que este número atiende a esta empresa, que es
+  // exactamente lo que la barrera de entrada evita.
   //
-  // No intentamos adivinar el contenido: se dice qué se puede hacer y se sigue.
+  // Y SE DELEGA, NO SE CONTESTA, por lo que se verificó el 04/09/2026 mirando
+  // las ejecuciones reales del workflow: Kapso NO le pasa al agente el payload
+  // crudo de Meta sino una variable de texto (`vars.last_user_input`). O sea
+  // que si Kapso transcribe el audio —dice que lo hace desde el plan Free—, el
+  // agente recibe el TEXTO y puede resolverlo perfectamente. Este webhook, que
+  // ve el payload crudo, no tiene forma de saberlo: ve `type: "audio"` y nada
+  // más.
+  //
+  // Contestar "no puedo escuchar audios" desde acá sería, en ese caso, mandarle
+  // al usuario una negativa mientras el agente le resuelve el pedido: dos
+  // mensajes que se contradicen. Delegar deja que decida el único que tiene el
+  // dato, y `respuesta_sugerida` viaja igual como respaldo para cuando el
+  // agente tampoco tenga nada que leer.
   if (evento.texto === null) {
     return {
-      accion: "responder",
+      accion: "delegar",
       from: evento.from,
-      interpretacion: null,
-      respuesta: TEXTO_TIPO_NO_SOPORTADO,
-      mostrar_menu: false,
+      interpretacion: {
+        opcion: null,
+        via: "desconocido",
+        mostrar_menu: false,
+        respuesta_sugerida: TEXTO_TIPO_NO_SOPORTADO,
+      },
+      tools: [],
     };
   }
 
