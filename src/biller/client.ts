@@ -46,7 +46,22 @@ export type FetchImpl = typeof fetch;
 export interface BillerClientDeps {
   fetchImpl?: FetchImpl;
   rateLimiters?: RateLimiters;
+  /** Espera inyectable: los tests no pueden dormir 200 ms por reintento. */
+  esperar?: (ms: number) => Promise<void>;
 }
+
+/**
+ * Cuántas veces se reintenta un 429, y cuánto se espera entre intentos.
+ *
+ * DOS Y NO MÁS. Los limitadores locales (`utils/rateLimit.ts`) evitan pasarse
+ * por culpa nuestra; este reintento cubre lo que ellos no ven: otro proceso de
+ * la misma empresa gastando el mismo token, o un límite del lado de Biller que
+ * no conocemos. Con un techo bajo, una consulta que se resuelve esperando
+ * doscientos milisegundos deja de ser un "no se pudo consultar" para el
+ * usuario; insistiendo más, una espera se convierte en un timeout, que es peor.
+ */
+const REINTENTOS_429 = 2;
+const ESPERA_BASE_429_MS = 200;
 
 const MAX_BODY_SNIPPET = 600;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -54,6 +69,7 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 export class BillerClient {
   private readonly fetchImpl: FetchImpl;
   private readonly rateLimiters: RateLimiters;
+  private readonly esperar: (ms: number) => Promise<void>;
 
   /**
    * Identidad OPACA de este cliente, para usar como parte de una clave de cache.
@@ -79,6 +95,7 @@ export class BillerClient {
       .update(`${config.apiBaseUrl}\u0000${config.apiToken}`)
       .digest("hex")
       .slice(0, 32);
+    this.esperar = deps.esperar ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.fetchImpl = deps.fetchImpl ?? globalThis.fetch;
     if (typeof this.fetchImpl !== "function") {
       throw new BillerNetworkError(
@@ -98,6 +115,29 @@ export class BillerClient {
    * `assertReadOnlyMethod`. No se expone públicamente.
    */
   private async request<T>(method: string, options: BillerGetOptions): Promise<T> {
+    // SOLO GET, Y SOLO 429. Este cliente es GET-only por diseño
+    // (`assertReadOnlyMethod`), así que reintentar acá no puede duplicar una
+    // emisión: eso vive en `write/writeClient.ts` y ahí un 429 NO se reintenta
+    // —puede significar que Biller ya lo recibió, y de eso se encarga la
+    // idempotencia, no un bucle—.
+    for (let intento = 0; ; intento += 1) {
+      try {
+        return await this.intentar<T>(method, options);
+      } catch (err) {
+        const esRateLimit = err instanceof BillerApiError && err.status === 429;
+        if (!esRateLimit || intento >= REINTENTOS_429) throw err;
+        const espera = ESPERA_BASE_429_MS * 2 ** intento;
+        logger.warn("biller.rate_limit.reintento", {
+          path: options.path,
+          intento: intento + 1,
+          espera_ms: espera,
+        });
+        await this.esperar(espera);
+      }
+    }
+  }
+
+  private async intentar<T>(method: string, options: BillerGetOptions): Promise<T> {
     assertReadOnlyMethod(method);
 
     const url = this.buildUrl(options.path, options.query);

@@ -270,6 +270,25 @@ archivo son los backlogs previos, todavía válidos.
   con nombre: `estadoDesdeArgumentos` (los argumentos convertidos en tipos) y
   `aplicarRespuestaDelUsuario` (lo único que muta el estado con texto libre).
 
+## Ola D — de la demo a producción (04/09/2026)
+
+Los tickets están en `.scratch/ola-d-produccion/issues/`, en formato
+agente-listo, y las decisiones que los ordenan en
+[`docs/DECISIONES.md`](docs/DECISIONES.md) (ADR-001 a 003).
+
+| # | Ticket | Bloquea producción | Estado |
+|---|---|---|---|
+| 01 | Pedirle a Biller un endpoint de validación (dry-run) | no | pedido de producto |
+| 02 | Verificar cómo llega un audio transcripto | sí | necesita un teléfono |
+| 03 | Exportación: qué `indicador_facturacion` lleva | sí (ese caso) | **decisión del dueño** |
+| 04 | Cuenta corriente con fecha de corte | no | abierto |
+| 05 | Reintentar el 429 de Biller | sí | ✅ hecho (04/09/2026) |
+| 06 | Todo submenú con salida de un toque | sí | abierto |
+| 07 | Catálogo único de tipos de CFE | no | abierto |
+| 08 | El cobro también con botones | no | abierto |
+| 09 | Infraestructura: dominio, secretos, backup, monitoreo | sí | abierto |
+| 10 | Los seis POST que faltan validar en TEST | sí | abierto |
+
 ## P0 — Antes de poner en producción
 
 - [ ] **Validar endpoints de escritura contra la API real de test.**

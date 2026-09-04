@@ -104,3 +104,55 @@ describe("BillerClient", () => {
     expect((data[0] as Record<string, unknown>).estado).toBe("AE");
   });
 });
+
+describe("un 429 de Biller no es un error del usuario", () => {
+  // Los limitadores locales evitan pasarse por culpa nuestra, pero no cubren
+  // que Biller conteste 429 igual: otro proceso de la misma empresa usando el
+  // mismo token, o un límite de ellos que no conocemos. Hoy eso subía como
+  // error y el usuario leía "no se pudo consultar" por algo que se resuelve
+  // esperando 200 ms.
+  const esperaInstantanea = { esperar: async () => {} };
+
+  it("reintenta un GET y devuelve el dato cuando el segundo intento anda", async () => {
+    let intentos = 0;
+    const fetchImpl = vi.fn(async () => {
+      intentos += 1;
+      return intentos === 1 ? jsonResponse({ error: "rate limit" }, 429) : jsonResponse(EMITIDO_EXAMPLE);
+    });
+    const client = new BillerClient(makeConfig(), {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      rateLimiters: noopLimiters,
+      ...esperaInstantanea,
+    });
+
+    const r = await client.get({ path: "/v2/comprobantes/obtener" });
+    expect(r).toBeDefined();
+    expect(intentos).toBe(2);
+  });
+
+  it("se rinde con un techo bajo y deja el 429 como error", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: "rate limit" }, 429));
+    const client = new BillerClient(makeConfig(), {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      rateLimiters: noopLimiters,
+      ...esperaInstantanea,
+    });
+
+    await expect(client.get({ path: "/v2/comprobantes/obtener" })).rejects.toThrow();
+    // Tres intentos en total: el original y dos reintentos. Insistir más
+    // convierte una espera en un timeout, que es peor que el error.
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("un 422 NO se reintenta: el cuerpo está mal y va a estar mal de nuevo", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: "campo faltante" }, 422));
+    const client = new BillerClient(makeConfig(), {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      rateLimiters: noopLimiters,
+      ...esperaInstantanea,
+    });
+
+    await expect(client.get({ path: "/v2/comprobantes/obtener" })).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+});
