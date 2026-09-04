@@ -95,7 +95,13 @@ export async function manejarRequestServerless(
     registro = cargarTenants(process.env);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    responderErrorRpc(res, 500, `Registro de empresas inválido: ${message}`);
+    // El detalle completo va SOLO al log: acá adentro viajan ids de empresas,
+    // un `phone_number_id` o una ruta absoluta del disco —nada que sea un
+    // secreto, pero sí topología gratis para quien todavía no autenticó. Esta
+    // request llega ANTES de `autenticarConTenants`, así que el que la mandó
+    // puede no tener ninguna credencial.
+    logger.error("serverless.registro.invalido", { message });
+    responderErrorRpc(res, 500, "Registro de empresas inválido. Revisá los logs del server.");
     return;
   }
 
@@ -116,8 +122,15 @@ export async function manejarRequestServerless(
     config = loadConfig(entorno);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const de = auth.tenant === null ? "" : ` (empresa "${auth.tenant.id}")`;
-    responderErrorRpc(res, 500, `Configuración inválida${de}: ${message}`);
+    // Mismo criterio que el catch del registro: el detalle (que acá puede
+    // traer rutas absolutas) va al log, no a la respuesta. La diferencia es
+    // que esta request YA autenticó, así que el log puede nombrar de qué
+    // empresa es el error sin filtrar nada que el que llamó no supiera ya.
+    logger.error("serverless.config.invalida", {
+      message,
+      ...(auth.tenant !== null ? { empresa: auth.tenant.id } : {}),
+    });
+    responderErrorRpc(res, 500, "Configuración inválida. Revisá los logs del server.");
     return;
   }
   if (auth.tenant !== null) {

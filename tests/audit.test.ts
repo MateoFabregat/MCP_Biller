@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Auditor } from "../src/write/audit.js";
@@ -41,4 +41,31 @@ describe("Auditor file sink", () => {
     // El audit guarda solo el hash del payload, nunca el payload completo.
     expect(logged.payload_sha256).toBe("deadbeef");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "aprieta el permiso a 0600 aunque el archivo YA EXISTÍA con otro permiso (umask del operador)",
+    () => {
+      // El `mode` de appendFileSync solo aplica AL CREAR: un archivo que ya
+      // existía —rotado con `cp`, o el directorio armado a mano antes de
+      // arrancar— se queda con el permiso con el que lo creó otro. El audit es
+      // el rastro fiscal de lo emitido: no puede quedar legible para cualquiera
+      // con acceso al disco.
+      const dir = mkdtempSync(path.join(tmpdir(), "biller-audit-preexistente-"));
+      created.push(dir);
+      const file = path.join(dir, "audit.log");
+      closeSync(openSync(file, "w"));
+      chmodSync(file, 0o644);
+
+      const auditor = new Auditor(file);
+      auditor.record({
+        tool: "biller_emitir_comprobante",
+        endpoint: "/v2/comprobantes/crear",
+        environment: "test",
+        phase: "executed",
+        payloadSha256: "deadbeef",
+      });
+
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    },
+  );
 });

@@ -101,6 +101,7 @@
 import { readFileSync } from "node:fs";
 import { resolve as resolverRuta } from "node:path";
 import { rutasDerivadasDe } from "../config.js";
+import { registrarSecretosParaLogs } from "../logger.js";
 import { compararSeguro } from "../transport/httpAuth.js";
 
 export interface Tenant {
@@ -151,6 +152,11 @@ export const VARIABLES_QUE_NO_SE_HEREDAN: readonly string[] = [
   "BILLER_DEFAULT_EMPRESA_RUT",
   "BILLER_DEFAULT_SUCURSAL_ID",
   "BILLER_SUCURSALES_JSON",
+  // Es un opt-in de RIESGO FISCAL, no una preferencia técnica: prenderla
+  // registra `biller_posicion_iva`, una ESTIMACIÓN de IVA que se parece
+  // peligrosamente a una declaración. Se decide por empresa; heredarla del
+  // proceso la prendería para las veinte sin que ninguna la haya pedido.
+  "BILLER_ENABLE_IVA_ESTIMADO",
 ];
 
 /**
@@ -330,11 +336,23 @@ export function construirRegistro(
     // del disco—. Se valida el charset en vez de sanitizar porque sanitizar
     // COLAPSA: "a/b" y "a-b" se vuelven el mismo directorio, y dos ids distintos
     // compartiendo archivo es exactamente lo que esto tiene que hacer imposible.
-    if (!/^[A-Za-z0-9-]+$/.test(id)) {
+    //
+    // MINÚSCULAS Y ACOTADO, y no por prolijidad: el id es un componente de ruta
+    // y macOS, Windows y Docker Desktop montan el filesystem CASE-INSENSITIVE
+    // por default. "Panaderia" y "panaderia" son el MISMO directorio en esos
+    // filesystems, aunque acá se comparen byte a byte y la deduplicación de
+    // arriba (`idsVistos`) los vea distintos: el registro aceptaría las dos
+    // empresas y sus archivos derivados —audit, idempotencia, borradores—
+    // resolverían al mismo inode. Y las métricas ya lowercasean el id para la
+    // etiqueta `empresa=`, así que dos ids que solo difieren en mayúsculas ya
+    // se fusionan ahí. El largo de 48 es el que acepta esa misma etiqueta.
+    if (!/^[a-z0-9-]{1,48}$/.test(id)) {
       throw new TenantConfigError(
-        `El id del tenant "${id}" tiene caracteres que no son letras, dígitos o guion. El id es un ` +
-          "componente de ruta (BILLER_DATA_DIR deriva <data_dir>/<id>/audit.jsonl), así que una " +
-          "barra o un punto lo sacan de su directorio. Usá algo como \"panaderia-rivera\".",
+        `El id del tenant "${id}" tiene que ser minúsculas, dígitos o guion, y de hasta 48 ` +
+          "caracteres. Es un componente de ruta (BILLER_DATA_DIR deriva <data_dir>/<id>/audit.jsonl) " +
+          "y macOS, Windows y Docker Desktop no distinguen \"Panaderia\" de \"panaderia\": dos ids que " +
+          "difieren solo en mayúsculas terminarían escribiendo el mismo archivo. Los 48 caracteres son " +
+          "el largo que acepta la etiqueta `empresa=` de las métricas. Usá algo como \"panaderia-rivera\".",
       );
     }
     // De yapa, el charset deja afuera el `_` inicial de `TENANT_IMPLICITO`
@@ -525,6 +543,19 @@ export function construirRegistro(
     tenants.push(tenant);
     porToken.set(token, tenant);
     if (phoneNumberId !== "") porPhoneNumberId.set(phoneNumberId, tenant);
+
+    // El secreto de ESTE tenant queda protegido en los logs desde que se arma
+    // el registro, y no recién cuando la empresa abre sesión. Sin esto, el
+    // `auth_token` de un tenant que nunca llegó a llamar a `loadConfig`
+    // —porque el error de arranque fue de OTRO tenant, o porque todavía no le
+    // llegó una request— podía salir en claro si algún log llegaba a incluirlo.
+    registrarSecretosParaLogs([
+      token,
+      envTenant.BILLER_API_TOKEN,
+      envTenant.KAPSO_API_KEY,
+      envTenant.KAPSO_WEBHOOK_SECRET,
+      envTenant.BILLER_APPROVAL_SECRET,
+    ]);
   });
 
   return { tenants, porToken, porPhoneNumberId };

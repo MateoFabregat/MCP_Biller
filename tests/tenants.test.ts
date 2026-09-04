@@ -89,6 +89,25 @@ describe("configuraciones que NO se aceptan", () => {
     expect(() => construirRegistro({ id: "a" })).toThrow(/ARRAY/);
   });
 
+  it("un id con mayúsculas: en macOS/Windows/Docker Desktop sería el mismo directorio que en minúsculas", () => {
+    expect(() =>
+      construirRegistro([{ id: "Panaderia", auth_token: TOKEN_A, env: { BILLER_API_TOKEN: "x" } }]),
+    ).toThrow(/minúsculas/);
+  });
+
+  it("un id de 49 caracteres: más largo que lo que acepta la etiqueta de métricas", () => {
+    expect(() =>
+      construirRegistro([{ id: "a".repeat(49), auth_token: TOKEN_A, env: { BILLER_API_TOKEN: "x" } }]),
+    ).toThrow(TenantConfigError);
+  });
+
+  it("un id con guiones y minúsculas de largo normal sigue pasando", () => {
+    const r = construirRegistro([
+      { id: "panaderia-rivera", auth_token: TOKEN_A, env: { BILLER_API_TOKEN: "x" } },
+    ]);
+    expect(r.tenants[0]!.id).toBe("panaderia-rivera");
+  });
+
   it("NO se degrada en silencio: un registro inválido tira, no devuelve vacío", () => {
     // Devolver "cero tenants" ante un JSON roto haría que TODAS las empresas
     // cayeran al tenant implícito del proceso — todas leyendo los datos de una.
@@ -238,6 +257,17 @@ describe("lo sensible no se hereda: el overlay lo borra", () => {
       { BILLER_MAX_MONTO_UYU: "500000" },
     );
     expect(entornoDe(r.tenants[0]!, { BILLER_MAX_MONTO_UYU: "500000" }).BILLER_MAX_MONTO_UYU).toBe("80000");
+  });
+
+  it("BILLER_ENABLE_IVA_ESTIMADO del proceso no se hereda: es un opt-in fiscal por empresa", () => {
+    // Es una ESTIMACIÓN de IVA, no una preferencia técnica: prenderla en el
+    // proceso no puede activarla para las veinte empresas del registro.
+    const r = construirRegistro(
+      [{ id: "a", auth_token: TOKEN_A, env: { BILLER_API_TOKEN: "x" } }],
+      { BILLER_ENABLE_IVA_ESTIMADO: "true" },
+    );
+    const entorno = entornoDe(r.tenants[0]!, { BILLER_ENABLE_IVA_ESTIMADO: "true" });
+    expect(entorno.BILLER_ENABLE_IVA_ESTIMADO).toBeUndefined();
   });
 
   it("si el proceso no tiene ninguna de esas, no molesta a nadie", () => {

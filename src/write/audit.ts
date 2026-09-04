@@ -6,7 +6,7 @@
 // y, si se configura BILLER_AUDIT_LOG_PATH, también a un archivo append-only.
 // =============================================================================
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, chmodSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { logger } from "../logger.js";
@@ -94,6 +94,14 @@ export class Auditor implements AuditSink {
       // proceso moría justo después de un POST ya marcado como ejecutado.
       try {
         appendFileSync(this.filePath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
+        // El `mode` de arriba solo aplica AL CREAR el archivo: si ya existía
+        // —lo creó un `cp` de rotación, o el operador armó el directorio a
+        // mano con el umask del sistema (022 típico)— queda en 644 y este es
+        // el rastro fiscal de lo emitido quedando legible para cualquiera con
+        // acceso al disco. Se fuerza acá, dentro del mismo `try` que ya
+        // degrada: si el chmod falla, el audit ya se escribió y no hay que
+        // tumbar esa escritura por un permiso que no se pudo apretar.
+        chmodSync(this.filePath, 0o600);
       } catch (err) {
         logger.warn("No se pudo escribir el audit log en archivo.", {
           path: this.filePath,

@@ -44,7 +44,7 @@
 // resultante valida entero.
 // =============================================================================
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
 
@@ -404,6 +404,11 @@ async function crear() {
 
   // Escribir y RELEER: lo que se verifica es lo que quedó en el disco.
   writeFileSync(rutaRegistro, `${JSON.stringify(candidato, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  // El `mode` de writeFileSync solo aplica al CREAR el archivo: si ya existía
+  // —un alta anterior, o el archivo creado a mano antes de correr esto—, el
+  // permiso previo sobrevive a la escritura. Este archivo tiene el token de
+  // Biller y el auth_token de cada empresa: se fuerza 0600 después de escribir.
+  chmodSync(rutaRegistro, 0o600);
   const releido = construirRegistro(JSON.parse(readFileSync(rutaRegistro, "utf8")), envBase);
   const tenant = releido.tenants.find((t) => t.id === id);
 
