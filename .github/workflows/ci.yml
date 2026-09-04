@@ -8,6 +8,14 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    # UN CUELGUE TIENE QUE FALLAR FUERTE Y RÁPIDO, NO ARDER SEIS HORAS.
+    #
+    # Sin este tope, el job corría hasta que GitHub lo mataba a las 6 h y
+    # terminaba como "cancelled", que se lee igual que si alguien lo hubiera
+    # cancelado a mano. Así estuvo el pipeline desde el 28/08 sin que nadie lo
+    # notara: los tests pasaban, vitest no salía nunca, y el resultado no era
+    # rojo sino ambiguo. La suite entera tarda menos de dos minutos.
+    timeout-minutes: 15
     strategy:
       matrix:
         node-version: ["18.x", "20.x"]
