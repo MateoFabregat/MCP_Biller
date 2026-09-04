@@ -17,9 +17,10 @@
 // se olvida y la que más caro sale: un e-Ticket al mostrador por encima del
 // umbral SIN receptor identificado es un comprobante mal emitido.
 //
-// El problema práctico es que la UI cambia todos los días y NO está en la API de
-// Biller. Por eso:
-//   - el valor de la UI se configura (`BILLER_VALOR_UI`) y viene con fecha;
+// El problema práctico es que la UI NO está en la API de Biller. Por eso:
+//   - el valor de la UI se configura (`BILLER_VALOR_UI`) y viene con fecha. El
+//     que corresponde es el del 1º DE ENERO del año, que es el que fija el
+//     decreto, y vale todo el año: ver `MES_DIA_VIGENCIA_UI`;
 //   - si NO está configurado se usa un valor de referencia y se avisa que el
 //     umbral es aproximado — nunca se calla el chequeo, porque un aviso
 //     aproximado a tiempo vale más que un silencio exacto;
@@ -78,13 +79,23 @@ export const VALOR_UI_MIN_PLAUSIBLE = 1;
 export const VALOR_UI_MAX_PLAUSIBLE = 20;
 
 /**
- * Después de cuántos días sin actualizar, el valor configurado se considera
- * VENCIDO y se ignora. El INE publica la UI todos los días hábiles: pasadas un
- * par de semanas, ya no representa el valor de hoy, y usarlo igual —sin
- * avisar— es exactamente el modo de falla que este chequeo cierra: un e-Ticket
- * que debía exigir receptor (o no) decidido con el número de hace un mes.
+ * EL VALOR ES EL DEL 1º DE ENERO, Y VALE TODO EL AÑO.
+ *
+ * El decreto de facturación electrónica fija el umbral de las 5.000 UI al
+ * valor de la UI **del 1º de enero del año**, y no al del día. Es a propósito:
+ * si se tomara el valor diario, el mismo comprobante por el mismo importe
+ * cambiaría de régimen a mitad de año, y dos ventas iguales de enero y de
+ * diciembre exigirían cosas distintas.
+ *
+ * Esto estuvo mal implementado hasta sep-2026: se trataba a la UI como un dato
+ * de mercado que se pone viejo, con quince días de tolerancia. El efecto era
+ * el contrario del buscado — el valor CORRECTO, el de enero, se marcaba vencido
+ * en febrero y se lo reemplazaba por el de referencia todo el resto del año.
+ *
+ * La regla real es de AÑO: el valor vale mientras su fecha sea de este año, y
+ * vence el 1º de enero siguiente, que es cuando hay uno nuevo que poner.
  */
-export const VALOR_UI_ANTIGUEDAD_MAX_DIAS = 15;
+export const MES_DIA_VIGENCIA_UI = "01-01";
 
 export interface OpcionesUi {
   /** Pesos por Unidad Indexada. Si falta, se usa VALOR_UI_REFERENCIA y se avisa. */
@@ -138,9 +149,17 @@ export function resolverUmbralReceptor(opciones: OpcionesUi = {}): UmbralRecepto
     fechaCruda !== undefined && FORMATO_FECHA_UI.test(fechaCruda) ? fechaCruda : undefined;
   const formatoInvalido = fechaCruda !== undefined && fechaValida === undefined;
 
-  const antiguedadDias =
-    fechaValida !== undefined && opciones.hoy !== undefined ? diasEntre(fechaValida, opciones.hoy) : null;
-  const vencido = antiguedadDias !== null && antiguedadDias > VALOR_UI_ANTIGUEDAD_MAX_DIAS;
+  // Vence por AÑO, no por días: ver `MES_DIA_VIGENCIA_UI`.
+  const anioValor = fechaValida?.slice(0, 4);
+  const anioHoy = opciones.hoy?.slice(0, 4);
+  const vencido =
+    anioValor !== undefined && anioHoy !== undefined && anioValor !== anioHoy;
+  // Está en el año correcto pero no es el 1º de enero: se usa igual —es lo que
+  // el operador configuró y está en rango— pero se dice cuál fija el decreto.
+  // El valor de mitad de año es MÁS ALTO, así que el umbral en pesos queda más
+  // alto y se pide receptor MENOS veces: la dirección cara.
+  const fueraDeFecha =
+    fechaValida !== undefined && !vencido && fechaValida.slice(5) !== MES_DIA_VIGENCIA_UI;
 
   const valorCrudo = opciones.valor_ui;
   const tieneValor = typeof valorCrudo === "number" && Number.isFinite(valorCrudo) && valorCrudo > 0;
@@ -166,7 +185,11 @@ export function resolverUmbralReceptor(opciones: OpcionesUi = {}): UmbralRecepto
   if (configurado) {
     nota =
       `Umbral de ${umbral_ui} UI = $${umbral_uyu} a una UI de $${valor_ui}` +
-      (fechaValida !== undefined ? ` (valor del ${fechaValida}).` : ".");
+      (fechaValida !== undefined ? ` (valor del ${fechaValida}).` : ".") +
+      (fueraDeFecha
+        ? ` OJO: el decreto fija este umbral con la UI del 1º de enero del año, y la fecha ` +
+          `configurada es otra. Revisá que ${valor_ui} sea el valor del 1º de enero.`
+        : "");
   } else if (absurdo) {
     nota =
       `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}, IGNORANDO BILLER_VALOR_UI=${valorCrudo} por estar ` +
@@ -175,10 +198,10 @@ export function resolverUmbralReceptor(opciones: OpcionesUi = {}): UmbralRecepto
       `($${VALOR_UI_REFERENCIA}) hasta que se corrija.`;
   } else if (vencido) {
     nota =
-      `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}: BILLER_VALOR_UI_FECHA (${fechaValida}) tiene ` +
-      `${antiguedadDias} días, más de los ${VALOR_UI_ANTIGUEDAD_MAX_DIAS} que se toleran. El valor ` +
-      `configurado está VENCIDO, así que se ignora y se usa el de REFERENCIA ($${VALOR_UI_REFERENCIA}) ` +
-      "hasta que se actualice.";
+      `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}: BILLER_VALOR_UI_FECHA (${fechaValida}) es de ` +
+      `${anioValor} y estamos en ${anioHoy}. El umbral se fija con la UI del 1º de enero del año en ` +
+      `curso, así que ese valor ya no corresponde: se usa el de REFERENCIA ($${VALOR_UI_REFERENCIA}) ` +
+      `hasta que se configure el del 1º de enero de ${anioHoy}.`;
   } else if (formatoInvalido) {
     nota =
       `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}, usando un valor de UI de REFERENCIA ` +
@@ -187,8 +210,8 @@ export function resolverUmbralReceptor(opciones: OpcionesUi = {}): UmbralRecepto
   } else {
     nota =
       `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}, usando un valor de UI de REFERENCIA ` +
-      `($${VALOR_UI_REFERENCIA}) porque BILLER_VALOR_UI no está configurado. El valor real lo publica ` +
-      "el INE/DGI y cambia a diario: configuralo para que el umbral sea exacto.";
+      `($${VALOR_UI_REFERENCIA}) porque BILLER_VALOR_UI no está configurado. El que corresponde es la ` +
+      "UI del 1º de enero del año en curso, que publica el INE: configuralo para que el umbral sea exacto.";
   }
 
   return {

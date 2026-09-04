@@ -474,11 +474,17 @@ exige_receptor = total_uyu ≥ umbral_uyu   (para la familia e-Ticket)
   el monto.
 - La familia **e-Ticket** lo exige **por encima del umbral**.
 
-El valor de la UI **cambia todos los días y no está en la API de Biller**. Se
-configura (`BILLER_VALOR_UI`, con su fecha). Sin configurar, el chequeo **no se
-apaga**: usa un valor de referencia deliberadamente **bajo**, para que el aviso
-aparezca de más y no de menos. Equivocarse avisando de más cuesta una pregunta;
-de menos, un comprobante mal emitido.
+El umbral se calcula con la UI **del 1º de enero del año**, no con la de hoy:
+lo fija así el decreto de facturación electrónica, para que el mismo importe no
+cambie de régimen a mitad de año. O sea que el valor se configura **una vez por
+año** (`BILLER_VALOR_UI` + `BILLER_VALOR_UI_FECHA`), y vale hasta el 1º de enero
+siguiente, cuando hay uno nuevo que poner. No está en la API de Biller.
+
+Sin configurar, el chequeo **no se apaga**: usa un valor de referencia
+deliberadamente **bajo**, para que el aviso aparezca de más y no de menos.
+Equivocarse avisando de más cuesta una pregunta; de menos, un comprobante mal
+emitido. Lo mismo con un valor del año pasado o con un tipeo fuera de rango: se
+ignoran diciéndolo, nunca en silencio.
 
 Si el comprobante está en moneda extranjera y no trae `tasa_cambio`, el importe
 en pesos no se puede determinar: se dice `indeterminado`, no se afirma que el

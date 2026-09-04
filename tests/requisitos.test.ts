@@ -48,33 +48,54 @@ describe("umbral de receptor (regla de las 5.000 UI)", () => {
     expect(u.nota).toMatch(/IGNORANDO BILLER_VALOR_UI=63/);
   });
 
-  it("un valor de UI vencido (más de 15 días) se ignora y avisa", () => {
+  // EL VALOR ES EL DEL 1º DE ENERO, Y VALE TODO EL AÑO.
+  //
+  // No es una decisión nuestra ni una tolerancia elegida a ojo: el decreto de
+  // facturación electrónica fija el umbral de las 5.000 UI **al valor de la UI
+  // del 1º de enero del año**, justamente para que el mismo comprobante no
+  // cambie de régimen a mitad de año. Antes esto se trataba como un dato de
+  // mercado que se pone viejo (15 días de tolerancia), y el efecto era el
+  // contrario del buscado: el valor CORRECTO —el de enero— se marcaba vencido
+  // en febrero y se lo reemplazaba por el de referencia.
+  it("el valor del 1º de enero vale todo el año, incluido diciembre", () => {
+    for (const hoy of ["2026-01-01", "2026-09-01", "2026-12-31"]) {
+      const u = resolverUmbralReceptor({ valor_ui: UI, valor_ui_fecha: "2026-01-01", hoy });
+      expect(u.valor_ui_configurado, hoy).toBe(true);
+      expect(u.problema, hoy).toBeNull();
+      expect(u.valor_ui, hoy).toBe(UI);
+    }
+  });
+
+  it("al cambiar el año, el del enero anterior SÍ vence: hay que poner el nuevo", () => {
     const u = resolverUmbralReceptor({
       valor_ui: UI,
       valor_ui_fecha: "2026-01-01",
-      hoy: "2026-09-01",
+      hoy: "2027-01-02",
     });
     expect(u.valor_ui_configurado).toBe(false);
     expect(u.problema).toBe("vencido");
     expect(u.valor_ui).toBe(VALOR_UI_REFERENCIA);
-    expect(u.nota).toMatch(/VENCIDO/);
+    expect(u.nota).toMatch(/1º de enero de 2027/);
   });
 
-  it("un valor de UI reciente (dentro de los 15 días) SÍ se usa", () => {
+  it("una fecha de este año que NO es el 1º de enero se usa, pero se avisa", () => {
+    // El valor de julio es más alto que el de enero, así que el umbral en pesos
+    // queda MÁS ALTO y se pide receptor MENOS veces: es la dirección cara. No
+    // se ignora —es lo que el operador configuró y está en rango— pero se dice
+    // con todas las letras cuál es el que fija el decreto.
     const u = resolverUmbralReceptor({
       valor_ui: UI,
-      valor_ui_fecha: "2026-08-30",
+      valor_ui_fecha: "2026-07-01",
       hoy: "2026-09-01",
     });
     expect(u.valor_ui_configurado).toBe(true);
-    expect(u.problema).toBeNull();
-    expect(u.valor_ui).toBe(UI);
+    expect(u.nota).toMatch(/1º de enero/);
   });
 
-  it("sin 'hoy' no se puede evaluar antigüedad: no se marca vencido igual", () => {
+  it("sin 'hoy' no se puede evaluar el año: no se marca vencido igual", () => {
     // Callers que no pasan `hoy` (ninguno del código de producción — solo
-    // fixtures viejos) no rompen: el chequeo de antigüedad se salta, no se
-    // inventa un vencimiento.
+    // fixtures viejos) no rompen: el chequeo se saltea, no se inventa un
+    // vencimiento.
     const u = resolverUmbralReceptor({ valor_ui: UI, valor_ui_fecha: "2020-01-01" });
     expect(u.valor_ui_configurado).toBe(true);
   });

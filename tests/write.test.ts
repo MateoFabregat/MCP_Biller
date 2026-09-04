@@ -1031,17 +1031,18 @@ describe("un valor de UI vencido no alcanza para producción", () => {
       auditLogPath: "/tmp/a.jsonl",
       idempotencyLogPath: "/tmp/i.jsonl",
       maxMontos: { UYU: 100_000 },
-      valorUiFecha: "2026-01-01", // ocho meses viejo: `resolverUmbralReceptor` lo ignora
+      // Del 1º de enero del año PASADO: el umbral se fija con la UI del 1º de
+      // enero del año en curso, así que este ya no corresponde.
+      valorUiFecha: `${new Date().getUTCFullYear() - 1}-01-01`, // fecha-uy:allow es un año, no un día civil
       valorUi: 6.4237,
     };
     const vencido = evaluateWriteGate(makeConfig(base), { allowProduction: true });
     expect(vencido.allowed).toBe(false);
     expect(vencido.reason).toContain("BILLER_VALOR_UI");
 
-    // Con una fecha de esta semana, el mismo valor sí sirve.
-    const hoy = new Date().toISOString().slice(0, 10); // fecha-uy:allow es una fecha de test, no un día civil de negocio
+    // Con el 1º de enero de ESTE año, el mismo valor sirve todo el año.
     const vigente = evaluateWriteGate(
-      makeConfig({ ...base, valorUiFecha: hoy }),
+      makeConfig({ ...base, valorUiFecha: `${new Date().getUTCFullYear()}-01-01` }), // fecha-uy:allow ídem
       { allowProduction: true },
     );
     expect(vigente.allowed).toBe(true);

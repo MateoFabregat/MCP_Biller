@@ -216,10 +216,12 @@ export interface BillerConfig {
    * Valor de la Unidad Indexada en pesos, y la fecha de ese valor.
    *
    * DGI exige identificar al receptor cuando un e-Ticket supera cierto monto
-   * expresado en UI. La UI cambia todos los días y NO está en la API de Biller,
-   * así que el valor se configura acá. Sin esto el chequeo igual se hace, con un
-   * valor de referencia conservador y avisando que es aproximado: un aviso de
-   * más cuesta una pregunta, uno de menos cuesta un comprobante mal emitido.
+   * expresado en UI, y el decreto lo fija con la UI **del 1º de enero del año**
+   * —no la del día— para que el mismo importe no cambie de régimen a mitad de
+   * año. No está en la API de Biller, así que se configura acá y se cambia una
+   * vez por año. Sin esto el chequeo igual se hace, con un valor de referencia
+   * conservador y avisando que es aproximado: un aviso de más cuesta una
+   * pregunta, uno de menos cuesta un comprobante mal emitido.
    */
   valorUi?: number;
   valorUiFecha?: string;
