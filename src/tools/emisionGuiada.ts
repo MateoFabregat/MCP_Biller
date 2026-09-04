@@ -79,6 +79,8 @@ import {
   construirSubmenuIva,
 } from "../kapso/render.js";
 import { extraerPedidoEmision, type PedidoEmision } from "../kapso/extraerPedido.js";
+import { rankingClientes } from "../services/rankingClientes.js";
+import { limpiarParaTitulo } from "../utils/texto.js";
 import { extractClienteRut } from "../biller/normalize.js";
 import { fetchEmitidos } from "../biller/queries.js";
 import { CONCURRENCIA, mapConLimite } from "../biller/traerVentanas.js";
@@ -984,6 +986,26 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     // --- Qué sigue -----------------------------------------------------------
     let siguiente = siguientePaso(estado, { perfil });
 
+    // LOS CLIENTES FRECUENTES: lo que mandó el agente, y si no mandó nada, los
+    // que el server deduce del mismo historial que ya leyó para el perfil.
+    //
+    // El orden no es intercambiable: si el agente los pasó es porque viene de
+    // `biller_ranking_clientes` con un criterio propio (buscó por nombre, filtró
+    // por deuda), y eso le gana a la deducción genérica. La deducción existe
+    // para cuando NO se acordó, que es el caso que dejaba al usuario tipeando
+    // doce dígitos de RUT.
+    let frecuentes = a.clientes_frecuentes ?? [];
+    if (frecuentes.length === 0 && siguiente.paso === "cliente" && !pidioOtroCliente) {
+      try {
+        frecuentes = await buscarClientesFrecuentes(ctx);
+      } catch {
+        // Sin historial no hay lista, y sin lista se pregunta como siempre: es
+        // un atajo, no un requisito. Una caída de la API no puede trancar una
+        // emisión que el usuario puede completar escribiendo el RUT.
+        frecuentes = [];
+      }
+    }
+
     // "✏️ Otra fecha" es la única respuesta que RETROCEDE el flujo: el usuario
     // descartó un dato que ya estaba resuelto (hoy, por default) y todavía no
     // dio el reemplazo. Sin este override, `siguientePaso` devolvería
@@ -1040,13 +1062,8 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       // cambia el mensaje — de los tres botones fusionados a las tres tasas.
       interactivo = construirSubmenuIva();
       pregunta = "¿Qué IVA lleva? Tasa básica (22%), mínima (10%) o exento.";
-    } else if (
-      siguiente.paso === "cliente" &&
-      !pidioOtroCliente &&
-      a.clientes_frecuentes !== undefined &&
-      a.clientes_frecuentes.length > 0
-    ) {
-      const lista = construirListaClientes(a.clientes_frecuentes);
+    } else if (siguiente.paso === "cliente" && !pidioOtroCliente && frecuentes.length > 0) {
+      const lista = construirListaClientes(frecuentes);
       // UNA FILA QUE NO SE PUEDE TOCAR DESAPARECE, Y ESO HAY QUE DECIRLO.
       //
       // `construirListaClientes` descarta a los clientes sin documento porque
@@ -1054,7 +1071,7 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       // no resuelve nada es peor que no estar—, pero en silencio el modelo cree
       // que ofreció cinco clientes y el usuario ve dos. Se avisa acá, donde el
       // agente puede arreglarlo mandando el RUT que ya tiene.
-      const sinDocumento = a.clientes_frecuentes.filter(
+      const sinDocumento = (a.clientes_frecuentes ?? []).filter(
         (c) => (c.documento ?? "").trim() === "",
       ).length;
       if (sinDocumento > 0) {
@@ -1439,6 +1456,9 @@ async function prellenarDesdeUltimaVenta(
  */
 export const DIAS_PERFIL = 90;
 
+/** Nueve clientes y la fila de "➕ Otro cliente": el tope de 10 filas de WhatsApp. */
+export const MAX_CLIENTES_FRECUENTES = 9;
+
 /**
  * ¿Vale la pena ir a buscar el perfil AHORA?
  *
@@ -1491,6 +1511,52 @@ export function convieneBuscarPerfil(estado: EstadoEmision): boolean {
  * vez de consultar a mano es lo que hace que este perfil cuente los mismos
  * comprobantes que cuenta el resto del sistema.
  */
+/**
+ * Los clientes a los que esta empresa le factura seguido, para ofrecerlos como
+ * lista tocable en el paso `cliente`.
+ *
+ * POR QUÉ LO HACE EL SERVER Y NO EL AGENTE. `clientes_frecuentes` existía desde
+ * antes, pero solo llegaba si el modelo se acordaba de llamar a
+ * `biller_ranking_clientes` y pasar el resultado. Cuando no se acordaba —y no
+ * se acordaba— el usuario terminaba tipeando doce dígitos de RUT desde el
+ * mostrador. El dato no era el problema: el problema era de quién dependía.
+ *
+ * NO CUESTA UNA CONSULTA NUEVA. Es la MISMA ventana de 90 días que ya trae
+ * `buscarPerfilCasa`, y `traerVentana` la sirve del cache. Por eso se deriva
+ * acá y no con otra tool.
+ *
+ * Solo salen los que tienen documento: el id de la fila ES el documento, que es
+ * lo que el paso `cliente` sabe leer. Un cliente sin RUT no se puede ofrecer
+ * como fila porque tocarla no resolvería nada (ver `construirListaClientes`).
+ */
+export async function buscarClientesFrecuentes(
+  ctx: ToolContext,
+): Promise<Array<{ nombre: string; documento: string }>> {
+  const hoy = hoyComoDateUy();
+  const desde = aIso(new Date(hoy.getTime() - DIAS_PERFIL * 86_400_000));
+  const hasta = hoyIsoUy(hoy);
+
+  const ventana = await traerVentana(ctx, { rango: { desde, hasta } });
+  const ranking = rankingClientes(ventana.comprobantes, {
+    desde,
+    hasta,
+    limite: MAX_CLIENTES_FRECUENTES,
+  });
+
+  return ranking.clientes
+    .filter((c) => c.rut !== null && (c.nombre ?? "").trim() !== "")
+    .slice(0, MAX_CLIENTES_FRECUENTES)
+    .map((c) => ({
+      // El nombre lo escribió un tercero (o DGI) y viaja al TÍTULO de una fila
+      // de WhatsApp, que se recorta a 24 caracteres. Se neutralizan los
+      // delimitadores de la barrera para que nadie pueda cerrar la envoltura
+      // desde adentro, y los caracteres de control, que no se ven pero rompen
+      // el JSON del payload.
+      nombre: limpiarParaTitulo(c.nombre!),
+      documento: c.rut!,
+    }));
+}
+
 export async function buscarPerfilCasa(ctx: ToolContext): Promise<PerfilCasa> {
   const hoy = hoyComoDateUy();
   const desde = aIso(new Date(hoy.getTime() - DIAS_PERFIL * 86_400_000));

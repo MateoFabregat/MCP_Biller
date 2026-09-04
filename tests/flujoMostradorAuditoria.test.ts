@@ -3,7 +3,7 @@
 // Agent Node. Los tres los pisa una persona en su primera factura.
 // =============================================================================
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleEmisionGuiada } from "../src/tools/emisionGuiada.js";
 import { handleMenuWhatsapp } from "../src/tools/menuWhatsapp.js";
 import { interpretarRespuestaLibre, siguientePaso, type EstadoEmision } from "../src/kapso/emision.js";
@@ -13,6 +13,10 @@ import { makeCtx } from "./helpers.js";
 const SESION = "59895923567";
 const j = (r: { content: Array<{ text: string }> }): Record<string, any> =>
   JSON.parse(r.content[0]!.text);
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("✖️ Cancelar descarta la factura, no la deja esperando", () => {
   it("después de cancelar, la próxima emisión arranca de cero", async () => {
@@ -401,5 +405,133 @@ describe('"ponele" no es el nombre de un cliente', () => {
   it("un cliente de verdad se sigue leyendo", async () => {
     const { extraerPedidoEmision } = await import("../src/kapso/extraerPedido.js");
     expect(extraerPedidoEmision("facturale a perez 2 bolsas a 6500")?.cliente).toBe("perez");
+  });
+});
+
+// =============================================================================
+// Los clientes frecuentes salen del historial que el server YA lee
+// =============================================================================
+
+describe("elegir un cliente conocido es un toque, no doce dígitos", () => {
+  const PERMITIDO = "59895923567";
+  const diasAtras = (n: number): string =>
+    `${new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10)} 10:00:00`; // fecha-uy:allow fixture
+
+  const venta = (i: number, documento: string, razon: string) => ({
+    id: 700 + i,
+    tipo_comprobante: 111,
+    moneda: "UYU",
+    total: 1000 + i,
+    estado: "Aceptado DGI",
+    fecha_emision: diasAtras(i + 1),
+    montos_brutos: 1,
+    forma_pago: 1,
+    cliente: { documento, razon_social: razon },
+    items: [{ cantidad: 1, concepto: "portland", precio: 1000, indicador_facturacion: 3 }],
+  });
+
+  const HISTORIAL = [
+    ...Array.from({ length: 4 }, (_, i) => venta(i, "210000000011", "PEREZ SA")),
+    ...Array.from({ length: 2 }, (_, i) => venta(10 + i, "219999830019", "GOMEZ SRL")),
+  ];
+
+  const api = (opts: any): unknown[] => {
+    const id = opts?.query?.id;
+    if (id !== undefined) return HISTORIAL.filter((c) => String(c.id) === String(id));
+    return HISTORIAL;
+  };
+
+  /** Lo que de verdad sale a WhatsApp: el server manda el interactivo, no el agente. */
+  function fakeFetch(): { fn: typeof fetch; llamadas: Array<{ init: RequestInit }> } {
+    const llamadas: Array<{ init: RequestInit }> = [];
+    const fn = vi.fn(async (_u: unknown, init?: RequestInit) => {
+      llamadas.push({ init: init ?? {} });
+      return new Response('{"messages":[{"id":"wamid.LISTA"}]}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    return { fn, llamadas };
+  }
+
+  const kapso = {
+    apiKey: "kapso-secret",
+    baseUrl: "https://api.kapso.ai",
+    phoneNumberId: "597907523413541",
+    destinatariosPermitidos: [PERMITIDO],
+  };
+
+  const filasDe = (llamadas: Array<{ init: RequestInit }>): Array<{ id: string; title: string }> => {
+    const body = JSON.parse(String(llamadas[0]!.init.body)) as Record<string, any>;
+    return body.interactive.action.sections.flatMap((s: any) => s.rows);
+  };
+
+  it("en el paso del cliente, el server ofrece a los suyos sin que el agente los pase", async () => {
+    // El dato ya está: `buscarPerfilCasa` lee esta MISMA ventana para deducir
+    // cómo factura la casa. Ofrecer los clientes de ahí no cuesta una consulta
+    // nueva — y sin esto el usuario tipea doce dígitos de RUT porque el agente
+    // se olvidó de llamar a biller_ranking_clientes.
+    const { fn, llamadas } = fakeFetch();
+    vi.stubGlobal("fetch", fn);
+    const { ctx } = makeCtx({ impl: api, config: { capabilityMode: "write_enabled", kapso, remitentesAutorizados: [PERMITIDO] } });
+    const r = j(
+      await handleEmisionGuiada(
+        {
+          sesion: PERMITIDO,
+          remitente: PERMITIDO,
+          clase_receptor: "empresa",
+          enviar: true,
+          destinatario: PERMITIDO,
+        },
+        ctx,
+      ),
+    );
+    expect(r.paso).toBe("cliente");
+    const filas = filasDe(llamadas);
+    expect(filas.map((f) => f.title)).toEqual(["PEREZ SA", "GOMEZ SRL", "➕ Otro cliente"]);
+    // El id de la fila ES el documento: es lo que el paso `cliente` sabe leer.
+    expect(filas[0]!.id).toBe("emision:cliente:210000000011");
+  });
+
+  it("lo que manda el agente le gana a lo que el server deduce", async () => {
+    const { fn, llamadas } = fakeFetch();
+    vi.stubGlobal("fetch", fn);
+    const { ctx } = makeCtx({ impl: api, config: { capabilityMode: "write_enabled", kapso, remitentesAutorizados: [PERMITIDO] } });
+    await handleEmisionGuiada(
+      {
+        sesion: PERMITIDO,
+        remitente: PERMITIDO,
+        clase_receptor: "empresa",
+        enviar: true,
+        destinatario: PERMITIDO,
+        clientes_frecuentes: [{ nombre: "EL QUE DIJO EL AGENTE", documento: "217777770018" }],
+      },
+      ctx,
+    );
+    expect(filasDe(llamadas)[0]!.title).toBe("EL QUE DIJO EL AGENTE");
+  });
+
+  it("sin historial no se inventa una lista: se pregunta como siempre", async () => {
+    const { fn, llamadas } = fakeFetch();
+    vi.stubGlobal("fetch", fn);
+    const { ctx } = makeCtx({ response: [], config: { capabilityMode: "write_enabled", kapso, remitentesAutorizados: [PERMITIDO] } });
+    const r = j(
+      await handleEmisionGuiada(
+        {
+          sesion: PERMITIDO,
+          remitente: PERMITIDO,
+          clase_receptor: "empresa",
+          enviar: true,
+          destinatario: PERMITIDO,
+        },
+        ctx,
+      ),
+    );
+    expect(r.paso).toBe("cliente");
+    // Sin lista no hay interactivo, y sin interactivo el server no manda nada:
+    // la pregunta la escribe el agente. Lo que NO puede pasar es una lista
+    // vacía, que en WhatsApp es un mensaje que Meta rechaza entero.
+    expect(llamadas).toHaveLength(0);
+    expect(r.envio).toMatchObject({ realizado: false });
   });
 });

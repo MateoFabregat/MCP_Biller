@@ -40,3 +40,33 @@ export function recortarSeguro(texto: string, max: number, sufijo = ""): string 
 
   return `${texto.slice(0, corte)}${sufijo}`;
 }
+
+/**
+ * Deja un texto de tercero listo para ser el TÍTULO de una fila o un botón.
+ *
+ * El nombre de un cliente lo escribió alguien más —el usuario, o DGI— y acá va
+ * a un lugar donde no puede llevar marcas de la barrera de salida: un título
+ * con `⟦dato-no-confiable⟧` adentro es un botón ilegible. Entonces, en vez de
+ * marcarlo, se lo deja incapaz de hacer daño:
+ *
+ *  · se neutralizan los delimitadores de la envoltura, para que nadie pueda
+ *    "cerrarla" desde adentro de su propia razón social;
+ *  · se sacan los caracteres de control, que no se ven y rompen el JSON del
+ *    payload de WhatsApp;
+ *  · se colapsan los espacios, porque un título con saltos de línea rompe la
+ *    fila.
+ *
+ * El recorte a los caracteres que WhatsApp permite lo hace `recortarSeguro`,
+ * que es lo que sabe no partir un emoji al medio.
+ */
+export function limpiarParaTitulo(texto: string): string {
+  return texto
+    .split("⟦/dato-no-confiable⟧")
+    .join("")
+    .split("⟦dato-no-confiable⟧")
+    .join("")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}

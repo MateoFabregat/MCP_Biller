@@ -2001,9 +2001,17 @@ describe("el perfil de la casa: los defaults que salen del historial", () => {
 
   it("no se busca antes de que haya una línea con precio", async () => {
     // El embudo dice que la mayoría de las conversaciones se abandona antes de
-    // cargar el primer precio. Consultar noventa días de historial en cada
-    // "quiero facturar" sería gastar el rate limit de la empresa en
-    // conversaciones que no van a existir.
+    // cargar el primer precio. Derivar el perfil en cada "quiero facturar"
+    // sería gastar el rate limit de la empresa en conversaciones que no van a
+    // existir — y el perfil no es una consulta: son SEIS (la ventana más el
+    // detalle de las cinco muestras, que es donde vive la tasa de IVA).
+    //
+    // OJO CON LO QUE ESTE TEST FIJA Y LO QUE NO. Lo que sigue diferido es el
+    // PERFIL. En el paso `cliente` sí se lee la ventana —UNA consulta, sin
+    // detalles— para ofrecer los clientes frecuentes como lista tocable: es la
+    // diferencia entre un toque y doce dígitos de RUT tipeados desde el
+    // mostrador, y de paso deja el cache caliente para el perfil, que iba a
+    // pedir esa misma ventana un par de mensajes después.
     const { ctx, getMock } = makeCtx({
       impl: apiConHistorial(CASA_CON_IVA_INCLUIDO),
       config: { capabilityMode: "write_enabled" },
@@ -2011,7 +2019,9 @@ describe("el perfil de la casa: los defaults que salen del historial", () => {
     const r = await llamar({ sesion: "59895923567", clase_receptor: "empresa" }, ctx);
     expect(r.paso).toBe("cliente");
     expect(r.perfil_casa).toBeNull();
-    expect(getMock).not.toHaveBeenCalled();
+    // Ni un solo detalle por id: eso es lo caro y sigue sin pasar.
+    const conId = getMock.mock.calls.filter((c) => (c[0] as any)?.query?.id !== undefined);
+    expect(conId).toHaveLength(0);
   });
 
   it("si el historial no se puede leer, el flujo sigue: se pregunta como siempre", async () => {
