@@ -725,13 +725,23 @@ export function interpretarRespuestaLibre(
       // pregunta rebota para siempre. Es el peor caso de un flujo: una
       // pregunta que rechaza su propia respuesta.
       //
-      // Se aceptan las formas en que la gente lo escribe (con puntos, guiones,
-      // espacios, o con "el rut es" adelante) y NADA MÁS: los dígitos sueltos
-      // se juntan y tienen que dar exactamente un documento uruguayo —12 de
-      // RUT, 7 u 8 de cédula—. "eran 3 no 2" da "32" y no es nada; un teléfono
-      // de 9 tampoco. La clasificación la hace `clasificarDocumento`, que ya es
-      // la que decide empresa vs. consumidor final en el resto del flujo.
-      const digitos = raw.replace(/[^0-9]/g, "");
+      // EL MENSAJE TIENE QUE SER EL DOCUMENTO, no una frase con números adentro.
+      //
+      // Antes se juntaban TODOS los dígitos del texto, y con eso "facturale a la
+      // constructora 20 bolsas de portland a 610, a 30 días" daba "2061030":
+      // siete dígitos, o sea una cédula, y el flujo pasaba a consumidor final
+      // con un receptor inventado. Lo encontró la demo, con una frase de
+      // ferretería de todos los días.
+      //
+      // Ahora se acepta solo el mensaje que ES el documento: los dígitos con
+      // sus puntos, espacios o guiones, y a lo sumo un "el rut es" adelante.
+      // La clasificación la hace `clasificarDocumento`, que es la que decide
+      // empresa vs. consumidor final en el resto del flujo.
+      const soloDocumento =
+        /^(?:(?:el\s+|mi\s+)?(?:rut|ruc|ci|c\.i\.|cedula|documento|doc)\s*(?:es\s*|:\s*)?)?[\d.\s-]+$/.test(
+          t,
+        );
+      const digitos = soloDocumento ? raw.replace(/[^0-9]/g, "") : "";
       if (digitos.length === 12 || digitos.length === 7 || digitos.length === 8) {
         const doc = clasificarDocumento(digitos);
         if (doc.tipo !== "desconocido") return { paso: "cliente", documento: doc.normalizado };
@@ -1353,11 +1363,11 @@ export interface SiguientePaso {
   /**
    * El mensaje tocable que corresponde a esta pregunta. null si es texto libre.
    *
-   * Puede ser una LISTA y no solo botones desde que existe la elección de local:
-   * WhatsApp permite tres botones, y un negocio con cuatro sucursales necesita
-   * una lista o no puede elegir la cuarta.
+   * Solo botones: las LISTAS (clientes frecuentes, locales cuando son más de
+   * tres) las arma la tool, que es la que puede consultar. Ver el paso
+   * `cliente` en `tools/emisionGuiada.ts`.
    */
-  interactivo: InteractivoBotones | InteractivoLista | null;
+  interactivo: InteractivoBotones | null;
   /** El tipo de CFE ya deducido, si se puede. */
   tipo: TipoSugerido | null;
   /** true cuando no falta nada y corresponde llamar a biller_emitir_comprobante. */
@@ -1492,12 +1502,14 @@ export function siguientePaso(
   // El local, solo si hay más de uno nombrado. Va acá —tarde, con la venta ya
   // cargada— a propósito: el que atiende sabe desde dónde vende, y preguntarlo
   // al principio le agrega un paso a lo que quería hacer.
-  const locales = Object.keys(contexto.sucursales ?? {});
+  const locales = Object.entries(contexto.sucursales ?? {});
   if (locales.length > 1 && estado.sucursal === undefined) {
     return paso({
       paso: "sucursal",
       pregunta: "¿Desde qué local lo facturo?",
-      interactivo: construirSubmenuSucursal(contexto.sucursales ?? {}),
+      // Con más de tres no entran como botones (WhatsApp permite tres): la
+      // lista la arma la tool, igual que la de clientes frecuentes.
+      interactivo: locales.length <= 3 ? construirSubmenuSucursal(contexto.sucursales ?? {}) : null,
     });
   }
 

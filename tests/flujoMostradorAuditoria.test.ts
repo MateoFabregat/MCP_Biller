@@ -914,7 +914,9 @@ describe("con más de una sucursal, se pregunta desde cuál se factura", () => {
 
 describe("el submenú de locales respeta los límites de WhatsApp", () => {
   it("dos o tres locales son botones; cuatro o más, una lista", async () => {
-    const { construirSubmenuSucursal } = await import("../src/kapso/render.js");
+    const { construirSubmenuSucursal, construirListaSucursales } = await import(
+      "../src/kapso/render.js"
+    );
     const { construirPayloadInteractivo } = await import("../src/kapso/client.js");
 
     const dos = construirSubmenuSucursal({ "6": "Pocitos", "7": "Centro" });
@@ -922,14 +924,16 @@ describe("el submenú de locales respeta los límites de WhatsApp", () => {
     expect(() => construirPayloadInteractivo(dos)).not.toThrow();
 
     // Con cuatro no entran en botones: Meta permite tres, y pasarse hace que
-    // rechace el mensaje entero.
-    const cuatro = construirSubmenuSucursal({
+    // rechace el mensaje entero. Las listas las arma la tool, igual que la de
+    // clientes frecuentes; `siguientePaso` solo arma botones.
+    const cuatro = construirListaSucursales({
       "6": "Pocitos",
       "7": "Centro",
       "8": "Carrasco",
       "9": "Ciudad Vieja",
     });
     expect(cuatro.tipo).toBe("lista");
+    expect(cuatro.secciones[0]!.filas).toHaveLength(4);
     expect(() => construirPayloadInteractivo(cuatro)).not.toThrow();
   });
 
@@ -937,5 +941,35 @@ describe("el submenú de locales respeta los límites de WhatsApp", () => {
     const { construirSubmenuSucursal } = await import("../src/kapso/render.js");
     const menu = construirSubmenuSucursal({ "347": "Local del Centro" });
     expect(JSON.stringify(menu)).toContain("emision:sucursal:347");
+  });
+});
+
+describe("un documento es el mensaje entero, no dígitos sueltos en una frase", () => {
+  // LO ENCONTRÓ LA DEMO, con una frase de ferretería de todos los días:
+  // "facturale a la constructora 20 bolsas de portland a 610, a 30 días".
+  // El lector de documentos juntaba TODOS los dígitos del texto —20, 610, 30—
+  // y le salía "2061030": siete dígitos, o sea una cédula. El flujo pasaba a
+  // consumidor final con un receptor inventado.
+  it("no lee un documento de los números de una venta", () => {
+    for (const t of [
+      "facturale a la constructora 20 bolsas de portland a 610, a 30 días",
+      "2 aguas y un cigarrillo, 340 y 2 panes de 500",
+      "30 panes a 25 y 10 facturas a 40",
+    ]) {
+      expect(interpretarRespuestaLibre(t, "cliente"), t).toEqual({ paso: "ninguna" });
+    }
+  });
+
+  it("sigue leyendo el documento cuando el mensaje ES el documento", () => {
+    for (const t of ["219999830019", "21.999.983.0019", "el rut es 219999830019", "RUT 219999830019"]) {
+      expect(interpretarRespuestaLibre(t, "cliente"), t).toEqual({
+        paso: "cliente",
+        documento: "219999830019",
+      });
+    }
+    expect(interpretarRespuestaLibre("ci 1.234.567-8", "cliente")).toEqual({
+      paso: "cliente",
+      documento: "12345678",
+    });
   });
 });

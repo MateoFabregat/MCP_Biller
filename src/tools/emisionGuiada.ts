@@ -79,6 +79,7 @@ import {
   construirDesempateReceptor,
   construirListaClientes,
   construirSubmenuIva,
+  construirListaSucursales,
 } from "../kapso/render.js";
 import { extraerPedidoEmision, type PedidoEmision } from "../kapso/extraerPedido.js";
 import { rankingClientes } from "../services/rankingClientes.js";
@@ -1105,6 +1106,23 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       // cambia el mensaje — de los tres botones fusionados a las tres tasas.
       interactivo = construirSubmenuIva();
       pregunta = "¿Qué IVA lleva? Tasa básica (22%), mínima (10%) o exento.";
+    } else if (siguiente.paso === "sucursal" && Object.keys(sucursalesNombradas(ctx)).length > 3) {
+      // Más de tres locales no entran en botones: va como lista, igual que los
+      // clientes frecuentes. Es la tool la que arma las listas porque es la que
+      // puede consultar; `siguientePaso` solo arma botones.
+      return await responder({
+        a,
+        ctx,
+        exportacion,
+        estado,
+        siguiente,
+        tipo,
+        pregunta: siguiente.pregunta,
+        interactivo: construirListaSucursales(sucursalesNombradas(ctx)),
+        documentoDetectado,
+        warnings,
+        sesion: { store, clave, recuperado, desdeRevision: guardado?.revision ?? 0 },
+      });
     } else if (siguiente.paso === "cliente" && !pidioOtroCliente && frecuentes.length > 0) {
       const lista = construirListaClientes(frecuentes);
       // UNA FILA QUE NO SE PUEDE TOCAR DESAPARECE, Y ESO HAY QUE DECIRLO.

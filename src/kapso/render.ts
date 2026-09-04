@@ -687,36 +687,38 @@ export function construirListaClientes(
  * El id lleva el ID REAL de la sucursal, que es lo que viaja al comprobante. El
  * nombre es solo para que el usuario reconozca su local: nunca se emite.
  */
-export function construirSubmenuSucursal(
-  sucursales: Record<string, string>,
-): InteractivoBotones | InteractivoLista {
-  const entradas = Object.entries(sucursales);
-  const cuerpo = "¿Desde qué local lo facturo? Queda escrito en el comprobante.";
+const CUERPO_SUCURSAL = "¿Desde qué local lo facturo? Queda escrito en el comprobante.";
 
-  if (entradas.length <= 3) {
-    return {
-      tipo: "botones",
-      encabezado: "¿Qué local?",
-      cuerpo,
-      botones: entradas.map(([id, nombre]) => ({
+export function construirSubmenuSucursal(sucursales: Record<string, string>): InteractivoBotones {
+  return {
+    tipo: "botones",
+    encabezado: "¿Qué local?",
+    cuerpo: CUERPO_SUCURSAL,
+    botones: Object.entries(sucursales)
+      .slice(0, 3)
+      .map(([id, nombre]) => ({
         id: `${PREFIJO_PASO}sucursal:${id}`,
         titulo: recortarSeguro(nombre, 20),
       })),
-    };
-  }
+  };
+}
 
+/** El mismo paso cuando los locales no entran en tres botones. */
+export function construirListaSucursales(sucursales: Record<string, string>): InteractivoLista {
   return {
     tipo: "lista",
     encabezado: "¿Qué local?",
-    cuerpo,
+    cuerpo: CUERPO_SUCURSAL,
     boton: "Elegir local",
     secciones: [
       {
         titulo: "Tus locales",
-        filas: entradas.slice(0, 10).map(([id, nombre]) => ({
-          id: `${PREFIJO_PASO}sucursal:${id}`,
-          titulo: recortarSeguro(nombre, 24),
-        })),
+        filas: Object.entries(sucursales)
+          .slice(0, 10)
+          .map(([id, nombre]) => ({
+            id: `${PREFIJO_PASO}sucursal:${id}`,
+            titulo: recortarSeguro(nombre, 24),
+          })),
       },
     ],
   };

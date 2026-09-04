@@ -307,7 +307,27 @@ Y con los frecuentes de §4.1, la panadería:
 
 ---
 
-## 6. Cómo se prueba, paso a paso
+## 6. La demo: un comando
+
+```bash
+npm run demo                 # la historia completa, sin emitir nada
+npm run demo -- --emitir     # además emite un e-Ticket chico en test.biller.uy
+npm run demo -- --escena 4   # una sola escena
+```
+
+Siete escenas, en orden: el primer mensaje y el menú · el kiosco escribiendo su
+venta como la escribe · "lo de siempre" de mostrador · la ferretería con la
+lista de clientes que salen del historial · las preguntas de plata (cuenta
+corriente y el mes, contra la API real) · los frenos, con la venta al exterior
+que NO deja pasar · y la emisión de verdad en TEST.
+
+No toca WhatsApp ni necesita túnel: llama a las mismas tools que llamaría el
+agente. Sirve para mostrar el producto y también para saber si algo se rompió
+sin gastar un mensaje real.
+
+---
+
+## 7. Cómo se prueba contra WhatsApp, paso a paso
 
 1. **Antes de tocar Kapso**, el flujo entero se puede recorrer sin WhatsApp:
    ```bash
