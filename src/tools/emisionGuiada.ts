@@ -624,6 +624,9 @@ function aplicarRespuestaDelUsuario(
       // después, ya con dos botones.
       pidioOtraTasa = true;
       break;
+    case "sucursal":
+      estado.sucursal = r.sucursal;
+      break;
     case "moneda":
       estado.moneda = r.moneda;
       // Elegida la moneda, la duda dejó de existir. Sin esto la marca queda
@@ -988,7 +991,7 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     }
 
     // --- Qué sigue -----------------------------------------------------------
-    let siguiente = siguientePaso(estado, { perfil });
+    let siguiente = siguientePaso(estado, { perfil, sucursales: sucursalesNombradas(ctx) });
 
     // LOS CLIENTES FRECUENTES: lo que mandó el agente, y si no mandó nada, los
     // que el server deduce del mismo historial que ya leyó para el perfil.
@@ -1053,13 +1056,14 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     if (exportacion) {
       siguiente = { ...siguiente, listo: false };
       warnings.push(
-        "⛔ Esto parece una EXPORTACIÓN y este flujo no la sabe armar: solo produce e-Ticket (101) " +
-          "y e-Factura (111). Una exportación es e-Factura de exportación (121) con " +
-          "indicador_facturacion 10, y además exige modalidad_venta, clausula_venta, via_transporte " +
-          "y el ncm de cada ítem. Emitirla como 111 le pone IVA 22% a una venta que no lo lleva. " +
-          "Armala con biller_emitir_comprobante pasando el cuerpo completo, o consultá con tu " +
-          'contador. Si NO es una exportación, que el usuario lo diga ("no es exportación", "es ' +
-          'local") y el flujo sigue derecho.',
+        "⛔ Esto parece una venta a un cliente DEL EXTERIOR, y este flujo la armaría como una venta " +
+          "local. Faltan dos cosas que él no pregunta: el receptor va con documento extranjero " +
+          "(pasaporte, DNI o NIFE) y su país —no con RUT ni CI uruguaya— y el tratamiento de IVA de " +
+          "una venta al exterior NO es la tasa básica del 22% que este flujo asume. Emitirla así " +
+          "sale con IVA de más. Armá el cuerpo completo con biller_emitir_comprobante (el schema " +
+          "acepta tipo_documento 5/6/7 y cliente.sucursal.pais) o consultalo con tu contador. Si NO " +
+          'es una venta al exterior, que el usuario lo diga ("no es exportación", "es local") y el ' +
+          "flujo sigue derecho.",
       );
     }
 
@@ -1401,9 +1405,10 @@ async function responder(p: {
       nota: notaSesion,
     },
     como_sigue: exportacion
-      ? "PARÁ: esto parece una exportación y este flujo no la arma (ver 'warnings'). NO emitas nada " +
-        "todavía. Explicale al usuario, con sus palabras, que una venta al exterior lleva otro tipo " +
-        "de comprobante y otros campos, y preguntale si de verdad es una exportación."
+      ? "PARÁ: esto parece una venta a un cliente del exterior (ver 'warnings'). NO emitas nada " +
+        "todavía. Explicale al usuario, con sus palabras, que el receptor del exterior va con su " +
+        "documento y su país, y que el IVA de esa venta no es el 22% que este flujo asume. " +
+        "Preguntale si de verdad el cliente está afuera."
       : siguiente.listo
       ? "Ya está todo. Pasá 'comprobante_borrador' a biller_requisitos_comprobante para el chequeo " +
         "final (umbral de UI, campos de DGI) y después a biller_emitir_comprobante SIN confirm, con " +
@@ -1518,6 +1523,20 @@ async function prellenarDesdeUltimaVenta(
  */
 /** Lo que se escribe en `repetir_ultima_de` para decir "la última de mostrador". */
 const MOSTRADOR: ReadonlySet<string> = new Set(["mostrador", "consumidor final", "sin cliente"]);
+
+/**
+ * Los locales nombrados, o vacío si no hay config o si es inválida.
+ *
+ * No lanza: una config rota no puede trancar una emisión que se puede terminar
+ * con el default de siempre. Es el mismo criterio de `aplicarSucursalPorDefecto`.
+ */
+function sucursalesNombradas(ctx: ToolContext): Record<string, string> {
+  try {
+    return ctx.getConfig().sucursales;
+  } catch {
+    return {};
+  }
+}
 
 export const DIAS_PERFIL = 90;
 

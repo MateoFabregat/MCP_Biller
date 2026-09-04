@@ -60,6 +60,7 @@ import {
   construirSubmenuPrecioNoPositivo,
   construirSubmenuReceptor,
   construirSubmenuReceptorOpcional,
+  construirSubmenuSucursal,
 } from "./render.js";
 
 // `PREFIJO_PASO` se re-exporta desde acá para no romper a quien ya lo importaba
@@ -118,6 +119,7 @@ export type PasoEmision =
   | "cliente"
   | "datos_cliente_nuevo"
   | "moneda"
+  | "sucursal"
   | "tasa_cambio"
   | "forma_pago"
   | "fecha_vencimiento"
@@ -266,6 +268,15 @@ export interface EstadoEmision {
    * cuando se descarta el borrador.
    */
   posible_exportacion?: boolean;
+  /**
+   * Desde qué local se factura. Solo se pregunta si hay más de uno nombrado.
+   *
+   * `BILLER_DEFAULT_SUCURSAL_ID` alcanza para un negocio de un solo local. Con
+   * dos, la venta del Centro salía con la sucursal de Pocitos sin que nadie lo
+   * viera hasta mirar el comprobante: el número queda mal atribuido y los dos
+   * reportes por local mienten.
+   */
+  sucursal?: number;
   /**
    * Los clientes frecuentes ya derivados en esta conversación.
    *
@@ -543,13 +554,16 @@ export function sugiereDolares(texto: string): boolean {
 /**
  * ¿El texto dice que esta venta va al exterior?
  *
- * ESTE FLUJO NO SABE ARMAR UNA EXPORTACIÓN, Y ESA ES LA RAZÓN DE ESTA FUNCIÓN.
- * `tipoComprobanteSugerido` produce 101 o 111 y nada más. Una exportación es
- * e-Factura de exportación (121) con indicador 10, y encima exige
- * `modalidad_venta`, `clausula_venta`, `via_transporte` y el `ncm` de cada
- * ítem — campos que este flujo nunca pregunta. Sin freno, "facturale a mi
- * cliente de España" salía como un 111 con IVA 22%: un comprobante mal emitido,
- * que se corrige emitiendo otro comprobante.
+ * ESTE FLUJO ARMARÍA UNA VENTA LOCAL, Y ESA ES LA RAZÓN DE ESTA FUNCIÓN.
+ * `tipoComprobanteSugerido` decide entre 101 y 111 mirando si el receptor tiene
+ * RUT, y un cliente del exterior no tiene ninguno de los dos documentos que
+ * este flujo sabe pedir. Le faltan dos datos que nunca pregunta: el documento
+ * extranjero del receptor (pasaporte, DNI o NIFE) con su país, y el tratamiento
+ * de IVA, que no es la tasa básica del 22% que asume por default. Sin freno,
+ * "facturale a mi cliente de España" salía con IVA de más.
+ *
+ * NO decide qué comprobante corresponde: eso lo sabe el contador de la empresa,
+ * y adivinarlo desde acá es exactamente el error que este freno evita.
  *
  * Es a propósito ESTRECHA, igual que `sugiereDolares`: detecta la intención de
  * exportar, no cualquier mención de un país. "Pinturas España" es una
@@ -625,6 +639,7 @@ export type RespuestaPaso =
   | { paso: "iva_otro" }
   | { paso: "iva"; indicador_facturacion: number }
   | { paso: "moneda"; moneda: string }
+  | { paso: "sucursal"; sucursal: number }
   | { paso: "forma_pago"; forma_pago: number }
   | { paso: "montos_brutos"; incluye_iva: boolean }
   | { paso: "tasa_cambio"; tasa: number }
@@ -978,6 +993,10 @@ export function interpretarPaso(raw: string): RespuestaPaso {
     }
     case "moneda":
       return /^[A-Z]{3}$/.test(valor) ? { paso: "moneda", moneda: valor } : { paso: "ninguna" };
+    case "sucursal": {
+      const id = Number(valor);
+      return Number.isInteger(id) && id > 0 ? { paso: "sucursal", sucursal: id } : { paso: "ninguna" };
+    }
     case "pago": {
       const codigo = Number(valor);
       return Number.isInteger(codigo) && codigo in FORMAS_PAGO
@@ -1069,6 +1088,14 @@ export interface ContextoDefaults {
    * cualquier lado sin perder el perfil.
    */
   perfil?: PerfilCasa | null;
+  /**
+   * Los locales nombrados (`BILLER_SUCURSALES_JSON`), id -> nombre.
+   *
+   * Entra por contexto y no se lee de la config acá adentro por la misma razón
+   * que `hoy`: este módulo decide, no consulta. Con cero o uno, no hay pregunta
+   * que hacer.
+   */
+  sucursales?: Record<string, string>;
 }
 
 /**
@@ -1323,8 +1350,14 @@ export interface SiguientePaso {
   paso: PasoEmision;
   /** La pregunta, en castellano, para el caso en que no se mande el interactivo. */
   pregunta: string;
-  /** El mensaje tocable que corresponde a esta pregunta. null si es texto libre. */
-  interactivo: InteractivoBotones | null;
+  /**
+   * El mensaje tocable que corresponde a esta pregunta. null si es texto libre.
+   *
+   * Puede ser una LISTA y no solo botones desde que existe la elección de local:
+   * WhatsApp permite tres botones, y un negocio con cuatro sucursales necesita
+   * una lista o no puede elegir la cuarta.
+   */
+  interactivo: InteractivoBotones | InteractivoLista | null;
   /** El tipo de CFE ya deducido, si se puede. */
   tipo: TipoSugerido | null;
   /** true cuando no falta nada y corresponde llamar a biller_emitir_comprobante. */
@@ -1456,6 +1489,18 @@ export function siguientePaso(
   // 6b. Vencimiento, SOLO a crédito. Sin esto la venta a crédito no aparece en
   //     "¿quién me debe?" ni en vencimientos: se emitió para cobrar después y
   //     la cobranza queda invisible.
+  // El local, solo si hay más de uno nombrado. Va acá —tarde, con la venta ya
+  // cargada— a propósito: el que atiende sabe desde dónde vende, y preguntarlo
+  // al principio le agrega un paso a lo que quería hacer.
+  const locales = Object.keys(contexto.sucursales ?? {});
+  if (locales.length > 1 && estado.sucursal === undefined) {
+    return paso({
+      paso: "sucursal",
+      pregunta: "¿Desde qué local lo facturo?",
+      interactivo: construirSubmenuSucursal(contexto.sucursales ?? {}),
+    });
+  }
+
   if (estado.fecha_a_elegir === true && (estado.fecha_emision ?? "") === "") {
     return paso({
       paso: "fecha",

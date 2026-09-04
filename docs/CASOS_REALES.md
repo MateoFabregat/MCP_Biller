@@ -161,30 +161,44 @@ depende de que el agente se acuerde de pedirla (§4.1).
 ### 3.7. Consultorio — servicios de salud EXENTOS
 > *"consulta 2.500, exento"*
 
-**Hoy funciona, y mejor de lo que parece.** La primera vez hay que tocar 🔢 Otro
-IVA y después Exento. Pero el **perfil de la casa** (`buscarPerfilCasa`) lee el
-historial por su cuenta —el server, no el agente— y si todas las facturas
-anteriores son exentas, deriva el indicador y **deja de preguntar**. Lo mismo
-con la moneda, la forma de pago y si el precio lleva IVA adentro.
-**El límite real:** el perfil solo deriva cuando TODAS las muestras coinciden.
-Un negocio mixto —una óptica que vende armazones al 22% y hace consultas
-exentas— nunca va a tener perfil, y contesta el IVA en cada factura. Ahí el
-atajo tiene que ser por producto (§4.1), no por empresa.
+**Hoy funciona, pero acá hay que tener cuidado y no sugerir de más.** La
+primera vez hay que tocar 🔢 Otro IVA y elegir la tasa. El **perfil de la casa**
+(`buscarPerfilCasa`) lee el historial por su cuenta —el server, no el agente— y
+si TODAS las facturas anteriores usan la misma tasa, deriva el indicador y deja
+de preguntar. Lo mismo con la moneda, la forma de pago y si el precio lleva IVA
+adentro.
+
+**Y "salud" no quiere decir "exento".** Un médico que le factura a un hospital
+factura al **10% (tasa mínima)**, que no es lo mismo que exento: son dos
+indicadores distintos (2 y 1) y dos números distintos en el comprobante.
+Cualquier atajo que "adivine" la tasa por el rubro está mal por diseño; el
+único default defendible es el que sale del historial de ESA empresa, cuando es
+unánime, y siempre con el botón para corregirlo a la vista.
+
+**El límite real:** el perfil no deriva nada en un negocio mixto —una óptica que
+vende armazones al 22% y hace consultas al 10%—, y ahí se pregunta en cada
+factura. Es lo correcto: preguntar cuesta un toque, adivinar cuesta un
+comprobante.
 
 ### 3.8. Freelance que le factura al exterior
 > *"facturale a mi cliente de España 1.200 dólares"*
 
-**RESUELTO EN PARTE (sep-2026): ahora FRENA en vez de emitir mal.** El flujo guiado solo produce **101 y 111**
-(`tipoComprobantesugerido`). Una exportación de servicios es **e-Factura de
-exportación (121)** con indicador 10, y además necesita `modalidad_venta`,
-`clausula_venta` y `via_transporte`. El flujo lo llevaría a un 111 con IVA
-22% a un cliente sin RUT uruguayo: **un comprobante mal emitido**.
-**Qué hace hoy:** `sugiereExportacion` detecta la intención —"exportación",
-"del exterior", "mi cliente de España"— y bloquea el `listo`, con un aviso que
-nombra los cuatro campos que faltan y deriva a armar el cuerpo completo. No
-descarta el borrador: si fue un falso positivo, el mensaje siguiente sin la
-palabra sigue derecho.
-**Falta todavía:** soportar la emisión de exportación de punta a punta (§4.4).
+**FRENA en vez de emitir mal (sep-2026).** Lo que corresponde acá —según el
+dueño del producto, que es quien conoce el criterio fiscal— es un **e-Ticket con
+los datos externos del cliente**: el receptor va con documento extranjero
+(pasaporte, DNI o NIFE — `tipo_documento` 5, 6 o 7) y su país, no con RUT ni
+cédula uruguaya. El schema ya lo acepta (`cliente.tipo_documento`,
+`cliente.sucursal.pais`).
+
+Lo que el flujo guiado NO sabe hacer, y por eso frena: no pide el documento
+extranjero —solo entiende RUT y CI— y asume tasa básica del 22%, que no es el
+tratamiento de una venta al exterior. `sugiereExportacion` detecta la intención,
+bloquea el `listo` y nombra las dos cosas que faltan. No descarta el borrador:
+si fue un falso positivo, el usuario dice "es local" y sigue derecho.
+
+**Falta, y necesita tu confirmación antes de codearlo:** qué
+`indicador_facturacion` lleva cada línea en este caso. Con eso, el camino
+completo es corto: el resto (documento extranjero, país) ya está en el schema.
 
 ### 3.9. Almacén que quiere saber cuánto le deben
 > *"¿quién me debe?"* · *"¿cuánto me debe Pérez al 30/09?"*
@@ -196,11 +210,18 @@ por cliente devolvía los totales de la cartera entera.
 ### 3.10. Negocio con dos locales
 > *"¿cómo va cada local?"* · *"facturá esto desde el local del centro"*
 
-**Hoy funciona a medias.** Hay `biller_ranking_sucursales` para la consulta, y
-la emisión usa `BILLER_DEFAULT_SUCURSAL_ID`. Pero **no hay forma de elegir
-sucursal desde el chat**: si factura desde el otro local, sale con la del
-default.
-**Falta:** §4.5.
+**RESUELTO (sep-2026).** Si `BILLER_SUCURSALES_JSON` declara más de un local,
+el flujo pregunta **"¿desde qué local lo facturo?"** con un botón por local
+(o una lista, si son cuatro o más) justo antes del preview, y el id elegido
+viaja al comprobante. Con un solo local no pregunta nada: sigue el
+`BILLER_DEFAULT_SUCURSAL_ID` de siempre.
+
+**Por qué antes del preview y no al principio:** el que atiende sabe desde
+dónde vende; preguntárselo primero le agrega un paso a lo que vino a hacer.
+
+**Ojo con el token:** en Biller cada token de API está asociado a una sucursal.
+Si el token no tiene permiso sobre el local elegido, la emisión va a fallar del
+lado de Biller — ahí lo que corresponde es un token (o un tenant) por local.
 
 ---
 
@@ -237,13 +258,13 @@ porque las últimas veinte veces salió exenta.
 *"¿cuánto me debían al 30 de junio?"* es la pregunta de todo cierre de mes.
 
 ### 4.4. Exportación: se frena, todavía no se emite — MEDIA
-Lo mínimo honesto ya está (§3.8): se detecta la intención y se avisa en vez de
-emitir un 111 con IVA. Lo que falta es el camino completo — preguntar
-`modalidad_venta`, `clausula_venta`, `via_transporte` y el `ncm` de cada ítem, y
-producir un 121 con indicador 10. Es un flujo distinto del de mostrador, y
-mientras no exista, frenar es la conducta correcta.
+Lo mínimo honesto ya está (§3.8): se detecta la intención y se frena en vez de
+emitir con IVA de más. Lo que falta es el camino completo — pedir el documento
+extranjero del receptor con su país, y aplicar el `indicador_facturacion` que
+corresponda. Lo segundo es la única incógnita y la tiene que contestar el dueño;
+lo primero ya lo acepta el schema.
 
-### 4.5. No se puede elegir sucursal desde el chat — MEDIA
+### 4.5. ~~No se puede elegir sucursal desde el chat~~ — HECHO (sep-2026)
 
 ### 4.6. Cosas que están bien y conviene NO tocar
 - El preview con los tres botones y el token que ata el payload.

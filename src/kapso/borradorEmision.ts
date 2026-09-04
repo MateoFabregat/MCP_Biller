@@ -516,6 +516,10 @@ export function borradorComprobante(
   if (estado.fecha_emision !== undefined) borrador["fecha_emision"] = estado.fecha_emision;
   if (estado.forma_pago !== undefined) borrador["forma_pago"] = estado.forma_pago;
   if (estado.moneda !== undefined) borrador["moneda"] = estado.moneda;
+  // El local elegido viaja al cuerpo. Si no se eligió ninguno —el caso de un
+  // negocio con un solo local— no se pone nada y lo completa
+  // `aplicarSucursalPorDefecto` con BILLER_DEFAULT_SUCURSAL_ID, como siempre.
+  if (estado.sucursal !== undefined) borrador["sucursal"] = estado.sucursal;
   if (estado.tasa_cambio !== undefined) borrador["tasa_cambio"] = estado.tasa_cambio;
   if (estado.fecha_vencimiento !== undefined) {
     borrador["fecha_vencimiento"] = estado.fecha_vencimiento;

@@ -573,7 +573,7 @@ describe("una exportación no sale como e-Factura local", () => {
       // encontró el code review, y es el campo que le dice al agente "andá a
       // emitir".
       expect(r.listo_para_requisitos, mensaje).toBe(false);
-      expect(r.warnings.join(" "), mensaje).toMatch(/exportaci/i);
+      expect(r.warnings.join(" "), mensaje).toMatch(/exterior/i);
       expect(r.como_sigue, mensaje).toMatch(/NO emitas/i);
     }
   });
@@ -701,7 +701,7 @@ describe("el freno de exportación dura toda la conversación", () => {
         ctx,
       ),
     );
-    expect(r1.warnings.join(" ")).toMatch(/EXPORTACIÓN/);
+    expect(r1.warnings.join(" ")).toMatch(/DEL EXTERIOR/);
 
     const r2 = j(
       await handleEmisionGuiada(
@@ -716,7 +716,7 @@ describe("el freno de exportación dura toda la conversación", () => {
       ),
     );
     expect(r2.listo_para_requisitos).toBe(false);
-    expect(r2.warnings.join(" ")).toMatch(/EXPORTACIÓN/);
+    expect(r2.warnings.join(" ")).toMatch(/DEL EXTERIOR/);
     expect(r2.como_sigue).toMatch(/NO emitas/i);
   });
 
@@ -741,7 +741,7 @@ describe("el freno de exportación dura toda la conversación", () => {
       ),
     );
     expect(r.listo_para_requisitos).toBe(true);
-    expect(r.warnings.join(" ")).not.toMatch(/EXPORTACIÓN/);
+    expect(r.warnings.join(" ")).not.toMatch(/DEL EXTERIOR/);
   });
 
   it("no frena al pintor, al herrero ni al jardinero", () => {
@@ -850,5 +850,92 @@ describe("lo que cuesta la lista de clientes está a la vista", () => {
     getMock.mockClear();
     await handleEmisionGuiada({ sesion: "59891119999", clase_receptor: "empresa" }, ctx);
     expect(getMock.mock.calls).toHaveLength(0);
+  });
+});
+
+// =============================================================================
+// Dos locales: cuál emite
+// =============================================================================
+
+describe("con más de una sucursal, se pregunta desde cuál se factura", () => {
+  // `BILLER_DEFAULT_SUCURSAL_ID` alcanza cuando hay un solo local. Con dos, la
+  // venta del Centro salía con la sucursal de Pocitos y nadie lo veía hasta
+  // mirar el comprobante emitido: el número queda mal atribuido y los reportes
+  // por local mienten los dos.
+  const conDosLocales = {
+    capabilityMode: "write_enabled" as const,
+    sucursales: { "6": "Pocitos", "7": "Centro" },
+    defaultSucursalId: "6",
+  };
+
+  const venta = {
+    clase_receptor: "consumidor_final" as const,
+    sin_receptor: true,
+    items: [{ concepto: "café", cantidad: 1, precio: 120 }],
+    montos_brutos: true,
+    indicador_facturacion: 3,
+  };
+
+  it("pregunta antes del preview, con un botón por local", async () => {
+    const { ctx } = makeCtx({ config: conDosLocales });
+    const r = j(await handleEmisionGuiada({ sesion: "59891120001", ...venta }, ctx));
+    expect(r.paso).toBe("sucursal");
+    expect(r.listo_para_requisitos).toBe(false);
+    expect(r.pregunta).toMatch(/local/i);
+  });
+
+  it("elegir el local lo deja en el comprobante", async () => {
+    const { ctx } = makeCtx({ config: conDosLocales });
+    await handleEmisionGuiada({ sesion: "59891120002", ...venta }, ctx);
+    const r = j(
+      await handleEmisionGuiada(
+        { sesion: "59891120002", mensaje: "emision:sucursal:7" },
+        ctx,
+      ),
+    );
+    expect(r.paso).toBe("confirmar");
+    expect(r.comprobante_borrador?.sucursal).toBe(7);
+  });
+
+  it("con un solo local no se pregunta nada: sigue el default de siempre", async () => {
+    const { ctx } = makeCtx({
+      config: { ...conDosLocales, sucursales: { "6": "Pocitos" } },
+    });
+    const r = j(await handleEmisionGuiada({ sesion: "59891120003", ...venta }, ctx));
+    expect(r.paso).toBe("confirmar");
+  });
+
+  it("sin sucursales nombradas tampoco se pregunta", async () => {
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = j(await handleEmisionGuiada({ sesion: "59891120004", ...venta }, ctx));
+    expect(r.paso).toBe("confirmar");
+  });
+});
+
+describe("el submenú de locales respeta los límites de WhatsApp", () => {
+  it("dos o tres locales son botones; cuatro o más, una lista", async () => {
+    const { construirSubmenuSucursal } = await import("../src/kapso/render.js");
+    const { construirPayloadInteractivo } = await import("../src/kapso/client.js");
+
+    const dos = construirSubmenuSucursal({ "6": "Pocitos", "7": "Centro" });
+    expect(dos.tipo).toBe("botones");
+    expect(() => construirPayloadInteractivo(dos)).not.toThrow();
+
+    // Con cuatro no entran en botones: Meta permite tres, y pasarse hace que
+    // rechace el mensaje entero.
+    const cuatro = construirSubmenuSucursal({
+      "6": "Pocitos",
+      "7": "Centro",
+      "8": "Carrasco",
+      "9": "Ciudad Vieja",
+    });
+    expect(cuatro.tipo).toBe("lista");
+    expect(() => construirPayloadInteractivo(cuatro)).not.toThrow();
+  });
+
+  it("el id del botón lleva el ID REAL, no el nombre", async () => {
+    const { construirSubmenuSucursal } = await import("../src/kapso/render.js");
+    const menu = construirSubmenuSucursal({ "347": "Local del Centro" });
+    expect(JSON.stringify(menu)).toContain("emision:sucursal:347");
   });
 });

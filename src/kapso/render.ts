@@ -676,3 +676,48 @@ export function construirListaClientes(
     secciones: [{ titulo: "Tus clientes", filas }],
   };
 }
+
+/**
+ * Desde qué local se factura.
+ *
+ * Botones si son dos o tres —que es el caso real de una PyME con locales— y
+ * lista cuando son más: WhatsApp permite tres botones y hasta diez filas, y
+ * pasarse hace que Meta rechace el mensaje entero.
+ *
+ * El id lleva el ID REAL de la sucursal, que es lo que viaja al comprobante. El
+ * nombre es solo para que el usuario reconozca su local: nunca se emite.
+ */
+export function construirSubmenuSucursal(
+  sucursales: Record<string, string>,
+): InteractivoBotones | InteractivoLista {
+  const entradas = Object.entries(sucursales);
+  const cuerpo = "¿Desde qué local lo facturo? Queda escrito en el comprobante.";
+
+  if (entradas.length <= 3) {
+    return {
+      tipo: "botones",
+      encabezado: "¿Qué local?",
+      cuerpo,
+      botones: entradas.map(([id, nombre]) => ({
+        id: `${PREFIJO_PASO}sucursal:${id}`,
+        titulo: recortarSeguro(nombre, 20),
+      })),
+    };
+  }
+
+  return {
+    tipo: "lista",
+    encabezado: "¿Qué local?",
+    cuerpo,
+    boton: "Elegir local",
+    secciones: [
+      {
+        titulo: "Tus locales",
+        filas: entradas.slice(0, 10).map(([id, nombre]) => ({
+          id: `${PREFIJO_PASO}sucursal:${id}`,
+          titulo: recortarSeguro(nombre, 24),
+        })),
+      },
+    ],
+  };
+}
