@@ -100,15 +100,20 @@ describe("umbral de receptor (regla de las 5.000 UI)", () => {
     expect(u.valor_ui_configurado).toBe(true);
   });
 
-  it("una fecha con formato inválido se ignora (no se usa para nota ni antigüedad)", () => {
+  it("una fecha con formato inválido NO deja usar el valor", () => {
     const u = resolverUmbralReceptor({
       valor_ui: UI,
       valor_ui_fecha: "31/12/2026",
       hoy: "2026-09-01",
     });
-    // El valor SÍ se usa (está en rango) — lo que se descarta es la fecha rota.
-    expect(u.valor_ui_configurado).toBe(true);
+    // ANTES el valor se usaba igual y solo se descartaba la fecha. Con la regla
+    // anual eso dejó de ser tolerable: sin fecha legible no se puede saber de
+    // qué AÑO es el valor, y el error dura los doce meses en vez de quince
+    // días. Se cae al de referencia —que es conservador— y se dice por qué.
+    expect(u.valor_ui_configurado).toBe(false);
+    expect(u.problema).toBe("formato_invalido");
     expect(u.valor_ui_fecha).toBeNull();
+    expect(u.nota).toMatch(/1º de enero/);
   });
 
   it("un e-Ticket con BILLER_VALOR_UI absurdo igual exige receptor con el umbral de referencia", () => {
@@ -289,5 +294,56 @@ describe("emitir: la regla del umbral llega al preview", () => {
     const parsed = ComprobanteBodySchema.parse(body);
     const warnings = validarComprobante(parsed, { total_uyu: null, valor_ui: UI }).join(" ");
     expect(warnings).toMatch(/No se pudo verificar el umbral/);
+  });
+});
+
+describe("un valor de UI mal configurado no puede pasar callado", () => {
+  // Los dos los encontró el code review, y los dos van en la MISMA dirección
+  // cara: el umbral en pesos queda MÁS ALTO de lo que corresponde, así que un
+  // e-Ticket que debía exigir receptor identificado deja de exigirlo.
+  const UI_ENERO = 6.4237;
+
+  it("una fecha de mitad de año avisa donde se lee, no solo en la nota", () => {
+    // El valor de julio es más alto que el de enero. Antes la nota "OJO: el
+    // decreto fija esto con la UI del 1º de enero" existía pero solo se sumaba
+    // a `advertencias` cuando el valor NO se usaba: justo en el caso peligroso
+    // —se usa, y por eso el umbral queda inflado— no aparecía en ningún lado
+    // que el operador mire.
+    const req = evaluarRequisitos(
+      101,
+      { moneda: "UYU" },
+      { total_uyu: 33_000, valor_ui: 6.7, valor_ui_fecha: "2026-07-01", hoy: "2026-09-01" },
+    );
+    // El umbral con la UI de julio da $33.500, así que estos $33.000 NO lo
+    // superan y el receptor pasa a ser opcional. Con la UI de enero ($6,4237)
+    // el umbral es $32.118 y sí lo supera: es exactamente el caso donde la
+    // fecha equivocada cambia la obligación, y donde hace falta el aviso.
+    expect(req.advertencias.join(" ")).toMatch(/1º de enero/);
+  });
+
+  it("una fecha ilegible no deja usar el valor como si estuviera vigente", () => {
+    // "01/01/2023" no matchea aaaa-mm-dd, así que la fecha se descartaba… y el
+    // valor quedaba `configurado: true`, `problema: null`. Un valor de hace tres
+    // años pasaba el gate y el health sin una palabra. Con la regla anual el
+    // silencio duraba el año entero.
+    const u = resolverUmbralReceptor({
+      valor_ui: 5.2,
+      valor_ui_fecha: "01/01/2023",
+      hoy: "2026-09-01",
+    });
+    expect(u.valor_ui_configurado).toBe(false);
+    expect(u.problema).toBe("formato_invalido");
+    expect(u.valor_ui).toBe(VALOR_UI_REFERENCIA);
+  });
+
+  it("el del 1º de enero de este año sigue pasando limpio", () => {
+    const u = resolverUmbralReceptor({
+      valor_ui: UI_ENERO,
+      valor_ui_fecha: "2026-01-01",
+      hoy: "2026-09-01",
+    });
+    expect(u.valor_ui_configurado).toBe(true);
+    expect(u.problema).toBeNull();
+    expect(u.nota).not.toMatch(/OJO/);
   });
 });

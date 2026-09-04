@@ -6,7 +6,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleEmisionGuiada } from "../src/tools/emisionGuiada.js";
 import { handleMenuWhatsapp } from "../src/tools/menuWhatsapp.js";
-import { interpretarRespuestaLibre, siguientePaso, type EstadoEmision } from "../src/kapso/emision.js";
+import {
+  interpretarRespuestaLibre,
+  siguientePaso,
+  sugiereExportacion,
+  type EstadoEmision,
+} from "../src/kapso/emision.js";
 import { interpretarMensaje } from "../src/kapso/menu.js";
 import { makeCtx } from "./helpers.js";
 
@@ -563,7 +568,11 @@ describe("una exportación no sale como e-Factura local", () => {
     ]) {
       const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
       const r = j(await handleEmisionGuiada({ ...base, sesion: base.sesion + mensaje.length, mensaje }, ctx));
-      expect(r.listo, mensaje).not.toBe(true);
+      // `listo_para_requisitos`, NO `listo`: la respuesta de la tool no tiene un
+      // campo `listo`, así que la aserción vieja pasaba sin probar nada. La
+      // encontró el code review, y es el campo que le dice al agente "andá a
+      // emitir".
+      expect(r.listo_para_requisitos, mensaje).toBe(false);
       expect(r.warnings.join(" "), mensaje).toMatch(/exportaci/i);
       expect(r.como_sigue, mensaje).toMatch(/NO emitas/i);
     }
@@ -668,5 +677,178 @@ describe("el kiosco también tiene lo de siempre", () => {
     );
     expect(r.estado_entendido?.documento).toBe("210000000011");
     expect(r.estado_entendido?.items?.[0]).toMatchObject({ cantidad: 1, precio: 6500 });
+  });
+});
+
+describe("el freno de exportación dura toda la conversación", () => {
+  // LO QUE ENCONTRÓ EL CODE REVIEW: la palabra "exportación" aparece UNA vez,
+  // casi siempre en el primer mensaje, y la emisión sigue tres mensajes más.
+  // Con la marca solo en la variable del turno, el aviso salía en el mensaje 1
+  // y en el 3 el flujo decía "ya está todo, andá a emitir": avisaba y emitía
+  // igual, que es peor que no avisar.
+  const sesion = "59891117777";
+
+  it("se avisa en el primer mensaje y SIGUE frenado en el tercero", async () => {
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r1 = j(
+      await handleEmisionGuiada(
+        {
+          sesion,
+          clase_receptor: "empresa",
+          documento: "219999830019",
+          mensaje: "es una exportación de servicios a mi cliente de España",
+        },
+        ctx,
+      ),
+    );
+    expect(r1.warnings.join(" ")).toMatch(/EXPORTACIÓN/);
+
+    const r2 = j(
+      await handleEmisionGuiada(
+        {
+          sesion,
+          mensaje: "1 desarrollo de software a 1200",
+          items: [{ concepto: "desarrollo de software", cantidad: 1, precio: 1200 }],
+          montos_brutos: true,
+          indicador_facturacion: 3,
+        },
+        ctx,
+      ),
+    );
+    expect(r2.listo_para_requisitos).toBe(false);
+    expect(r2.warnings.join(" ")).toMatch(/EXPORTACIÓN/);
+    expect(r2.como_sigue).toMatch(/NO emitas/i);
+  });
+
+  it("el usuario lo puede negar y el flujo sigue derecho", async () => {
+    // Sin salida, un falso positivo trancaría la emisión para siempre: la marca
+    // vive en el borrador y el borrador dura 24 horas.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    await handleEmisionGuiada(
+      { sesion: sesion + "b", clase_receptor: "empresa", documento: "219999830019", mensaje: "es exportación" },
+      ctx,
+    );
+    const r = j(
+      await handleEmisionGuiada(
+        {
+          sesion: sesion + "b",
+          mensaje: "no es exportación, es local",
+          items: [{ concepto: "consultoría", cantidad: 1, precio: 1200 }],
+          montos_brutos: true,
+          indicador_facturacion: 3,
+        },
+        ctx,
+      ),
+    );
+    expect(r.listo_para_requisitos).toBe(true);
+    expect(r.warnings.join(" ")).not.toMatch(/EXPORTACIÓN/);
+  });
+
+  it("no frena al pintor, al herrero ni al jardinero", () => {
+    // "exterior" en rioplatense es antes que nada "afuera de la casa". Frenar
+    // ahí tranca una venta local por una palabra.
+    for (const t of [
+      "facturale a Perez pintura del exterior 5000",
+      "reparación de la puerta al exterior 3000",
+      "jardinería en el exterior de la casa",
+      "facturale a Pinturas España 20 litros",
+    ]) {
+      expect(sugiereExportacion(t), t).toBe(false);
+    }
+    // Y lo que sí es exportar sigue frenando.
+    for (const t of ["le vendo al exterior", "es una exportación", "mi cliente de Brasil"]) {
+      expect(sugiereExportacion(t), t).toBe(true);
+    }
+  });
+});
+
+describe("la lista de clientes no puede romper el mensaje entero", () => {
+  const diasAtras = (n: number): string =>
+    `${new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10)} 10:00:00`; // fecha-uy:allow fixture
+
+  const venta = (i: number, documento: string, razon: string) => ({
+    id: 800 + i,
+    tipo_comprobante: 111,
+    moneda: "UYU",
+    total: 1000,
+    estado: "Aceptado DGI",
+    fecha_emision: diasAtras(i + 1),
+    montos_brutos: 1,
+    forma_pago: 1,
+    cliente: { documento, razon_social: razon },
+    items: [{ cantidad: 1, concepto: "portland", precio: 1000, indicador_facturacion: 3 }],
+  });
+
+  it("un nombre que queda vacío al limpiarlo NO se ofrece, y los buenos salen igual", async () => {
+    // El filtro corría ANTES de limpiar, y `trim()` no saca un \u0001 ni las
+    // marcas de la barrera: la fila salía sin título, Meta rechaza el mensaje
+    // ENTERO, y la tool devolvía error en vez de pregunta. Un cliente roto
+    // dejaba mudo al flujo y se llevaba puestos a los demás.
+    const { buscarClientesFrecuentes } = await import("../src/tools/emisionGuiada.js");
+    const historial = [
+      ...Array.from({ length: 3 }, (_, i) => venta(i, "219999830019", "GOMEZ SRL")),
+      ...Array.from({ length: 2 }, (_, i) => venta(10 + i, "210000000011", "\u0001\u0002")),
+    ];
+    const { ctx } = makeCtx({
+      impl: (opts: any) =>
+        opts?.query?.id !== undefined
+          ? historial.filter((c) => String(c.id) === String(opts.query.id))
+          : historial,
+      config: { capabilityMode: "write_enabled" },
+    });
+    const frecuentes = await buscarClientesFrecuentes(ctx);
+    expect(frecuentes.map((c) => c.nombre)).toEqual(["GOMEZ SRL"]);
+  });
+
+  it("un nombre con emoji en el borde no sale partido al medio", async () => {
+    const { construirListaClientes } = await import("../src/kapso/render.js");
+    const { construirPayloadInteractivo } = await import("../src/kapso/client.js");
+    const lista = construirListaClientes([
+      { nombre: "PANADERIA LA ESPERANZA 🥖", documento: "219999830019" },
+    ]);
+    const titulo = lista.secciones[0]!.filas[0]!.titulo;
+    // `slice(0, 24)` cortaba el par suplente al medio: un título mal formado es
+    // un mensaje que Meta no acepta, y nadie se entera de por qué. Se chequea a
+    // mano y no con `isWellFormed()`, que es ES2024 y este target no lo tiene.
+    const ultimo = titulo.charCodeAt(titulo.length - 1);
+    expect(ultimo >= 0xd800 && ultimo <= 0xdbff, `título termina en surrogate alto: ${titulo}`).toBe(
+      false,
+    );
+    expect(() => construirPayloadInteractivo(lista)).not.toThrow();
+  });
+});
+
+describe("lo que cuesta la lista de clientes está a la vista", () => {
+  const HIST = [
+    {
+      id: 1,
+      tipo_comprobante: 111,
+      moneda: "UYU",
+      total: 100,
+      estado: "Aceptado DGI",
+      fecha_emision: `${new Date().toISOString().slice(0, 10)} 10:00:00`, // fecha-uy:allow fixture
+      montos_brutos: 1,
+      forma_pago: 1,
+      cliente: { documento: "210000000011", razon_social: "PEREZ SA" },
+      items: [],
+    },
+  ];
+
+  it("se paga UNA vez por conversación, no en cada mensaje", async () => {
+    // La ventana de 90 días se pide en tramos de 7 días: son ~15 requests, no
+    // uno. El cache de ventanas dura 120 segundos, así que una conversación con
+    // pausas los pagaba de nuevo en cada mensaje. Por eso el resultado se
+    // guarda en el BORRADOR, igual que el perfil de la casa.
+    const { ctx, getMock } = makeCtx({
+      impl: () => HIST,
+      config: { capabilityMode: "write_enabled" },
+    });
+    await handleEmisionGuiada({ sesion: "59891119999", clase_receptor: "empresa" }, ctx);
+    const primera = getMock.mock.calls.length;
+    expect(primera).toBeGreaterThan(1); // la ventana es por tramos: no es "una consulta"
+
+    getMock.mockClear();
+    await handleEmisionGuiada({ sesion: "59891119999", clase_receptor: "empresa" }, ctx);
+    expect(getMock.mock.calls).toHaveLength(0);
   });
 });

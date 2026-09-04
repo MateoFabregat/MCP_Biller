@@ -67,6 +67,7 @@ import {
   siguientePaso,
   sugiereDolares,
   sugiereExportacion,
+  niegaExportacion,
   PREFIJO_PASO,
   tipoComprobanteSugerido,
   type ClaseReceptor,
@@ -997,10 +998,15 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     // por deuda), y eso le gana a la deducción genérica. La deducción existe
     // para cuando NO se acordó, que es el caso que dejaba al usuario tipeando
     // doce dígitos de RUT.
-    let frecuentes = a.clientes_frecuentes ?? [];
+    let frecuentes = a.clientes_frecuentes ?? estado.clientes_frecuentes ?? [];
     if (frecuentes.length === 0 && siguiente.paso === "cliente" && !pidioOtroCliente) {
       try {
         frecuentes = await buscarClientesFrecuentes(ctx);
+        // UNA VEZ POR CONVERSACIÓN, igual que el perfil de la casa. La ventana
+        // de 90 días son ~15 requests (se pide en tramos de 7 días) y el cache
+        // de ventanas vive 120 segundos: sin guardar el resultado en el
+        // borrador, una conversación con pausas los pagaba dos y tres veces.
+        estado.clientes_frecuentes = frecuentes;
       } catch {
         // Sin historial no hay lista, y sin lista se pregunta como siempre: es
         // un atajo, no un requisito. Una caída de la API no puede trancar una
@@ -1037,7 +1043,13 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     // No se descarta el borrador ni se corta la conversación: se avisa y se
     // BLOQUEA el `listo`, que es lo que le diría al agente "andá a emitir". Si
     // era un falso positivo, el mensaje siguiente sin la palabra sigue derecho.
-    const exportacion = a.mensaje !== undefined && sugiereExportacion(a.mensaje);
+    // La sospecha se guarda en el BORRADOR: la palabra aparece una vez y la
+    // emisión sigue tres mensajes más. Ver `posible_exportacion`.
+    if (a.mensaje !== undefined) {
+      if (niegaExportacion(a.mensaje)) delete estado.posible_exportacion;
+      else if (sugiereExportacion(a.mensaje)) estado.posible_exportacion = true;
+    }
+    const exportacion = estado.posible_exportacion === true;
     if (exportacion) {
       siguiente = { ...siguiente, listo: false };
       warnings.push(
@@ -1046,7 +1058,8 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
           "indicador_facturacion 10, y además exige modalidad_venta, clausula_venta, via_transporte " +
           "y el ncm de cada ítem. Emitirla como 111 le pone IVA 22% a una venta que no lo lleva. " +
           "Armala con biller_emitir_comprobante pasando el cuerpo completo, o consultá con tu " +
-          "contador. Si NO es una exportación, repetí el pedido sin nombrar el exterior.",
+          'contador. Si NO es una exportación, que el usuario lo diga ("no es exportación", "es ' +
+          'local") y el flujo sigue derecho.',
       );
     }
 
@@ -1592,21 +1605,30 @@ export async function buscarClientesFrecuentes(
   const ranking = rankingClientes(ventana.comprobantes, {
     desde,
     hasta,
-    limite: MAX_CLIENTES_FRECUENTES,
+    // Se pide de más a propósito: el ranking corta ANTES de que acá se filtren
+    // los que no tienen RUT, así que con un mostrador activo las nueve filas se
+    // llenaban con clientes que después se descartaban.
+    limite: MAX_CLIENTES_FRECUENTES * 3,
   });
 
   return ranking.clientes
-    .filter((c) => c.rut !== null && (c.nombre ?? "").trim() !== "")
-    .slice(0, MAX_CLIENTES_FRECUENTES)
+    .filter((c) => c.rut !== null)
     .map((c) => ({
       // El nombre lo escribió un tercero (o DGI) y viaja al TÍTULO de una fila
       // de WhatsApp, que se recorta a 24 caracteres. Se neutralizan los
       // delimitadores de la barrera para que nadie pueda cerrar la envoltura
       // desde adentro, y los caracteres de control, que no se ven pero rompen
       // el JSON del payload.
-      nombre: limpiarParaTitulo(c.nombre!),
+      nombre: limpiarParaTitulo(c.nombre ?? ""),
       documento: c.rut!,
-    }));
+    }))
+    // El filtro va DESPUÉS de limpiar, y no es un detalle de orden: `trim()` no
+    // saca un \u0001 ni las marcas de la barrera, así que un nombre que queda
+    // vacío recién al limpiarlo pasaba el filtro y salía como fila sin título.
+    // Una sola fila así hace que Meta rechace el mensaje ENTERO: se perdían
+    // también los clientes buenos, y la tool devolvía error en vez de pregunta.
+    .filter((c) => c.nombre !== "")
+    .slice(0, MAX_CLIENTES_FRECUENTES);
 }
 
 export async function buscarPerfilCasa(ctx: ToolContext): Promise<PerfilCasa> {

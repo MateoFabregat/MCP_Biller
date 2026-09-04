@@ -128,6 +128,14 @@ export interface UmbralReceptor {
   nota: string;
   /** Detalle de por qué no se usó el valor configurado (ver `valor_ui_configurado`). */
   problema: ProblemaValorUi;
+  /**
+   * El valor se usa, pero su fecha NO es la del 1º de enero que fija el decreto.
+   *
+   * Se expone —en vez de quedar solo en la nota— porque es la única señal de
+   * que el umbral puede estar inflado, y los que tienen que avisar están más
+   * arriba: `evaluarRequisitos` y el health.
+   */
+  fecha_fuera_de_regla: boolean;
 }
 
 /** Días entre dos fechas aaaa-mm-dd (b - a). `null` si alguna no parsea. */
@@ -167,7 +175,11 @@ export function resolverUmbralReceptor(opciones: OpcionesUi = {}): UmbralRecepto
     tieneValor && valorCrudo >= VALOR_UI_MIN_PLAUSIBLE && valorCrudo <= VALOR_UI_MAX_PLAUSIBLE;
   const absurdo = tieneValor && !dentroDeRango;
 
-  const configurado = dentroDeRango && !vencido;
+  // Una fecha que no se puede leer NO es una fecha vieja: es no saber de qué
+  // año es el valor. Con la regla anual eso importa más que antes —el silencio
+  // duraría todo el año— así que se trata como lo que es: no se puede afirmar
+  // que esté vigente, y se cae al de referencia diciéndolo.
+  const configurado = dentroDeRango && !vencido && !formatoInvalido;
   const valor_ui = configurado ? valorCrudo! : VALOR_UI_REFERENCIA;
   const umbral_uyu = Math.round(umbral_ui * valor_ui);
 
@@ -177,7 +189,7 @@ export function resolverUmbralReceptor(opciones: OpcionesUi = {}): UmbralRecepto
       ? "absurdo"
       : vencido
         ? "vencido"
-        : formatoInvalido && !tieneValor
+        : formatoInvalido
           ? "formato_invalido"
           : null;
 
@@ -206,7 +218,8 @@ export function resolverUmbralReceptor(opciones: OpcionesUi = {}): UmbralRecepto
     nota =
       `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}, usando un valor de UI de REFERENCIA ` +
       `($${VALOR_UI_REFERENCIA}) porque BILLER_VALOR_UI_FECHA="${fechaCruda}" no tiene el formato ` +
-      "aaaa-mm-dd: sin una fecha confiable no se puede saber si el valor está vigente.";
+      "aaaa-mm-dd: sin una fecha confiable no se puede saber de qué año es el valor, y el umbral se " +
+      "fija con la UI del 1º de enero del año en curso.";
   } else {
     nota =
       `Umbral de ${umbral_ui} UI ≈ $${umbral_uyu}, usando un valor de UI de REFERENCIA ` +
@@ -218,6 +231,7 @@ export function resolverUmbralReceptor(opciones: OpcionesUi = {}): UmbralRecepto
     umbral_ui,
     valor_ui,
     valor_ui_configurado: configurado,
+    fecha_fuera_de_regla: fueraDeFecha && configurado,
     valor_ui_fecha: fechaValida ?? null,
     umbral_uyu,
     nota,
@@ -449,7 +463,14 @@ export function evaluarRequisitos(
     });
   }
   reglas.push(receptor.motivo);
-  if (!receptor.umbral.valor_ui_configurado) {
+  // La nota del umbral sube a `advertencias` en los DOS casos en que el número
+  // puede no ser el que corresponde: cuando el valor configurado no se usó, y
+  // cuando se usó pero su fecha no es la del 1º de enero. El segundo es el
+  // peligroso y era el que no avisaba: el valor de mitad de año es más alto, o
+  // sea umbral más alto, o sea un e-Ticket que deja de exigir receptor. La nota
+  // solo se veía en `umbral_receptor.nota`, que nadie mira cuando el flujo dice
+  // "recomendado" en vez de "siempre".
+  if (!receptor.umbral.valor_ui_configurado || receptor.umbral.fecha_fuera_de_regla) {
     advertencias.push(receptor.umbral.nota);
   }
 

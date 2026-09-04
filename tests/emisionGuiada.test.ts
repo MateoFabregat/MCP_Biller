@@ -2007,11 +2007,16 @@ describe("el perfil de la casa: los defaults que salen del historial", () => {
     // detalle de las cinco muestras, que es donde vive la tasa de IVA).
     //
     // OJO CON LO QUE ESTE TEST FIJA Y LO QUE NO. Lo que sigue diferido es el
-    // PERFIL. En el paso `cliente` sí se lee la ventana —UNA consulta, sin
-    // detalles— para ofrecer los clientes frecuentes como lista tocable: es la
-    // diferencia entre un toque y doce dígitos de RUT tipeados desde el
-    // mostrador, y de paso deja el cache caliente para el perfil, que iba a
-    // pedir esa misma ventana un par de mensajes después.
+    // PERFIL, que es lo caro de verdad: la ventana MÁS el detalle de las cinco
+    // muestras, porque la tasa de IVA solo vive en el detalle.
+    //
+    // En el paso `cliente` sí se lee la ventana, para ofrecer los clientes
+    // frecuentes como lista tocable: es la diferencia entre un toque y doce
+    // dígitos de RUT tipeados desde el mostrador. NO es "una consulta" —así lo
+    // decía este comentario y era falso: la ventana de 90 días se pide en
+    // tramos de siete, o sea ~15 requests— pero no pide NINGÚN detalle, se
+    // cachea en el borrador para toda la conversación, y deja la ventana
+    // caliente para el perfil que la iba a pedir igual dos mensajes después.
     const { ctx, getMock } = makeCtx({
       impl: apiConHistorial(CASA_CON_IVA_INCLUIDO),
       config: { capabilityMode: "write_enabled" },

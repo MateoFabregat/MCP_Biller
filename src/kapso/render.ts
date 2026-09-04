@@ -658,7 +658,11 @@ export function construirListaClientes(
     .slice(0, 9)
     .map((c) => ({
       id: `${PREFIJO_PASO}cliente:${c.documento!}`,
-      titulo: c.nombre.slice(0, 24),
+      // `recortarSeguro` y no `slice`: el nombre viene de la API y puede traer
+      // un emoji en el carácter 24. `slice` corta por code units y deja medio
+      // par suplente suelto, que es un título mal formado y un mensaje que Meta
+      // no acepta — el modo de falla que la cabecera de `utils/texto.ts` narra.
+      titulo: recortarSeguro(c.nombre, 24),
       descripcion: `RUT/CI ${c.documento!}`,
     }));
 

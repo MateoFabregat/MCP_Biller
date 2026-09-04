@@ -251,6 +251,30 @@ export interface EstadoEmision {
    * solo y la factura salía con la fecha de hoy sin que nadie lo pidiera.
    */
   fecha_a_elegir?: boolean;
+  /**
+   * El texto dijo que esta venta va al exterior, y este flujo no sabe armar una
+   * exportación.
+   *
+   * VIVE EN EL BORRADOR Y NO EN UNA VARIABLE DEL TURNO, y esa es toda la
+   * diferencia entre frenar y hacer como que se frena: la palabra
+   * "exportación" aparece UNA vez, casi siempre en el primer mensaje, y la
+   * emisión sigue tres mensajes más. Con la marca solo en memoria del turno, el
+   * aviso salía en el mensaje 1 y en el mensaje 3 el flujo decía "ya está todo,
+   * andá a emitir" — o sea, avisaba y emitía igual.
+   *
+   * Se levanta cuando el usuario lo niega ("no es exportación", "es local") o
+   * cuando se descarta el borrador.
+   */
+  posible_exportacion?: boolean;
+  /**
+   * Los clientes frecuentes ya derivados en esta conversación.
+   *
+   * Es un CACHE, no algo que dijo el usuario — mismo estatuto que
+   * `perfil_casa`. Derivarlos cuesta una ventana de 90 días (~15 requests en
+   * tramos de 7 días) y el cache de ventanas dura dos minutos: sin esto, una
+   * conversación con pausas los pagaba de nuevo en cada mensaje.
+   */
+  clientes_frecuentes?: Array<{ nombre: string; documento?: string }>;
   /** RUT o CI del receptor, como lo escribió el usuario. */
   documento?: string;
   /** Razón social o nombre. */
@@ -544,10 +568,35 @@ export function sugiereExportacion(texto: string): boolean {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
   if (/\bexportaci(on|ones)\b|\bexportar\b|\bexporto\b/.test(limpio)) return true;
-  if (/\b(del|en el|al) exterior\b/.test(limpio)) return true;
+  // "al exterior" SOLO detrás de un verbo de venta. En rioplatense "exterior"
+  // es antes que nada "afuera de la casa": "pintura del exterior", "la puerta
+  // al exterior", "jardinería en el exterior" son trabajos de todos los días, y
+  // frenarlos tranca una venta local por una palabra.
+  if (/\b(vend[eoi]|vendo|venta|ventas|factur[oa]|facturar|facturale|cobr[oa])\w*\b[^.]{0,15}\bal exterior\b/.test(limpio)) {
+    return true;
+  }
   // "mi cliente de España", "el cliente está en Brasil": el país aparece como
   // ubicación DEL CLIENTE, no como parte de su nombre.
-  return /\bcliente\b[^.]{0,20}\b(de|en|desde)\s+(españa|espana|brasil|argentina|chile|paraguay|estados unidos|eeuu|usa|mexico|colombia|peru|el exterior|afuera)\b/.test(
+  // El país (o "el exterior") aparece como ubicación DEL CLIENTE, no como parte
+  // de su nombre: "mi cliente de España", "el cliente está en el exterior".
+  return /\bcliente\b[^.]{0,25}\b(de|en|desde)\s+(el exterior|afuera|españa|espana|brasil|argentina|chile|paraguay|estados unidos|eeuu|usa|mexico|colombia|peru|alemania|italia|francia|china)\b/.test(
+    limpio,
+  );
+}
+
+/**
+ * ¿El texto NIEGA que sea una exportación?
+ *
+ * Es la salida del freno: `posible_exportacion` queda guardada en el borrador,
+ * así que sin una forma de levantarla un falso positivo trancaría la emisión
+ * para siempre. Un "no, es local" alcanza.
+ */
+export function niegaExportacion(texto: string): boolean {
+  const limpio = texto
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  return /\bno es (una )?exportaci(on|ones)\b|\bno es al exterior\b|\bes local\b|\bes (para )?ac[a]\b|\bes en uruguay\b|\bes nacional\b/.test(
     limpio,
   );
 }
