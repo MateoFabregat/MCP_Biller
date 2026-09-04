@@ -721,3 +721,165 @@ es el flujo caro y el embudo `emision.paso` ya mide si funciona. Después lo que
 hace medible al resto (V5.3). Después la deuda que borra código (V5.4). Lo
 proactivo (V5.5) recién cuando alguien real haya usado lo reactivo — y V5.6
 solo si los números lo piden.
+
+
+---
+
+## V6. La capa que falta: lo que el sistema SABE vs. lo que el negocio DECIDE (septiembre 2026)
+
+> Esta vuelta salió de una pregunta del dueño, y la pregunta vale más que
+> cualquiera de las respuestas: *"de todas las compras, se pueden categorizar…
+> como poder asignarles un rubro"*.
+>
+> Es la primera idea del proyecto que **no se puede resolver leyendo la API**.
+> Y por eso mismo es la que abre una capa nueva.
+
+### V6.0. Dos clases de estado, y por qué la distinción decide el diseño
+
+Hasta hoy todo lo que el server guarda es **estado operativo reconstruible**:
+borradores de emisión (vencen a las 24 h), journals de idempotencia (existen
+para no repetir un POST), cache de ventanas (una optimización), sesiones HTTP.
+Si se borra el `data_dir` entero, se pierde comodidad y no se pierde información:
+la verdad vive en la API de Biller.
+
+Un rubro asignado a una compra es otra cosa. **Es un dato que el negocio creó y
+que no existe en ningún otro lado.** Si se pierde, no se recupera consultando
+nada: hay que volver a decidirlo compra por compra.
+
+Esa diferencia no es filosófica, cambia cinco decisiones concretas:
+
+| | Estado operativo (hoy) | Dato del negocio (lo nuevo) |
+|---|---|---|
+| Si se pierde | se rehace solo | se pierde y punto |
+| Backup | no hace falta | **obligatorio**, y hay que decir dónde |
+| Vencimiento | sí (24 h, TTL) | **nunca** vence |
+| Migración de formato | se tira y se rehace | hay que migrar de verdad |
+| Multi-empresa | aislado por prolijidad | aislado **porque es información comercial ajena** |
+
+**La conclusión de diseño:** el día que se guarde el primer rubro, este server
+deja de ser "una interfaz sobre la API de Biller" y pasa a ser, también, **un
+lugar donde vive información que Biller no tiene**. Eso es una promesa nueva
+hacia el usuario, y hay que hacerla a propósito o no hacerla.
+
+### V6.1. `biller_rubros` — la propuesta concreta
+
+**De qué campo sale.** De `items[].concepto` y del `rut_emisor` de los
+comprobantes RECIBIDOS, que ya trae `biller_compras_proveedores`. Lo que NO sale
+de ningún campo es el rubro: eso lo pone una persona, una vez.
+
+**Cómo funciona, en tres movimientos:**
+
+1. **El modelo propone.** Le llegan las compras del período sin clasificar, con
+   el proveedor y los conceptos. Propone un rubro para cada una y **dice por
+   qué**: *"Distribuidora del Este → Mercadería, porque sus 14 facturas son todas
+   harina, azúcar y levadura"*.
+2. **El humano decide, una sola vez por proveedor.** No factura por factura: eso
+   es data entry y nadie lo hace dos veces. La pregunta correcta es *"¿todo lo
+   que le compro a este proveedor es Mercadería?"*, y se contesta una vez.
+3. **El sistema recuerda la REGLA, no el caso.** Lo que se guarda es
+   `rut_emisor → rubro`, con la fecha y quién lo decidió. La compra número 15 de
+   ese proveedor entra clasificada sola. Las excepciones se guardan aparte, por
+   comprobante, y ganan sobre la regla.
+
+**Por qué recordar la regla y no el caso es EL punto.** Guardar la clasificación
+de cada factura es una base de datos que envejece: cada compra nueva vuelve a
+preguntar. Guardar la regla es un sistema que aprende del negocio: se pregunta
+una vez por proveedor nuevo y después trabaja solo. La primera versión da trabajo
+para siempre; la segunda da trabajo el primer mes.
+
+Y es la forma honesta de "IA aplicada": **el modelo adivina, la persona decide,
+el sistema recuerda.** Ninguno de los tres hace el trabajo del otro. Si el modelo
+decidiera, el dueño tendría números que no entiende; si el dueño clasificara todo
+a mano, no usaría la herramienta dos meses.
+
+**Qué desbloquea, y esto es lo que se vende:**
+
+- *"¿En qué se me va la plata?"* por rubro y por mes, que es la pregunta que
+  ninguna PyME uruguaya puede contestar hoy sin un contador.
+- **IVA crédito por rubro**: cruzado con `biller_posicion_iva`, dice de dónde
+  viene el crédito fiscal.
+- **Margen por rubro**: ventas por familia de producto contra compras por rubro.
+  Es lo más cerca del margen real que se puede llegar sin que Biller tenga
+  costos.
+- **La alerta que nadie tiene**: *"Mercadería subió 18% contra el promedio de
+  tus últimos tres meses"*. Un aumento de costos se nota en la caja tres meses
+  después de que empezó.
+
+**Lo que hay que resolver antes de escribir una línea:**
+
+1. **Dónde vive.** Un archivo por empresa en el `data_dir` que ya existe, con el
+   mismo aislamiento que los borradores (0600, salado por empresa). SQLite recién
+   cuando haya una segunda cosa que guardar — y va a haberla (V6.2).
+2. **El catálogo de rubros.** Cerrado y corto para empezar (mercadería,
+   servicios, alquiler, sueldos, impuestos, transporte, mantenimiento, otros).
+   Un catálogo libre se convierte en veinte rubros escritos de tres formas
+   distintas en dos meses.
+3. **Backup.** Es dato irreemplazable: `biller_rubros --exportar` desde el día
+   uno, no cuando alguien lo pida.
+4. **La barrera.** El concepto de un recibido lo escribe un tercero (es el
+   vector de inyección de este proyecto). Un rubro **propuesto** por el modelo a
+   partir de ese texto no puede convertirse en un rubro **guardado** sin que una
+   persona lo confirme. Es el mismo ciclo dry-run → confirm de la emisión, por
+   el mismo motivo.
+
+**Valor 5 · Esfuerzo 3 · Viab. 🟡** (necesita store propio, nada más).
+
+### V6.2. Lo que la misma capa desbloquea después
+
+Una vez que existe "un lugar donde el negocio guarda lo que decidió", aparecen
+tres cosas que hoy no tienen dónde vivir:
+
+| # | Qué | Por qué necesita la capa nueva |
+|---|---|---|
+| V6.2a | **Notas por cliente y por proveedor.** *"Pérez paga a 45 días aunque la factura diga 30"*, *"a este proveedor pedirle siempre remito"*. | Es conocimiento del dueño que hoy se pierde. Aparece solo cuando el asistente habla de ese cliente. |
+| V6.2b | **Alias de clientes y productos.** *"la ferretería del Cuareim" = RUT 21…*, *"portland" = "Bolsa de portland 25kg"*. | El resolvedor hoy adivina por texto cada vez. Un alias confirmado una vez no se vuelve a preguntar — y baja el riesgo de facturarle al cliente equivocado. |
+| V6.2c | **Precios habituales por cliente.** El precio que le hago a Pérez, que no es el de lista. | Hoy se re-deduce del último comprobante cada vez. Guardado, el preview puede avisar *"a este cliente le venís cobrando $640, estás por facturarle $900"*. |
+
+Los tres comparten forma: **una decisión humana, tomada una vez, que el sistema
+recuerda y aplica.** Si se construye la capa para rubros, las tres salen casi
+gratis. Si se construye una solución puntual para rubros, las tres vuelven a
+costar lo mismo.
+
+### V6.3. La superficie de tools: por qué la respuesta no es "una tool más"
+
+Hoy hay **34 tools registradas**. Cada una que se agrega tiene un costo que no
+se ve en el código: el modelo tiene que elegir entre todas en cada turno, y la
+probabilidad de que elija la correcta baja con el largo de la lista. Ese costo
+lo paga el usuario en respuestas equivocadas, no el repo en líneas.
+
+Antes de agregar la número 35 conviene mirar la lista con el criterio de si el
+dueño de la PyME distingue dos tools de nombres parecidos. Hay al menos dos
+familias que un usuario no distingue y el modelo tampoco tiene por qué:
+los rankings (clientes, productos, sucursales) y los cortes de facturación
+(resumen, comparar períodos, cohortes).
+
+**La pregunta abierta**, y hay que contestarla con datos de uso y no de opinión:
+¿conviene una tool `biller_analizar` con una dimensión como parámetro, en vez de
+seis tools que son la misma consulta con otro `group_by`? A favor: la lista se
+acorta y el modelo elige mejor. En contra: un parámetro libre es más difícil de
+validar que seis contratos explícitos, y los `outputSchema` distintos son lo que
+hace que las respuestas sean verificables.
+
+No se decide acá. Se decide mirando `biller_metricas`: **cuáles se llaman de
+verdad, y cuáles el modelo confunde.** Es el mismo criterio de V5.3 — antes de
+rediseñar, medir.
+
+### V6.4. Lo que NO hay que construir, aunque se pueda
+
+El pedido del dueño fue explícito: *"muy intuitivo, muy fácil de usar, simple,
+que no tenga funcionalidades complejas"*. Escrito acá para que la próxima
+iteración lo tenga a mano:
+
+- **Un editor de rubros por WhatsApp.** Clasificar 200 compras por chat es una
+  tortura. Por WhatsApp va la PREGUNTA de una sola cosa ("¿lo de este proveedor
+  es Mercadería?"); el trabajo en volumen es de otra pantalla.
+- **Un catálogo de rubros configurable desde el minuto uno.** Empezar cerrado.
+  Se abre cuando alguien pida un rubro que no está, no antes.
+- **Presupuestos por rubro.** Es la continuación obvia y es una trampa: obliga a
+  cargar números que nadie tiene, y una PyME que no clasifica sus compras tampoco
+  presupuesta.
+- **Reglas automáticas por palabra clave del concepto.** *"si dice harina →
+  Mercadería"* parece más inteligente que la regla por proveedor y es peor: el
+  concepto lo escribe un tercero, cambia entre facturas, y es el vector de
+  inyección conocido de este proyecto. La regla se ancla al RUT, que es un hecho
+  verificable ante DGI.

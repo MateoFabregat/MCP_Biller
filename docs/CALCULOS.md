@@ -419,6 +419,50 @@ moneda, la forma de pago y la cantidad: un default que el usuario no ve no es un
 default, es una suposición nuestra impresa en un documento fiscal. El mensaje
 exacto está en [`FLUJO_WHATSAPP.md`](FLUJO_WHATSAPP.md) §3.0.3.
 
+**El preview tiene que ENTRAR ENTERO, y eso no era gratis.** El cuerpo de un
+mensaje interactivo de WhatsApp admite 1024 caracteres, y el resumen se armaba
+contra un techo fijo de 900 "con margen". El margen era falso: quien arma la
+confirmación le agrega adelante el tipo de comprobante y la razón social —que
+DGI admite hasta 150 caracteres— y atrás la línea de responsabilidad y el
+"¿Lo emito?". Con un nombre largo el cuerpo pasaba los 1024 y WhatsApp cortaba
+**por el final**, que es donde están la pregunta y los avisos.
+
+Ahora el presupuesto se calcula: `overheadConfirmacionEmision()` mide el
+envoltorio real y `formatearTotales` recibe lo que queda (`max_chars`). Y hay un
+orden de prioridad explícito para cuando igual no entra, porque algo tiene que
+caerse:
+
+1. **Nunca se caen** el TOTAL, los supuestos ni el "¿Lo emito?". Tampoco se
+   corta nunca un aviso a mitad de palabra: un elemento entra ENTERO o no entra.
+2. **Se recorta primero el detalle de ítems**, pero nunca a cero: queda al
+   menos la primera línea y, si hay ítems ocultos, la línea que los declara:
+   *"… 3 ítems más que no entran en el mensaje (el TOTAL sí los incluye)"*. Un
+   preview que muestra 8 de 20 líneas sin decirlo hace pensar que el
+   comprobante tiene 8, y uno que no muestra ninguna no es un preview.
+3. **El bloque crítico** (receptor obligatorio y los precios con dos lecturas
+   posibles) se recorta último y por aviso completo, nunca por carácter: si
+   caben todos, van todos; si no caben todos, se muestran los que entran y se
+   cierra con *"… y N aviso(s) crítico(s) más"*. La lista en sí nunca
+   desaparece del todo mientras tenga al menos un aviso que declarar.
+4. **Al final**, los avisos informativos, también con su conteo.
+
+El aviso de un precio ambiguo subió al bloque crítico por esto mismo: es el
+único donde el número que se está por aprobar puede estar mal **por cien veces**,
+y estaba en la lista que se recorta cuando el mensaje queda justo — o sea, se
+perdía exactamente cuando más falta hacía. La primera versión de ese cambio
+resolvió eso pero abrió dos bugs nuevos: el detalle de ítems podía quedar en
+CERO líneas (el bloque crítico desplazaba al detalle entero) y el recorte
+cortaba el texto por carácter, partiendo avisos a mitad de palabra. Los dos
+puntos de arriba —reservar al menos una línea y recortar por aviso completo—
+son la corrección de eso, no una regla nueva.
+
+**La línea de responsabilidad.** El mensaje cierra con *"Revisá los datos: un CFE
+emitido no se edita, se corrige con otro documento."* antes de la pregunta. No es
+letra chica legal: es información operativa que cambia cómo se lee lo de arriba,
+y va en la parte del mensaje que nunca se recorta. Quien toca ✅ Emitir es quien
+responde por lo que dice el documento, y el mensaje donde se toca es el único
+lugar donde eso sirve.
+
 ### 11.2. La regla de las 5.000 UI 🟡
 
 ```

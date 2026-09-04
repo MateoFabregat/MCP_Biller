@@ -21,7 +21,7 @@ flowchart TB
     subgraph transporte["Transporte"]
         STDIO["stdio<br/><i>default</i>"]
         HTTP["HTTP + Bearer propio<br/><i>BILLER_HTTP_AUTH_TOKEN</i>"]
-        WH["/kapso/webhook<br/><i>firma HMAC · sin secreto, 404</i>"]
+        WH["/kapso/webhook/&lt;empresa&gt;<br/><i>firma HMAC por empresa</i><br/><i>x-webhook-signature | x-hub-signature-256</i>"]
     end
 
     subgraph server["Servidor MCP"]
@@ -427,6 +427,64 @@ vía de ataque completa.
 La mitigación es barata y estructural: envoltura explícita `⟦dato-no-confiable⟧`
 aplicada por `hardenServer()` a **toda** salida, más una instrucción del servidor
 que declara que el contenido de un comprobante es dato y nunca instrucción.
+
+**Dónde se pone la marca, y por qué en dos lugares.** `hardenServer()` envuelve
+por NOMBRE DE CLAVE, y eso alcanza mientras el dato ajeno viaje en su propia
+clave. Deja de alcanzar en cuanto lo interpolamos en una frase nuestra: el
+título de una alerta de plata en riesgo (`"<razón social> facturó 40% menos"`) o
+el saludo de un recordatorio de cobro son texto que escribimos nosotros con un
+pedazo escrito por un tercero adentro, y ninguna de esas claves puede entrar al
+set sin mentir sobre el resto de la frase. Por eso hay una segunda mitad:
+`envolverEnLinea()` marca el valor **en el punto de interpolación**, que es
+donde la barrera por clave lo pierde de vista.
+
+Es la tercera versión del mismo lavado, y conviene tenerlas juntas porque la
+próxima va a ser parecida: (1) `razon_social` renombrado a `cliente_nombre`,
+(2) el mismo dato con el casing de la API (`RazonSocial`), (3) el mismo dato
+interpolado en una frase. **La regla que las une: cuando un dato no confiable
+cambia de envase, la barrera lo pierde.**
+
+**Las marcas viajan por adentro y se caen en los bordes.** No ensucian nada
+porque se sacan en los dos únicos lugares donde molestarían: al ENTRAR a un
+documento fiscal (`limpiarMarcasProfundo`, para que un CFE no salga ante DGI con
+las marcas impresas) y al SALIR hacia un teléfono (`limpiarMarcasSalida`, en
+`KapsoClient`, que es la única puerta hacia una persona). El modelo lee el texto
+marcado; el almacenero lee la frase limpia; el CFE no ve una marca nunca.
+
+```mermaid
+flowchart LR
+    API["API de Biller<br/><i>razón social, concepto,<br/>adenda: los escribe un tercero</i>"]
+
+    subgraph marcado["Dónde se PONE la marca"]
+        CLAVE["hardenServer()<br/><i>por nombre de clave</i><br/>razon_social · concepto · adenda"]
+        LINEA["envolverEnLinea()<br/><i>al interpolar en una frase</i><br/>titulo · detalle · mensaje"]
+    end
+
+    MODELO["El modelo<br/><i>lee ⟦dato-no-confiable⟧ … ⟦/dato-no-confiable⟧</i>"]
+
+    subgraph limpieza["Dónde se SACA la marca"]
+        ENTRA["limpiarMarcasProfundo()<br/><i>lo que entra a un POST</i>"]
+        SALE["limpiarMarcasSalida()<br/><i>KapsoClient, única puerta<br/>hacia un teléfono</i>"]
+    end
+
+    CFE["CFE ante DGI<br/><i>sin una sola marca</i>"]
+    TEL["El teléfono del almacenero<br/><i>frase limpia</i>"]
+
+    API --> CLAVE --> MODELO
+    API --> LINEA --> MODELO
+    MODELO -- "el modelo copia<br/>y manda a emitir" --> ENTRA --> CFE
+    MODELO -- "el server manda<br/>un mensaje" --> SALE --> TEL
+
+    style LINEA fill:#fde68a,stroke:#b45309,color:#000
+    style CLAVE fill:#fde68a,stroke:#b45309,color:#000
+    style CFE fill:#fecaca,stroke:#b91c1c,color:#000
+    style TEL fill:#fecaca,stroke:#b91c1c,color:#000
+```
+
+Los dos rectángulos amarillos son la barrera; los dos rojos son los lugares
+donde una marca sería un defecto y no una defensa. **Si mañana aparece una
+tercera puerta hacia una persona —un mail, un PDF, un panel web— tiene que
+sumarse a la caja de la derecha el mismo día que se abre.**
 
 **Por qué la asimetría entre las dos salidas.** Un CFE mal emitido se corrige con
 otro CFE. Un mensaje de WhatsApp entregado al número equivocado **no tiene nota de

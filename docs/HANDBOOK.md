@@ -349,6 +349,12 @@ El `auth_token` es a la vez la credencial **y** el selector de empresa. No hay
 header de tenant a propósito: con un token compartido, cualquiera cambiaría de
 empresa cambiando un string.
 
+El `id` de cada tenant tiene que ser **minúsculas**, dígitos o guion, y de
+hasta 48 caracteres. No es solo prolijidad: es un componente de ruta
+(`BILLER_DATA_DIR` deriva `<data_dir>/<id>/…`) y macOS, Windows y Docker
+Desktop montan el filesystem case-insensitive por default, así que
+`Panaderia` y `panaderia` serían el mismo directorio.
+
 ⚠️ **El overlay NO es herencia pura, y ese es el punto.** Lo que el tenant no
 declara no lo hereda: lo sensible se **borra** del entorno base
 (`VARIABLES_QUE_NO_SE_HEREDAN` — las cuatro `KAPSO_*`,

@@ -311,6 +311,128 @@ menú y se contesta igual.
 
 ---
 
+## 2.6. El mapa completo del flujo, y dónde están los callejones
+
+> Levantado el 03/09/2026 recorriendo el código y **reproduciendo cada camino**,
+> no leyendo la documentación. Los estados en rojo son callejones; los amarillos
+> son preguntas que rechazan su propia respuesta.
+>
+> **Cuatro de los que muestra el diagrama ya están cerrados** (04/09/2026), y se
+> dejan dibujados porque el mapa vale como registro de lo que hubo que arreglar:
+>
+> | Era | Ahora |
+> |---|---|
+> | "pará" / "cancelá" escritos no borraban el borrador | Cierran la factura y lo dicen. `"pará, eran 3 no 2"` sigue siendo una corrección y no borra nada |
+> | "menú" con una factura a medio cargar no lo mencionaba | El menú viene con una línea que avisa y explica cómo cerrarla |
+> | El precio escrito no se leía | Un número solo en el paso del precio ES el precio, con su marca de ambigüedad |
+> | La dirección se leía como una venta y abría una línea fantasma | Se guarda dirección y ciudad; sin coma, se repregunta solo la ciudad |
+>
+> **Siguen abiertos**: los submenús de la emisión sin botón de salida, el cambio
+> de fecha sin camino, y la confirmación del cobro sin botón atado al importe.
+> Están escritos como issues 19, 24 y el paso 7 del plan de la ola C.
+
+```mermaid
+flowchart TD
+    classDef callejon fill:#fde2e2,stroke:#c0392b,stroke-width:2px
+    classDef rechaza fill:#fff3cd,stroke:#b7791f,stroke-width:2px
+    classDef agente fill:#e7f0fd,stroke:#2b6cb0
+
+    U([Usuario escribe o toca]) --> R{enrutador}
+
+    R -->|saludo / desconocido| MENU[Lista de 10 filas]
+    R -->|cortesía| CORT[Respuesta corta]
+    R -->|ambiguo| DES[2-3 botones]
+    R -->|id, número o sinónimo| AG[El agente llama la tool]:::agente
+    R -->|hay borrador vivo y nada matcheó| EG
+
+    MENU -->|Emitir| EG[Emisión guiada]
+    MENU -->|Lo de siempre| REP[Repetir la última] --> PREV
+    MENU -->|Registrar un cobro| COBRO["Confirmación por TEXTO,<br/>sin botón atado al importe"]:::rechaza
+    MENU -->|Anular| AN1[Revisar] --> AN2[Anular ahora]
+
+    subgraph EMISION[Emisión guiada]
+        EG --> REC["¿A quién?<br/>Empresa · Consumidor · No sé"]
+        REC -->|no sé| DESE[Desempate] -->|escribe 'no sé' otra vez| DESE
+        REC -->|empresa| CLI["¿Cuál es el RUT?<br/>...o decime el nombre y lo busco"]:::rechaza
+        CLI -->|escribe un nombre| CLI
+        CLI --> DIR["Dirección del cliente nuevo"]:::rechaza
+        DIR -->|escribe la dirección| DIR
+        DIR --> CON["¿Qué le vendiste?"]:::rechaza
+        CON -->|escribe el concepto| CON
+        CON --> PRE["¿A qué precio? Solo el número."]:::rechaza
+        PRE -->|escribe el número| PRE
+        PRE --> IVA["¿Ya incluye IVA?<br/>Sí · Aparte · Otro"]
+        IVA --> LISTO([Listo])
+    end
+
+    LISTO --> PREV["PREVIEW<br/>Emitir · Otro ítem · Cancelar"]
+    PREV -->|Emitir| CFE[CFE ante DGI] --> PDF[Ofrece el PDF]
+    PREV -->|Cancelar| CANC[Borrador borrado]
+
+    Z1["'pará' / 'cancelá' / 'menú' escritos<br/>NO borran el borrador: sigue vivo 24 h<br/>y el flujo vuelve a preguntar el precio"]:::callejon
+    Z2["Ningún submenú de la emisión<br/>tiene botón de salida"]:::callejon
+    Z3["'quiero cambiar la fecha'<br/>no tiene camino"]:::callejon
+    MENU -.-> Z1
+    REC -.-> Z2
+    EMISION -.-> Z3
+```
+
+### Los números del menú, hoy
+
+| Dato | Valor |
+|---|---|
+| Filas del menú | **10** con escritura habilitada, 7 en modo consulta |
+| Secciones | 4: Facturar · Plata · Números · Otros |
+| Intenciones totales / ocultas | 26 / 16 |
+| **Submenús dentro del menú** | **cero** |
+| Submenús dentro de la emisión | 2, más la lista de clientes frecuentes |
+| Techo de WhatsApp | 10 filas sumando todas las secciones |
+
+**El menú ya usa las diez filas.** No hay lugar para crecer sin un segundo
+nivel, y el segundo nivel no existe: la "segunda capa" de hoy es una fila que
+devuelve el catálogo **en texto**, o sea un submenú que hay que leer y después
+escribir.
+
+### El árbol propuesto: de pie y sentado
+
+El criterio que ya está escrito en el proyecto —facturar primero, y el orden no
+se decide por frecuencia de consulta— da más de lo que se le pidió. Separa dos
+niveles solo:
+
+- **Nivel 1: lo que se hace de pie, con el cliente enfrente.** Emitir, lo de
+  siempre, quién me debe, registrar un cobro, ver un comprobante, el resumen del
+  día, cómo viene el mes, y "más opciones".
+- **Nivel 2: lo que se hace sentado.** Anular, deshacer un cobro, reclamar una
+  deuda, dar de alta un cliente, cargar un producto, registrar un pago, las
+  compras, lo que me facturaron, qué vendo más, y el catálogo completo.
+
+```mermaid
+flowchart LR
+    HOLA([hola]) --> L1
+    subgraph L1["Nivel 1 — de pie (8 filas)"]
+        F1[Emitir un comprobante]
+        F2[Lo de siempre]
+        F3[¿Quién me debe?]
+        F4[Registrar un cobro]
+        F5["Ver un comprobante<br/>(con botón 📎 Mandar PDF)"]
+        F6[Resumen del día]
+        F7[¿Cómo viene el mes?]
+        F8[Más opciones…]
+    end
+    F8 --> L2
+    subgraph L2["Nivel 2 — sentado (10 filas)"]
+        M1[Anular · Deshacer un cobro · Reclamar una deuda]
+        M2[Alta de cliente · Cargar producto · Registrar pago]
+        M3[Mis compras · Lo que me facturaron · Qué vendo más]
+        M4[¿Qué más podés hacer?]
+    end
+```
+
+Dos filas de hoy no deberían existir por separado: **"Mandar un comprobante"** es
+la misma búsqueda que "Ver un comprobante" y el PDF es un botón sobre el
+resultado; y **"Cosas para atender"** no es una fila, es contenido del resumen
+del día, que ya es proactivo.
+
 ## 3. Emitir una factura desde el teléfono
 
 Este es el flujo que hace la diferencia, porque el mecanismo de confirmación del
@@ -560,13 +682,15 @@ TOTAL                    $13.000
 
 Hoy 26/08/2026 · Contado · precios con IVA incluido
 
+Revisá los datos: un CFE emitido no se edita, se corrige con otro documento.
+
 ¿Lo emito?
 
 Ambiente de prueba (no va a DGI real).
    [ ✅ Emitir ]  [ ➕ Otro ítem ]  [ ✖️ Cancelar ]
 ```
 
-Cinco cosas de ese mensaje son decisiones, no formato:
+Seis cosas de ese mensaje son decisiones, no formato:
 
 1. **A quién, arriba de todo.** El error más caro de una emisión no es el total:
    es el cliente. Antes el nombre iba después de los números, donde se lee
@@ -591,12 +715,29 @@ Cinco cosas de ese mensaje son decisiones, no formato:
    desde el **mismo payload que se hashea** en el `confirmation_token`, no desde
    una descripción aparte: no hay forma de que el mensaje diga "contado" y se
    emita a crédito.
+6. **La línea de responsabilidad, antes de la pregunta.** *"Revisá los datos: un
+   CFE emitido no se edita, se corrige con otro documento."* La decisión es de
+   quien factura, y para que eso sea real la persona tiene que poder ver todo lo
+   que está aprobando **y saber qué significa aprobarlo**. No es una advertencia
+   legal metida por las dudas: es lo que cambia el minuto que uno le dedica a
+   mirar lo de arriba.
 
-Todo eso entra en los 1024 caracteres del cuerpo de un interactivo: los
-conceptos largos se recortan a 24 caracteres y a partir de la línea 9 se resume
-*"… y N ítems más"*. Si el mensaje se truncara, lo que se pierde es el final —o
-sea el TOTAL y los supuestos—, así que hay un test con veinte líneas que lo
-verifica.
+Todo eso entra en los 1024 caracteres del cuerpo de un interactivo, y entrar no
+era gratis. Los conceptos largos se recortan a 24 caracteres y a partir de la
+línea 9 se resume. **El presupuesto se calcula, no se estima**: el resumen se
+armaba contra un techo fijo de 900 que no contemplaba una razón social de 150
+caracteres —el máximo de DGI— adelante, así que con un nombre largo el cuerpo
+pasaba los 1024 y WhatsApp cortaba por el final: se perdían el "¿Lo emito?" y el
+aviso del precio ambiguo. Hoy `overheadConfirmacionEmision()` mide el envoltorio
+real y el resumen recibe lo que queda.
+
+El orden de prioridad, cuando aun así no entra, es explícito: **nunca** se caen
+el TOTAL, los supuestos, el bloque crítico ni la pregunta; se caen primero los
+renglones del detalle, y el mensaje declara cuántos —*"… 3 ítems más que no
+entran en el mensaje (el TOTAL sí los incluye)"*—, porque un preview que muestra
+8 de 20 líneas sin decirlo hace pensar que el comprobante tiene 8. Hay tests con
+veinte líneas y con el nombre más largo posible que lo verifican
+(`tests/regresionesAuditoria.test.ts`).
 
 **El tercer botón reemplaza dos pasos enteros del flujo.** Agregar una segunda
 línea costaba una pregunta a *todas* las emisiones, incluidas las de una sola

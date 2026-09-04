@@ -141,6 +141,20 @@ factura del día, son idénticos al primero.
 | `documento`, `media`, `reporte_diario`, `confirmacion_*`, `texto`, `interactivo` | 15 min (más el tramo anterior) | Un reintento por respuesta perdida ocurre en segundos; pasado eso, un mensaje idéntico es un pedido nuevo. |
 | `recordatorio` | el día uruguayo | Dos mensajes de cobranza el mismo día empeoran la cobranza. El reenvío deliberado viaja como otra operación. |
 
+**Qué identifica al envío dentro de la ventana.** En las de 15 minutos, el
+TEXTO: un reintento es el mismo mensaje, y un mensaje corregido tiene que poder
+salir. En la del día, NO: la clave se arma con el destinatario, la operación y
+el `sujeto` (el RUT del deudor), y el texto queda afuera.
+
+Esto era un agujero con forma de promesa cumplida. `biller_recordatorio_cobro`
+documenta que no repite el reclamo al mismo cliente el mismo día, pero la clave
+hasheaba el mensaje: alcanzaba una `nota` distinta, otra firma de empresa o que
+el saldo se moviera un peso para estrenar clave y mandar el segundo reclamo —
+justo el caso que el módulo llama "quema una relación comercial". El payload se
+descarta SIEMPRE en esta ventana, no solo cuando quien llama se acuerda de pasar
+`sujeto`: una garantía que depende de que el próximo caller no se olvide es una
+convención, y esa convención ya falló una vez acá.
+
 Una salida que no sale por la reserva se loguea como
 `kapso.salida.bloqueada_por_reserva`, con la operación y el motivo. Si ese
 evento aparece seguido para operaciones conversacionales, la ventana está mal
@@ -414,3 +428,126 @@ reporta en `biller_health_check` con el número enmascarado.
 4. **Templates de WhatsApp** para el digest proactivo real (§4). Requiere cuenta
    de producción de Kapso, que todavía no hay — el sandbox alcanza para validar
    el flujo completo dentro de la ventana de 24 h.
+
+
+---
+
+## 7. Kapso como plataforma: planes, límites y alta multi-empresa
+
+> Investigado el **03/09/2026** contra `kapso.com/pricing` y `docs.kapso.ai`.
+> Los precios de una plataforma cambian; lo que no cambia tan rápido es la
+> FORMA de los planes, que es lo que decide la arquitectura. Antes de
+> comprometer un plan, verificá el número.
+
+### 7.1. Los cuatro planes, y cuál nos sirve
+
+| Plan | Precio | Mensajes/mes | Números conectados | Para qué alcanza |
+|---|---|---|---|---|
+| Free | US$ 0 | 2.000 | 1 + sandbox | Probar el flujo entero. Es donde estamos. |
+| Pro | US$ 25 | 100.000 (+US$ 0,002 c/u) | 3 (+US$ 10 c/u) | Las primeras empresas reales. |
+| Platform | US$ 299 | 1.000.000 (+US$ 0,001 c/u) | **50** (+US$ 5 c/u) | El modelo "una empresa, un número". |
+| Enterprise | a medida | a medida | a medida | Volumen y soporte dedicado. |
+
+Los cuatro incluyen **agentes y workflows ilimitados** y llamadas ilimitadas a
+la API. Lo que se paga es el volumen de mensajes, los números conectados y el
+storage de media. El uso de IA se factura sin recargo de Kapso, con el costo de
+procesamiento de pago encima.
+
+**La línea que decide la arquitectura es la de números conectados.** Si cada
+empresa de Biller tiene su propio número de WhatsApp —y tiene que tenerlo: el
+número ES la identidad comercial— entonces el plan no se elige por mensajes sino
+por cuántas empresas se atienden. Tres empresas entran en Pro; a partir de la
+cuarta, la cuenta es US$ 10 por empresa por mes hasta que conviene Platform (el
+cruce está alrededor de la empresa 30).
+
+### 7.2. El cobro de Meta, y la fecha que hay que anotar
+
+Kapso cobra el acceso a la plataforma. **Meta cobra aparte**, por mensaje de
+plantilla entregado, con tarifa por país y por categoría (marketing, utility,
+authentication).
+
+> ⚠️ **1 de octubre de 2026.** Hasta esa fecha, los mensajes libres dentro de la
+> ventana de 24 h de atención al cliente son gratis. Después pasan a cobrarse a
+> tarifa de utility.
+
+Esto tiene una consecuencia directa para nosotros y conviene decidirla antes,
+no después: **el inbound casi no se ve afectado** (el dueño escribe primero y la
+respuesta cae dentro de la ventana), pero **el outbound proactivo sí**. El
+digest diario de `biller_reporte_diario` y los recordatorios de cobro salen
+fuera de la ventana, así que necesitan plantilla y cuestan por mensaje. La
+decisión de producto que se desprende: el digest tiene que ser **uno por día y
+accionable**, no varios. Ya está diseñado así por otro motivo (un aviso que
+llega todos los días se deja de leer); ahora además tiene un costo.
+
+### 7.3. La API de plataforma: dar de alta una empresa sin tocar el server
+
+Es la pieza que faltaba para el plug-and-play del lado de WhatsApp, y es la
+razón por la que este documento existe en esta versión. Kapso expone una API
+**multi-empresa** donde cada empresa es un `customer` con sus propios números:
+
+```
+POST https://api.kapso.ai/platform/v1/customers
+     { "name": "Panadería Rivera", "external_customer_id": "<id del registro>" }
+  -> { "id": "customer-abc123" }
+
+POST https://api.kapso.ai/platform/v1/customers/{customer_id}/setup_links
+     { "meta_billing_mode": "partner_managed" }
+  -> { "url": "https://..." }
+
+POST https://api.kapso.ai/platform/v1/whatsapp/phone_numbers/{phone_number_id}/webhooks
+     -> registra NUESTRA URL para ESE número, con el secreto que le pasemos
+```
+
+El `setup_link` se le manda a la empresa: entra con su Facebook, conecta su
+WhatsApp Business y en unos minutos queda un `phone_number_id` a su nombre.
+**Nadie del lado nuestro toca las credenciales de Meta de la empresa**, que es
+exactamente la propiedad que hace que esto escale.
+
+El encaje con lo que ya existe es directo, y conviene verlo escrito:
+
+| Lo que Kapso da | Dónde vive del lado nuestro |
+|---|---|
+| `customer_id` | metadato del registro de tenants |
+| `phone_number_id` | `KAPSO_PHONE_NUMBER_ID` de esa empresa — y es el selector del webhook (`value.metadata`) |
+| secreto del webhook | `KAPSO_WEBHOOK_SECRET` de esa empresa, uno por empresa, nunca compartido |
+| URL del webhook | `/kapso/webhook/<id-de-empresa>` — la ruta que ya existe |
+
+Ver [`PLAN_PLUG_AND_PLAY.md`](PLAN_PLUG_AND_PLAY.md) §Fase 2.5 para el plan de
+automatizarlo.
+
+### 7.4. La firma llega por DOS headers, y leer uno solo dejaba el chat mudo
+
+**Verificado el 03/09/2026** en `docs.kapso.ai/docs/platform/webhooks/security`:
+un webhook registrado por la API de plataforma se firma con
+
+```
+X-Webhook-Signature: <hmac-sha256 en hexadecimal, SIN prefijo "sha256=">
+```
+
+calculado sobre los **bytes crudos** del cuerpo. El header de Meta
+(`x-hub-signature-256`, con prefijo) es el que llega por el otro camino.
+
+El server leía **solo el de Meta**. Un evento firmado por Kapso llegaba sin
+firma reconocible, se respondía 401 y **el chat quedaba mudo** — el peor modo de
+falla de este proyecto, y de los más difíciles de diagnosticar: el log dice
+`kapso.webhook.firma_invalida` y todo lo demás parece sano.
+
+Ahora se miran los dos (`HEADERS_FIRMA` en `src/kapso/webhook.ts`) y alcanza con
+que **alguno** valide. No afloja nada: los dos son el mismo HMAC, sobre el mismo
+cuerpo crudo, con el mismo secreto; producir uno válido sigue exigiendo conocer
+el secreto. Lo único que cambia es de qué renglón se lee el hexadecimal. Cubierto
+por tests en `tests/inyeccionInterpolada.test.ts`.
+
+### 7.5. Lo que Kapso ya trae y NO hay que construir
+
+Anotado porque la tentación de reimplementar es real:
+
+- **Workflows** con nodos de agente, condiciones, esperas, funciones y
+  herramientas MCP. Nuestro server es una de esas herramientas.
+- **Handoff a humano** conservando historial, estado y asignación. No hace falta
+  inventar un "modo humano" nuestro.
+- **Inbox, logs de mensajes, plantillas y WhatsApp Flows.**
+- **CLI, SDKs y un MCP propio** para operar el proyecto de Kapso desde un agente.
+- **Transcripción automática de audio**, incluida desde el plan Free. Es
+  relevante para el mostrador: el almacenero dicta en vez de escribir, y el
+  texto transcripto entra por el mismo `interpretarMensaje` de siempre.
