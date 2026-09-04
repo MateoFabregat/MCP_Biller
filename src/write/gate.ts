@@ -10,6 +10,8 @@
 // =============================================================================
 
 import type { BillerConfig } from "../config.js";
+import { resolverUmbralReceptor } from "../biller/requisitos.js";
+import { hoyIsoUy } from "../services/fechaUy.js";
 import { BillerProductionBlockedError, BillerWriteDisabledError } from "../utils/errors.js";
 
 export interface GateRequest {
@@ -74,7 +76,17 @@ export function preparacionDeConfig(config: BillerConfig): PreparacionProduccion
     auditPersistente: Boolean(config.auditLogPath),
     idempotenciaFiscalPersistente: Boolean(config.idempotencyLogPath),
     tieneTopeDeMonto: Object.keys(config.maxMontos).length > 0,
-    valorUiVigente: config.valorUi !== undefined && config.valorUiFecha !== undefined,
+    // VIGENTE, no "presente". Un valor vencido —o con un tipeo que lo deja
+    // fuera de rango— lo ignora `resolverUmbralReceptor` y cada emisión real
+    // cae al valor de referencia. Mirando solo presencia, el gate daba por
+    // lista una producción donde el umbral de las 5.000 UI se calculaba con
+    // otro número que el configurado, en silencio. Es el mismo chequeo que hace
+    // `biller_health_check`: uno solo, para que no puedan discrepar.
+    valorUiVigente: resolverUmbralReceptor({
+      valor_ui: config.valorUi,
+      valor_ui_fecha: config.valorUiFecha,
+      hoy: hoyIsoUy(),
+    }).valor_ui_configurado,
     replayWebhookPersistente: Boolean(config.webhookReplayLogPath),
     kapso:
       config.kapso === undefined

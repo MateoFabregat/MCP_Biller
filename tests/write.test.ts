@@ -1018,3 +1018,32 @@ describe("el confirmation_token es de la conversación que lo pidió", () => {
     expect(fx.postMock).not.toHaveBeenCalled();
   });
 });
+
+describe("un valor de UI vencido no alcanza para producción", () => {
+  it("el gate lo trata igual que el health: vencido es como si faltara", async () => {
+    const { evaluateWriteGate } = await import("../src/write/gate.js");
+    const { makeConfig } = await import("./fixtures.js");
+    const base = {
+      apiBaseUrl: "https://biller.uy",
+      writeEnabled: true,
+      allowProductionWrites: true,
+      capabilityMode: "write_enabled" as const,
+      auditLogPath: "/tmp/a.jsonl",
+      idempotencyLogPath: "/tmp/i.jsonl",
+      maxMontos: { UYU: 100_000 },
+      valorUiFecha: "2026-01-01", // ocho meses viejo: `resolverUmbralReceptor` lo ignora
+      valorUi: 6.4237,
+    };
+    const vencido = evaluateWriteGate(makeConfig(base), { allowProduction: true });
+    expect(vencido.allowed).toBe(false);
+    expect(vencido.reason).toContain("BILLER_VALOR_UI");
+
+    // Con una fecha de esta semana, el mismo valor sí sirve.
+    const hoy = new Date().toISOString().slice(0, 10); // fecha-uy:allow es una fecha de test, no un día civil de negocio
+    const vigente = evaluateWriteGate(
+      makeConfig({ ...base, valorUiFecha: hoy }),
+      { allowProduction: true },
+    );
+    expect(vigente.allowed).toBe(true);
+  });
+});
