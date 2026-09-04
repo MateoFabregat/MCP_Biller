@@ -168,12 +168,17 @@ atajo tiene que ser por producto (§4.1), no por empresa.
 ### 3.8. Freelance que le factura al exterior
 > *"facturale a mi cliente de España 1.200 dólares"*
 
-**HOY NO ESTÁ CONTEMPLADO.** El flujo guiado solo produce **101 y 111**
+**RESUELTO EN PARTE (sep-2026): ahora FRENA en vez de emitir mal.** El flujo guiado solo produce **101 y 111**
 (`tipoComprobantesugerido`). Una exportación de servicios es **e-Factura de
 exportación (121)** con indicador 10, y además necesita `modalidad_venta`,
 `clausula_venta` y `via_transporte`. El flujo lo llevaría a un 111 con IVA
 22% a un cliente sin RUT uruguayo: **un comprobante mal emitido**.
-**Falta:** o se soporta (§4.4) o se detecta y se deriva con todas las letras.
+**Qué hace hoy:** `sugiereExportacion` detecta la intención —"exportación",
+"del exterior", "mi cliente de España"— y bloquea el `listo`, con un aviso que
+nombra los cuatro campos que faltan y deriva a armar el cuerpo completo. No
+descarta el borrador: si fue un falso positivo, el mensaje siguiente sin la
+palabra sigue derecho.
+**Falta todavía:** soportar la emisión de exportación de punta a punta (§4.4).
 
 ### 3.9. Almacén que quiere saber cuánto le deben
 > *"¿quién me debe?"* · *"¿cuánto me debe Pérez al 30/09?"*
@@ -225,10 +230,12 @@ porque las últimas veinte veces salió exenta.
 ### 4.3. La cuenta corriente no tiene fecha de corte — MEDIA
 *"¿cuánto me debían al 30 de junio?"* es la pregunta de todo cierre de mes.
 
-### 4.4. Exportación: no contemplada — MEDIA, pero cara cuando pasa
-Ver §3.8. Lo mínimo honesto: **detectar** que el receptor no es uruguayo y
-decir "esto es una exportación, hay que emitirla distinto", en vez de emitir un
-111 con IVA.
+### 4.4. Exportación: se frena, todavía no se emite — MEDIA
+Lo mínimo honesto ya está (§3.8): se detecta la intención y se avisa en vez de
+emitir un 111 con IVA. Lo que falta es el camino completo — preguntar
+`modalidad_venta`, `clausula_venta`, `via_transporte` y el `ncm` de cada ítem, y
+producir un 121 con indicador 10. Es un flujo distinto del de mostrador, y
+mientras no exista, frenar es la conducta correcta.
 
 ### 4.5. No se puede elegir sucursal desde el chat — MEDIA
 

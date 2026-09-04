@@ -535,3 +535,50 @@ describe("elegir un cliente conocido es un toque, no doce dígitos", () => {
     expect(r.envio).toMatchObject({ realizado: false });
   });
 });
+
+// =============================================================================
+// Exportación: este flujo no la sabe armar, y tiene que decirlo
+// =============================================================================
+
+describe("una exportación no sale como e-Factura local", () => {
+  // El flujo guiado solo produce 101 y 111. Una exportación de servicios es
+  // e-Factura de exportación (121) con indicador 10, y encima necesita
+  // modalidad_venta, clausula_venta, via_transporte y el ncm de cada ítem.
+  // Sin freno, "facturale a mi cliente de España" salía como 111 con IVA 22%:
+  // un comprobante mal emitido, que se corrige con otro comprobante.
+  const base = {
+    sesion: "59891114444",
+    clase_receptor: "empresa" as const,
+    documento: "219999830019",
+    items: [{ concepto: "desarrollo de software", cantidad: 1, precio: 1200 }],
+    montos_brutos: true,
+    indicador_facturacion: 3,
+  };
+
+  it("frena y explica cuando el texto habla de exportar", async () => {
+    for (const mensaje of [
+      "facturale a mi cliente de españa 1200 dolares",
+      "es una exportación de servicios",
+      "el cliente está en el exterior",
+    ]) {
+      const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+      const r = j(await handleEmisionGuiada({ ...base, sesion: base.sesion + mensaje.length, mensaje }, ctx));
+      expect(r.listo, mensaje).not.toBe(true);
+      expect(r.warnings.join(" "), mensaje).toMatch(/exportaci/i);
+      expect(r.como_sigue, mensaje).toMatch(/NO emitas/i);
+    }
+  });
+
+  it("una venta local no se frena por nombrar un país", async () => {
+    // El freno mira la INTENCIÓN de exportar, no cualquier palabra: "Pinturas
+    // España" es una ferretería de Montevideo.
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    const r = j(
+      await handleEmisionGuiada(
+        { ...base, sesion: "59891114445", mensaje: "facturale a Pinturas España 20 litros" },
+        ctx,
+      ),
+    );
+    expect(r.warnings.join(" ")).not.toMatch(/exportaci/i);
+  });
+});

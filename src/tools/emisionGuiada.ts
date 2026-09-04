@@ -66,6 +66,7 @@ import {
   separarDireccionCiudad,
   siguientePaso,
   sugiereDolares,
+  sugiereExportacion,
   PREFIJO_PASO,
   tipoComprobanteSugerido,
   type ClaseReceptor,
@@ -1024,6 +1025,29 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       siguiente = { ...siguiente, paso: "iva", listo: false };
     }
 
+    // EXPORTACIÓN: este flujo no la sabe armar, y no puede seguir como si nada.
+    //
+    // `tipoComprobanteSugerido` produce 101 o 111. Una exportación es un 121 con
+    // indicador 10 y cuatro campos más que acá no se preguntan nunca. Sin este
+    // freno, "facturale a mi cliente de España" terminaba en un 111 con IVA
+    // 22%: un comprobante mal emitido ante DGI, que se corrige emitiendo otro.
+    //
+    // No se descarta el borrador ni se corta la conversación: se avisa y se
+    // BLOQUEA el `listo`, que es lo que le diría al agente "andá a emitir". Si
+    // era un falso positivo, el mensaje siguiente sin la palabra sigue derecho.
+    const exportacion = a.mensaje !== undefined && sugiereExportacion(a.mensaje);
+    if (exportacion) {
+      siguiente = { ...siguiente, listo: false };
+      warnings.push(
+        "⛔ Esto parece una EXPORTACIÓN y este flujo no la sabe armar: solo produce e-Ticket (101) " +
+          "y e-Factura (111). Una exportación es e-Factura de exportación (121) con " +
+          "indicador_facturacion 10, y además exige modalidad_venta, clausula_venta, via_transporte " +
+          "y el ncm de cada ítem. Emitirla como 111 le pone IVA 22% a una venta que no lo lleva. " +
+          "Armala con biller_emitir_comprobante pasando el cuerpo completo, o consultá con tu " +
+          "contador. Si NO es una exportación, repetí el pedido sin nombrar el exterior.",
+      );
+    }
+
     // El descarte que llegó tarde: se contesta lo que pasó y se vuelve a hacer
     // la pregunta que corresponda al estado de AHORA, que puede ser otra.
     if (descarteVencido) {
@@ -1085,6 +1109,7 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
       return await responder({
         a,
         ctx,
+        exportacion,
         estado,
         siguiente,
         tipo,
@@ -1101,6 +1126,7 @@ export async function handleEmisionGuiada(args: unknown, ctx: ToolContext): Prom
     return await responder({
       a,
       ctx,
+      exportacion,
       estado,
       siguiente,
       tipo,
@@ -1184,11 +1210,14 @@ async function responder(p: {
   tipo: ReturnType<typeof tipoComprobanteSugerido> | null;
   pregunta: string;
   interactivo: Parameters<KapsoClient["enviarInteractivo"]>[1] | null;
+  /** true si el mensaje pidió una exportación: cambia el `como_sigue` entero. */
+  exportacion?: boolean;
   documentoDetectado: ReturnType<typeof clasificarDocumento> | null;
   warnings: string[];
   sesion: { store: BorradorStore; clave: string | null; recuperado: string[]; desdeRevision?: number };
 }): Promise<ToolResult> {
   const { a, ctx, estado, siguiente, tipo, pregunta, interactivo, documentoDetectado } = p;
+  const exportacion = p.exportacion === true;
   const warnings = [...p.warnings];
   const config = ctx.getConfig();
 
@@ -1356,7 +1385,11 @@ async function responder(p: {
       recuperado_del_store: recuperado,
       nota: notaSesion,
     },
-    como_sigue: siguiente.listo
+    como_sigue: exportacion
+      ? "PARÁ: esto parece una exportación y este flujo no la arma (ver 'warnings'). NO emitas nada " +
+        "todavía. Explicale al usuario, con sus palabras, que una venta al exterior lleva otro tipo " +
+        "de comprobante y otros campos, y preguntale si de verdad es una exportación."
+      : siguiente.listo
       ? "Ya está todo. Pasá 'comprobante_borrador' a biller_requisitos_comprobante para el chequeo " +
         "final (umbral de UI, campos de DGI) y después a biller_emitir_comprobante SIN confirm, con " +
         "confirmar_por_whatsapp = el número de la conversación. Eso manda los botones ✅/✖️. " +

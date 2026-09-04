@@ -516,6 +516,42 @@ export function sugiereDolares(texto: string): boolean {
   return /\bdolar(es)?\b/.test(limpio);
 }
 
+/**
+ * ¿El texto dice que esta venta va al exterior?
+ *
+ * ESTE FLUJO NO SABE ARMAR UNA EXPORTACIÓN, Y ESA ES LA RAZÓN DE ESTA FUNCIÓN.
+ * `tipoComprobanteSugerido` produce 101 o 111 y nada más. Una exportación es
+ * e-Factura de exportación (121) con indicador 10, y encima exige
+ * `modalidad_venta`, `clausula_venta`, `via_transporte` y el `ncm` de cada
+ * ítem — campos que este flujo nunca pregunta. Sin freno, "facturale a mi
+ * cliente de España" salía como un 111 con IVA 22%: un comprobante mal emitido,
+ * que se corrige emitiendo otro comprobante.
+ *
+ * Es a propósito ESTRECHA, igual que `sugiereDolares`: detecta la intención de
+ * exportar, no cualquier mención de un país. "Pinturas España" es una
+ * ferretería de Montevideo, y frenar ahí costaría una venta local trancada.
+ * Por eso pide una palabra de exportación explícita ("exportación", "exportar")
+ * o una construcción que ubique al cliente afuera ("del exterior", "en el
+ * exterior", "de españa" como pertenencia del cliente).
+ *
+ * Un falso negativo cuesta lo mismo que hoy: el usuario emite mal y lo corrige.
+ * Un falso positivo cuesta un aviso que se ignora escribiendo de nuevo sin la
+ * palabra. La asimetría manda para el lado de avisar.
+ */
+export function sugiereExportacion(texto: string): boolean {
+  const limpio = texto
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (/\bexportaci(on|ones)\b|\bexportar\b|\bexporto\b/.test(limpio)) return true;
+  if (/\b(del|en el|al) exterior\b/.test(limpio)) return true;
+  // "mi cliente de España", "el cliente está en Brasil": el país aparece como
+  // ubicación DEL CLIENTE, no como parte de su nombre.
+  return /\bcliente\b[^.]{0,20}\b(de|en|desde)\s+(españa|espana|brasil|argentina|chile|paraguay|estados unidos|eeuu|usa|mexico|colombia|peru|el exterior|afuera)\b/.test(
+    limpio,
+  );
+}
+
 // --- Leer lo que contestó el usuario ----------------------------------------
 
 export type RespuestaPaso =
