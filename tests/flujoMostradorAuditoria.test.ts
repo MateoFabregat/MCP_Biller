@@ -45,6 +45,68 @@ describe("✖️ Cancelar descarta la factura, no la deja esperando", () => {
   });
 });
 
+describe('"pará" escrito cierra la factura, no la deja esperando 24 h (issue 18)', () => {
+  it('cargado hasta el precio, "pará" descarta el borrador y el mensaje siguiente arranca de cero', async () => {
+    const sesion = "59891112233";
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+
+    // A medio cargar: falta el precio del ítem.
+    const cargado = j(
+      await handleEmisionGuiada(
+        {
+          sesion,
+          clase_receptor: "consumidor_final",
+          sin_receptor: true,
+          items: [{ concepto: "bolsas de portland", cantidad: 2 }],
+        },
+        ctx,
+      ),
+    );
+    expect(cargado.paso).toBe("precio");
+
+    const cancel = j(await handleMenuWhatsapp({ mensaje: "pará", sesion }, ctx));
+    expect(cancel.interpretacion.via).toBe("cancelacion");
+    expect(cancel.interpretacion.borrador_descartado).toBe(true);
+    expect(cancel.interpretacion.en_flujo).toBe(false);
+    expect(cancel.interpretacion.respuesta_sugerida).toBe(
+      "Listo, dejé la factura sin hacer y no emití nada. Si querés arrancar otra, tocá " +
+        '"Emitir un comprobante" o escribime "menú".',
+    );
+
+    // El mensaje siguiente ya NO cae en la emisión que estaba a medio hacer:
+    // arranca un borrador nuevo, vacío.
+    const denuevo = j(await handleEmisionGuiada({ sesion }, ctx));
+    expect(denuevo.paso).toBe("receptor");
+    expect(denuevo.estado_entendido?.items).toBeUndefined();
+  });
+
+  it('"pará, eran 3 no 2" sigue siendo una CORRECCIÓN: no borra nada', () => {
+    // La frase que motivó el diseño original: matchear por igualdad exacta en
+    // `CANCELACIONES` hace que esto NUNCA sea una cancelación, con o sin
+    // borrador vivo. Se prueba directo contra el enrutador porque no hace
+    // falta estado para eso.
+    const r = interpretarMensaje("pará, eran 3 no 2", { en_flujo: true });
+    expect(r.via).toBe("flujo_emision");
+  });
+
+  it('"menú" con borrador vivo avisa de la factura a medio cargar antes de las opciones', async () => {
+    const sesion = "59894445566";
+    const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+    await handleEmisionGuiada(
+      { sesion, clase_receptor: "consumidor_final", sin_receptor: true },
+      ctx,
+    );
+
+    const r = j(await handleMenuWhatsapp({ mensaje: "menú", sesion }, ctx));
+    expect(r.interpretacion.via).toBe("saludo");
+    expect(r.interpretacion.mostrar_menu).toBe(true);
+    expect(r.interpretacion.respuesta_sugerida).toContain("factura a medio cargar");
+    // El aviso no descarta nada.
+    const sigue = j(await handleEmisionGuiada({ sesion }, ctx));
+    expect(sigue.paso).not.toBe("receptor");
+  });
+});
+
 describe("la pregunta del IVA entiende su propia respuesta escrita", () => {
   const estado: EstadoEmision = {
     clase_receptor: "consumidor_final",
@@ -128,6 +190,119 @@ describe("el RUT escrito se lee: la pregunta no rebota su propia respuesta", () 
   it("sigue entendiendo el 'sin identificar' de siempre", () => {
     expect(interpretarRespuestaLibre("sin datos", "cliente")).toEqual({
       paso: "cliente_sin_identificar",
+    });
+  });
+});
+
+describe("la dirección del cliente nuevo se lee, y no es un pedido (issue 21)", () => {
+  it("con dirección y ciudad juntas, separa por la última coma", () => {
+    expect(interpretarRespuestaLibre("Rivera 1234, Melo", "datos_cliente_nuevo")).toEqual({
+      paso: "datos_cliente_nuevo",
+      direccion: "Rivera 1234",
+      ciudad: "Melo",
+    });
+    expect(
+      interpretarRespuestaLibre("Av. Italia 1234 apto 302, Montevideo", "datos_cliente_nuevo"),
+    ).toEqual({
+      paso: "datos_cliente_nuevo",
+      direccion: "Av. Italia 1234 apto 302",
+      ciudad: "Montevideo",
+    });
+  });
+
+  it("sin coma, repregunta solo la ciudad", () => {
+    expect(interpretarRespuestaLibre("Ruta 8 km 32", "datos_cliente_nuevo")).toEqual({
+      paso: "datos_cliente_nuevo",
+      direccion: "Ruta 8 km 32",
+      ciudad: undefined,
+    });
+  });
+
+  it("con dirección ya cargada, el mensaje entero es la ciudad (la repregunta no lleva coma)", () => {
+    // Sin el contexto, "Melo" se leería como dirección otra vez (no tiene
+    // coma) y la ciudad quedaría faltando para siempre.
+    expect(
+      interpretarRespuestaLibre("Melo", "datos_cliente_nuevo", undefined, {
+        direccionYaCargada: true,
+      }),
+    ).toEqual({ paso: "datos_cliente_nuevo", ciudad: "Melo" });
+  });
+
+  it("un mensaje vacío no fija nada", () => {
+    expect(interpretarRespuestaLibre("", "datos_cliente_nuevo")).toEqual({ paso: "ninguna" });
+  });
+
+  describe("integración: handleEmisionGuiada", () => {
+    const RUT_EMPRESA = "219999830019";
+
+    it("guarda dirección y ciudad y avanza de paso, sin abrir ninguna línea fantasma", async () => {
+      const sesion = "59896665544";
+      const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+      const store = ctx.getBorradorStore();
+      const clave = store.clave(sesion);
+
+      const cargado = j(
+        await handleEmisionGuiada(
+          {
+            sesion,
+            clase_receptor: "empresa",
+            documento: RUT_EMPRESA,
+            cliente_ya_facturado: false,
+            items: [{ concepto: "bolsas de portland", cantidad: 2, precio: 6500 }],
+          },
+          ctx,
+        ),
+      );
+      expect(cargado.paso).toBe("datos_cliente_nuevo");
+
+      const conDireccion = j(
+        await handleEmisionGuiada(
+          { sesion, mensaje: "Av. Italia 1234 apto 302, Montevideo" },
+          ctx,
+        ),
+      );
+      // NI un ítem nuevo ni un warning que mencione la plata que el extractor
+      // habría leído de "apto 302" ($302): el paso "datos_cliente_nuevo" no
+      // puede ser un pedido y el extractor no corrió.
+      expect(conDireccion.paso).not.toBe("datos_cliente_nuevo");
+      // `direccion_cliente`/`ciudad_cliente` no vuelven en `estado_entendido`
+      // (son texto libre de un tercero, igual que el concepto): se verifican
+      // contra el borrador guardado, que es donde realmente importan —de ahí
+      // sale el alta del cliente al emitir.
+      expect(store.leer(clave)?.estado.direccion_cliente).toBe("Av. Italia 1234 apto 302");
+      expect(store.leer(clave)?.estado.ciudad_cliente).toBe("Montevideo");
+      expect(conDireccion.estado_entendido?.items).toHaveLength(1);
+      const warnings: string[] = conDireccion.warnings ?? [];
+      expect(warnings.some((w) => w.includes("302"))).toBe(false);
+    });
+
+    it('"Ruta 8 km 32" repregunta solo la ciudad', async () => {
+      const sesion = "59897778899";
+      const { ctx } = makeCtx({ config: { capabilityMode: "write_enabled" } });
+      const store = ctx.getBorradorStore();
+      const clave = store.clave(sesion);
+
+      await handleEmisionGuiada(
+        {
+          sesion,
+          clase_receptor: "empresa",
+          documento: RUT_EMPRESA,
+          cliente_ya_facturado: false,
+          items: [{ concepto: "flete", cantidad: 1, precio: 500 }],
+        },
+        ctx,
+      );
+
+      const conDireccion = j(await handleEmisionGuiada({ sesion, mensaje: "Ruta 8 km 32" }, ctx));
+      expect(conDireccion.paso).toBe("datos_cliente_nuevo");
+      expect(store.leer(clave)?.estado.direccion_cliente).toBe("Ruta 8 km 32");
+      expect(store.leer(clave)?.estado.ciudad_cliente).toBeUndefined();
+
+      const conCiudad = j(await handleEmisionGuiada({ sesion, mensaje: "Melo" }, ctx));
+      expect(conCiudad.paso).not.toBe("datos_cliente_nuevo");
+      expect(store.leer(clave)?.estado.ciudad_cliente).toBe("Melo");
+      // Ningún ítem nuevo apareció de "Melo" leído como pedido.
+      expect(conCiudad.estado_entendido?.items).toHaveLength(1);
     });
   });
 });
