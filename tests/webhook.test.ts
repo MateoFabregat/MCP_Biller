@@ -17,6 +17,7 @@ import {
   firmar,
   firmaValida,
   normalizarEvento,
+  type EventoEntrante,
 } from "../src/kapso/webhook.js";
 import { crearServidorMcp } from "../src/server.js";
 import { createToolContext } from "../src/tools/register.js";
@@ -235,7 +236,7 @@ describe("decisión de ruteo", () => {
     const d = decidirWebhook(normalizarEvento(eventoTexto("hola")), opciones);
     expect(d.accion).toBe("responder");
     if (d.accion === "responder") {
-      expect(d.interpretacion.via).toBe("saludo");
+      expect(d.interpretacion?.via).toBe("saludo");
       expect(d.mostrar_menu).toBe(true);
     }
   });
@@ -307,7 +308,7 @@ describe("cancelación escrita con borrador vivo (issue 18)", () => {
     const d = decidirWebhook(normalizarEvento(eventoTexto("pará")), { ...opciones, borradores });
     expect(d.accion).toBe("responder");
     if (d.accion === "responder") {
-      expect(d.interpretacion.via).toBe("cancelacion");
+      expect(d.interpretacion?.via).toBe("cancelacion");
       expect(d.respuesta).toBe(
         "Listo, dejé la factura sin hacer y no emití nada. Si querés arrancar otra, tocá " +
           '"Emitir un comprobante" o escribime "menú".',
@@ -351,7 +352,7 @@ describe("cancelación escrita con borrador vivo (issue 18)", () => {
     const d = decidirWebhook(normalizarEvento(eventoTexto("menú")), { ...opciones, borradores });
     expect(d.accion).toBe("responder");
     if (d.accion === "responder") {
-      expect(d.interpretacion.via).toBe("saludo");
+      expect(d.interpretacion?.via).toBe("saludo");
       expect(d.mostrar_menu).toBe(true);
       expect(d.respuesta).toContain("factura a medio cargar");
     }
@@ -563,11 +564,11 @@ describe("un audio o una foto no pueden terminar en silencio", () => {
     remitentesAutorizados: [AUTORIZADO],
   };
 
-  const evento = (tipo: string) => ({
-    tipo: "no_soportado" as const,
+  const evento = (tipo: string): EventoEntrante => ({
+    tipo: "no_soportado",
     from: AUTORIZADO,
     texto: null,
-    numero_receptor: null,
+    phone_number_id: null,
     message_id: `wamid.${tipo}`,
     perfil: null,
   });
@@ -575,7 +576,7 @@ describe("un audio o una foto no pueden terminar en silencio", () => {
   it("a un remitente AUTORIZADO se le contesta que escriba", () => {
     const d = decidirWebhook(evento("audio"), opciones);
     expect(d.accion).toBe("responder");
-    expect(d.respuesta).toMatch(/escrib/i);
+    if (d.accion === "responder") expect(d.respuesta).toMatch(/escrib/i);
   });
 
   it("a un desconocido se le sigue sin contestar NADA", () => {
@@ -586,7 +587,7 @@ describe("un audio o una foto no pueden terminar en silencio", () => {
       remitentesAutorizados: ["59899000111"],
     });
     expect(d.accion).toBe("rechazar");
-    expect(d.motivo).toBe("no_autorizado");
+    if (d.accion === "rechazar") expect(d.motivo).toBe("no_autorizado");
   });
 
   it("un acuse de entrega se sigue ignorando en silencio", () => {

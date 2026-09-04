@@ -366,7 +366,7 @@ describe("estar en medio de una carga lo sabe el server, no el modelo", () => {
       borradores,
     });
     expect(d.accion).toBe("responder");
-    if (d.accion === "responder") expect(d.interpretacion.via).toBe("saludo");
+    if (d.accion === "responder") expect(d.interpretacion?.via).toBe("saludo");
   });
 });
 
